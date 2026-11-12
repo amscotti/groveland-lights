@@ -1,1 +1,189 @@
-{"milestones": [], "tasks": []}
+{
+  "milestones": [
+    {
+      "id": "M1",
+      "title": "Skeleton deployed with persistent storage",
+      "assertions": [
+        "A-101",
+        "A-102",
+        "A-103",
+        "A-104",
+        "A-105"
+      ]
+    },
+    {
+      "id": "M0",
+      "title": "Harness bootstrap",
+      "assertions": [
+        "A-000"
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "T-100",
+      "milestone": "M1",
+      "type": "acceptance",
+      "role": "test-author",
+      "title": "Write M1 acceptance specs: green guards now, red specs as inert drafts",
+      "deps": [],
+      "owns": [
+        "acceptance/**",
+        "harness/protected.sha256"
+      ],
+      "claims": [
+        "A-101",
+        "A-102",
+        "A-103",
+        "A-104",
+        "A-105",
+        "A-000"
+      ],
+      "ui": false,
+      "allow_deps": [],
+      "budget": {
+        "steps": 200,
+        "wall_min": 90
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-101",
+      "milestone": "M1",
+      "type": "feature",
+      "role": "worker",
+      "title": "Persistent store: migration runner with checksum guard + probe counter",
+      "deps": [
+        "T-100"
+      ],
+      "owns": [
+        "internal/store/**",
+        "migrations/**",
+        "go.mod",
+        "go.sum"
+      ],
+      "claims": [
+        "A-103",
+        "A-104"
+      ],
+      "ui": false,
+      "allow_deps": [
+        "modernc.org/sqlite",
+        "modernc.org/libc",
+        "modernc.org/mathutil",
+        "modernc.org/memory",
+        "modernc.org/gc/v3"
+      ],
+      "budget": {
+        "steps": 200,
+        "wall_min": 90
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-102",
+      "milestone": "M1",
+      "type": "feature",
+      "role": "worker",
+      "title": "Double-submit CSRF token helpers and middleware-level logging guards",
+      "deps": [
+        "T-100"
+      ],
+      "owns": [
+        "internal/web/csrf*.go",
+        "internal/web/middleware*.go"
+      ],
+      "claims": [
+        "A-102",
+        "A-105"
+      ],
+      "ui": false,
+      "allow_deps": [],
+      "budget": {
+        "steps": 200,
+        "wall_min": 60
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-103",
+      "milestone": "M1",
+      "type": "feature",
+      "role": "worker",
+      "title": "Boot on SQLite with migration guard; serve CSRF-protected /probe; home-page probe section",
+      "deps": [
+        "T-100",
+        "T-101",
+        "T-102"
+      ],
+      "owns": [
+        "cmd/server/**",
+        "internal/web/probe*.go",
+        "web/templates/**"
+      ],
+      "claims": [
+        "A-103"
+      ],
+      "ui": false,
+      "allow_deps": [],
+      "budget": {
+        "steps": 200,
+        "wall_min": 90
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-104",
+      "milestone": "M1",
+      "type": "feature",
+      "role": "worker",
+      "title": "Runtime image + fly.toml env + deployed smoke script with persistence evidence",
+      "deps": [
+        "T-100"
+      ],
+      "owns": [
+        "Dockerfile",
+        "fly.toml",
+        ".dockerignore",
+        "scripts/smoke.sh",
+        "scripts/docker-entrypoint.sh"
+      ],
+      "claims": [],
+      "ui": false,
+      "allow_deps": [],
+      "budget": {
+        "steps": 200,
+        "wall_min": 60
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-105",
+      "milestone": "M1",
+      "type": "acceptance",
+      "role": "test-author",
+      "title": "Activate the drafted A-103/A-104 specs verbatim; prove M1's contract",
+      "deps": [
+        "T-101",
+        "T-102",
+        "T-103",
+        "T-104"
+      ],
+      "owns": [
+        "acceptance/**",
+        "harness/protected.sha256"
+      ],
+      "claims": [
+        "A-103",
+        "A-104"
+      ],
+      "ui": false,
+      "allow_deps": [],
+      "budget": {
+        "steps": 200,
+        "wall_min": 90
+      },
+      "status": "ready"
+    }
+  ]
+}

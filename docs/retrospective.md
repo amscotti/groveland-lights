@@ -37,6 +37,8 @@ GitHub Actions billing).
 | 12:15 | Planner agent (GLM 5.3) dispatched for Phase 1 via `make plan PHASE=1` |
 | 12:15 | Docker daemon recovered (Lima VM `berth-docker` root-fs went read-only; `limactl stop/start` fixed it). Image builds: **29.25 MB** (target ≤40), boots, healthz green in-container |
 | 12:16 | Planner #1 killed in error by the operator: it showed 0% CPU but its transcript proved active work (55k+ cached tokens, tool calls). Lesson: agent runs are network-bound; CPU is not liveness. Planner relaunched |
+| 12:19 | DoD row 6 deep-dive found a REAL upstream bug: **gitleaks 8.30.1's `[extend] useDefault=true` detects nothing** (extended configs silently lose all rules — verified with canonical AKIA/ghp probes; no-config scans catch them). Replaced with a self-contained rules file + `gitleaks protect --staged` in the hook; verified: staged-key commit refused end-to-end, repo scan clean. Also: my probe keys were twice malformed (41/17 chars) — fixture precision matters even in tests |
+| 12:19 | Push 3acb6ce: GitHub notes "Bypassed rule violations: changes must be made through a pull request" — branch protection active, owner/gate pushes allowed by design |
 | — | *(continues)*
 
 ## 3. What worked (preliminary)

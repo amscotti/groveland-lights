@@ -5,6 +5,36 @@
       "when": "GET /healthz",
       "shall": "return 200 with body ok and the security headers",
       "gate": true
+    },
+    {
+      "id": "A-101",
+      "when": "GET /healthz",
+      "shall": "return 200 with body ok within 2 seconds",
+      "gate": true
+    },
+    {
+      "id": "A-102",
+      "when": "GET /",
+      "shall": "render 200 with CSP headers, zero console errors and zero CSP violations on all projects",
+      "gate": true
+    },
+    {
+      "id": "A-103",
+      "when": "POST /probe (CSRF-protected) and the process restarts",
+      "shall": "persist the counter in SQLite across restarts and deploys",
+      "gate": true
+    },
+    {
+      "id": "A-104",
+      "when": "startup finds an applied migration whose checksum no longer matches",
+      "shall": "refuse to boot with a clear error",
+      "gate": true
+    },
+    {
+      "id": "A-105",
+      "when": "requests are served",
+      "shall": "log JSON with method, route pattern, status, duration and request id — never the IP",
+      "gate": true
     }
   ]
 }
