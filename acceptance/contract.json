@@ -1,0 +1,10 @@
+{
+  "assertions": [
+    {
+      "id": "A-000",
+      "when": "GET /healthz",
+      "shall": "return 200 with body ok and the security headers",
+      "gate": true
+    }
+  ]
+}
