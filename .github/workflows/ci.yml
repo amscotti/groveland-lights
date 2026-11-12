@@ -21,7 +21,7 @@ jobs:
       - name: npm ci
         run: npm ci
 
-      - name: install browsers (before make ci: check runs the e2e targets)
+      - name: install browsers (before make ci, which runs the e2e targets)
         run: npx playwright install --with-deps chromium webkit
 
       - name: make ci
