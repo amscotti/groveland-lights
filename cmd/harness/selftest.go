@@ -155,7 +155,7 @@ func TestSelftestDummyAlwaysPasses(t *testing.T) {
 
 	// Task packets + graph.
 	tasks := []Task{
-		{ID: "T-000A", Type: "acceptance", Role: "test-author", Title: "Acceptance for /version (scripted)", Owns: []string{"acceptance/**"}, Claims: []string{"A-900"}, Status: StatusDone, Budget: Budget{Steps: 50, WallMin: 15}},
+		{ID: "T-000A", Type: "acceptance", Role: "test-author", Title: "Acceptance for /version (scripted)", Owns: []string{"acceptance/**"}, Claims: []string{"A-900", "A-000"}, Status: StatusDone, Budget: Budget{Steps: 50, WallMin: 15}},
 		{ID: "T-000", Type: "feature", Role: "worker", Title: "GET /version returns JSON {version, commit}", Deps: []string{"T-000A"}, Owns: []string{"internal/web/version*.go"}, Claims: []string{"A-900"}, Status: StatusReady, Budget: Budget{Steps: 120, WallMin: 30}},
 		{ID: "T-S3", Type: "chore", Role: "worker", Title: "ownership scenario", Owns: []string{"docs/nothing/**"}, Status: StatusReady, Budget: Budget{Steps: 10, WallMin: 5}},
 		{ID: "T-S4", Type: "chore", Role: "worker", Title: "ratchet scenario", Owns: []string{"internal/**"}, Status: StatusReady, Budget: Budget{Steps: 10, WallMin: 5}},

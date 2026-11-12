@@ -69,11 +69,12 @@ func ValidateGraph(g Graph, assertions []Assertion) error {
 	return nil
 }
 
-// ReadyTasks returns tasks whose deps are done, that don't overlap owns with any
-// running or merging task, capped at remaining slots. rework tasks count as ready
-// once their review findings have been appended (the scheduler handles the retry).
+// ReadyTasks returns tasks whose deps are done, that don't overlap owns with
+// any running/merging task or a task already selected in this batch, capped at
+// remaining slots. rework tasks count as ready once their findings are appended.
 func ReadyTasks(g *Graph, p Policy) []*Task {
 	var out []*Task
+	var selectedOwns [][]string
 	running := 0
 	for i := range g.Tasks {
 		s := g.Tasks[i].Status
@@ -114,10 +115,18 @@ func ReadyTasks(g *Graph, p Policy) []*Task {
 				}
 			}
 		}
+		// Also never select two overlapping tasks in the same batch.
+		for _, so := range selectedOwns {
+			if ownsOverlap(t.Owns, so) {
+				conflict = true
+				break
+			}
+		}
 		if conflict {
 			continue
 		}
 		out = append(out, t)
+		selectedOwns = append(selectedOwns, t.Owns)
 		if len(out) == slots {
 			break
 		}
