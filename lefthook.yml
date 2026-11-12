@@ -10,7 +10,7 @@ pre-commit:
           if [ -n "$bad" ]; then echo "gofmt needed: $bad"; exit 1; fi
         fi
     gitleaks:
-      run: git diff --cached | gitleaks detect --pipe --no-banner --redact
+      run: gitleaks protect --staged --no-banner --redact
 
 commit-msg:
   commands:

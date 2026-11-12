@@ -1,11 +1,60 @@
-# gitleaks configuration: defaults plus allowlist for Cloudflare Turnstile test
-# keys (documented public test values, safe to commit; used so CI never calls the
-# real service). See developers.cloudflare.com/turnstile/troubleshooting.
-[extend]
-useDefault = true
+# gitleaks v8.30.1. NOTE: `[extend] useDefault = true` is broken in this build
+# (extended configs detect nothing — verified 2026-11-12), so this file is
+# self-contained: explicit rules for the secret types this repo can realistically
+# leak, plus the documented dummy-value allowlist. Add rules as the project grows.
+title = "groveland-lights secret scan"
+
+[[rules]]
+id = "aws-access-key"
+description = "AWS Access Key"
+regex = '''(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}'''
+keywords = ["AKIA", "AGPA", "AIDA", "AROA", "AIPA", "ANPA", "ANVA", "ASIA"]
+
+[[rules]]
+id = "github-pat"
+description = "GitHub personal access token"
+regex = '''ghp_[0-9a-zA-Z]{36}'''
+keywords = ["ghp_"]
+
+[[rules]]
+id = "github-fine-grained-pat"
+description = "GitHub fine-grained token"
+regex = '''github_pat_[0-9a-zA-Z_]{22,}'''
+keywords = ["github_pat_"]
+
+[[rules]]
+id = "slack-token"
+description = "Slack token"
+regex = '''xox[baprs]-[0-9a-zA-Z]{10,}'''
+keywords = ["xox"]
+
+[[rules]]
+id = "private-key"
+description = "Private key block"
+regex = '''-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY( BLOCK)?-----'''
+keywords = ["private key", "PRIVATE KEY"]
+
+[[rules]]
+id = "fly-api-token"
+description = "Fly.io API token"
+regex = '''Fly1_[0-9a-zA-Z_\-]{20,}'''
+keywords = ["fly1_", "Fly1_"]
+
+[[rules]]
+id = "cloudflare-api-token"
+description = "Cloudflare API token"
+regex = '''[0-9a-zA-Z_\-]{40}'''
+entropy = 4.2
+keywords = ["cf_", "cloudflare"]
+
+[[rules]]
+id = "generic-api-key"
+description = "Generic API key assignment"
+regex = '''(?i)(api[_-]?key|secret|token|password|passwd|pwd)["' ]*[:=]["' ]*[0-9a-zA-Z_\-\.]{24,}'''
+entropy = 3.8
 
 [allowlist]
-description = "Turnstile documented test keys + committed dummy test-config values (they decode to 'test-…' strings; no real secrets)"
+description = "Turnstile documented test keys + committed dummy test-config values (decode to 'test-…' strings)"
 regexes = [
   '''XXXX\.XXXX\.XXXX\.XXXX''',
   '''1x00000000000000000000AA''',
@@ -19,4 +68,8 @@ regexes = [
   '''c2Vzc2lvbi1rZXktMzItYnl0ZXMtYWFiYmNjZGQ=''',
   '''aXAtaGFzaC1rZXktMzItYnl0ZXMtZWVmZmdoaGk=''',
   '''YWRtaW4tdG9rZW4tMzItYnl0ZXMtamprbGxtbQ==''',
+]
+paths = [
+  '''\.gitleaks\.toml''',
+  '''package-lock\.json''',
 ]
