@@ -1,0 +1,17 @@
+# gitleaks configuration: defaults plus allowlist for Cloudflare Turnstile test
+# keys (documented public test values, safe to commit; used so CI never calls the
+# real service). See developers.cloudflare.com/turnstile/troubleshooting.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Turnstile documented test keys"
+regexes = [
+  '''XXXX\.XXXX\.XXXX\.XXXX''',
+  '''0x4AAAAAAAAjq_YWTh8pLfjF''',
+  '''1x00000000000000000000AA''',
+  '''2x00000000000000000000AB''',
+  '''1x00000000000000000000BB''',
+  '''2x00000000000000000000BB''',
+  '''3x00000000000000000000FF''',
+]

@@ -1,0 +1,40 @@
+version: "2"
+
+formatters:
+  enable:
+    - gofmt
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - bodyclose
+    - sqlclosecheck
+    - gosec
+    - exhaustive
+    - cyclop
+    - errorlint
+    - noctx
+    - forbidigo
+  settings:
+    cyclop:
+      max-complexity: 15
+    exhaustive:
+      default-signifies-exhaustive: false
+    forbidigo:
+      forbid:
+        - pattern: 'template\.HTML'
+          message: 'template.HTML bypasses escaping; only the audited helper may use it (§8.4)'
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+      - path: cmd/harness/
+        linters:
+          - forbidigo

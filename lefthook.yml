@@ -1,0 +1,27 @@
+# Lefthook git hooks (plan §6.1.7). Install once with `lefthook install`.
+pre-commit:
+  commands:
+    gofmt:
+      glob: "*.go"
+      run: >
+        staged=$(git diff --name-only --cached -- '*.go');
+        if [ -n "$staged" ]; then
+          bad=$(gofmt -l $staged);
+          if [ -n "$bad" ]; then echo "gofmt needed: $bad"; exit 1; fi
+        fi
+    gitleaks:
+      run: gitleaks detect --staged --no-banner --redact || { echo "gitleaks: secret detected"; exit 1; }
+
+commit-msg:
+  commands:
+    conventional:
+      run: >
+        echo "$1" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9/-]+\))?!?: .+' ||
+        { echo "commit message must follow Conventional Commits"; exit 1; }
+
+pre-push:
+  commands:
+    check-fast:
+      run: make check-fast
+    protected-checksum:
+      run: shasum -a 256 -c harness/protected.sha256 --quiet

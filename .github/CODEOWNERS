@@ -1,0 +1,11 @@
+# Harness-owned paths: outside PRs need Anthony's review (plan §6.1.7).
+# The local gate pushes as @amscotti directly; CODEOWNERS covers external PRs.
+/acceptance/ @amscotti
+/harness/ @amscotti
+/.opencode/ @amscotti
+/.github/ @amscotti
+/Makefile @amscotti
+/.golangci.yml @amscotti
+/lefthook.yml @amscotti
+/AGENTS.md @amscotti
+/cmd/harness/ @amscotti
