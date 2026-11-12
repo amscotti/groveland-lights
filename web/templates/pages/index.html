@@ -1,0 +1,12 @@
+{{define "content"}}
+<section>
+  <h1>{{.Title}}</h1>
+  <p>
+    A map of the town's park and building light fixtures, with status reported by
+    neighbours. Tap a light to see how it's doing.
+  </p>
+  <p class="env-note" data-env="{{.EnvLabel}}">
+    {{if eq .EnvLabel "prod"}}{{else}}<span class="muted">environment: {{.EnvLabel}}</span>{{end}}
+  </p>
+</section>
+{{end}}
