@@ -1,0 +1,16 @@
+.DS_Store
+node_modules/
+bin/
+dev.db
+dev.db-*
+dev-photos/
+/tmp/
+harness/runs/
+harness/STOP
+.env
+.env.test
+playwright-report/
+test-results/
+coverage/
+dist/
+*.log
