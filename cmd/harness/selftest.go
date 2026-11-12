@@ -39,12 +39,15 @@ func cmdSelftest(args []string) error {
 		}
 	}
 
-	// Throwaway clone under TMPDIR.
+	// Throwaway clone under TMPDIR (kept if GL_SELFTEST_KEEP=1 for debugging).
 	tmp, err := os.MkdirTemp("", "gl-selftest-")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.RemoveAll(tmp) }()
+	if os.Getenv("GL_SELFTEST_KEEP") == "" {
+		defer func() { _ = os.RemoveAll(tmp) }()
+	}
+	fmt.Println("selftest: clone at", tmp)
 	clone := filepath.Join(tmp, "repo")
 	if out, err := gitOut("", "clone", root, clone); err != nil {
 		return fmt.Errorf("clone: %w: %s", err, out)

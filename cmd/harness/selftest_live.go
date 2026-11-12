@@ -18,7 +18,16 @@ func scLiveHappy(clone string, pol Policy) (bool, string) {
 	}
 	setTaskStatus(clone, "T-000", StatusReady, "")
 
-	// Run the lifecycle synchronously.
+	// Same entry path as the scheduler: create the worktree first (spawnTask's
+	// job), then run the lifecycle in it.
+	wtDir, err := worktreeFor(clone, "T-000")
+	if err != nil {
+		return false, "worktree: " + err.Error()
+	}
+	defer func() {
+		_, _ = gitOut(clone, "worktree", "remove", "--force", wtDir)
+	}()
+
 	runTaskLifecycle(clone, pol, "T-000")
 
 	g, _ := loadGraph(clone)
