@@ -14,3 +14,6 @@ test-results/
 coverage/
 dist/
 *.log
+testdata/rendered/*
+!testdata/rendered/.gitkeep
+harness/.merge.lock

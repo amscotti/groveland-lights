@@ -1,0 +1,24 @@
+{
+  "name": "groveland-lights",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.65.0",
+    "html-validate": "11.21.0",
+    "typescript": "7.0.2"
+  },
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:a11y": "playwright test --grep @a11y",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@alpinejs/csp": "3.17.5",
+    "@picocss/pico": "2.1.1",
+    "htmx.org": "2.0.11"
+  }
+}
