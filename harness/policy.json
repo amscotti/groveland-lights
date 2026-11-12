@@ -1,0 +1,43 @@
+{
+  "models": {
+    "glm": "zai-coding-plan/glm-5.3",
+    "glm_flash": "zai-coding-plan/glm-5.3-flash",
+    "deepseek": "deepseek/deepseek-flash"
+  },
+  "roles": {
+    "planner": "glm",
+    "test-author": "glm",
+    "worker": "glm_flash",
+    "ui-worker": "glm_flash",
+    "reviewer": "glm",
+    "reviewer-alt": "deepseek",
+    "visual-reviewer": "glm_flash",
+    "validator": "glm_flash",
+    "judge": "glm",
+    "integrator": "glm"
+  },
+  "escalate_worker_to": "glm",
+  "escalate_ui_worker_to": "deepseek",
+  "vision_roles": ["ui-worker", "visual-reviewer", "validator"],
+  "vision_models": ["glm_flash", "deepseek"],
+  "max_parallel": 2,
+  "max_attempts": 3,
+  "coverage_floor": 70,
+  "coverage_packages": ["internal/config", "internal/status", "internal/geo"],
+  "protected": [
+    "acceptance/**",
+    "harness/policy.json",
+    "harness/protected.sha256",
+    "harness/tasks/graph.json",
+    ".opencode/**",
+    "AGENTS.md",
+    "Makefile",
+    ".golangci.yml",
+    "lefthook.yml",
+    ".github/**",
+    "cmd/harness/**",
+    "testdata/**/*.golden*",
+    "acceptance/e2e/**/__screenshots__/**"
+  ],
+  "holdout_dir": "/Users/ascotti/Documents/git_repos/groveland-lights-holdout"
+}
