@@ -92,33 +92,8 @@ func parseHunkStart(hunk string) int {
 // DiffDeps compares dependency lines of go.mod/package.json between old and new
 // text and returns newly added module specifiers.
 func DiffDeps(oldText, newText, kind string) []string {
-	extract := func(t string) map[string]bool {
-		m := map[string]bool{}
-		verRe := regexp.MustCompile(`^v\d+\.\d+`)
-		for _, line := range strings.Split(t, "\n") {
-			f := strings.Fields(line)
-			if len(f) < 2 {
-				continue
-			}
-			switch kind {
-			case "go":
-				// Two fields where the second looks like a version and the first
-				// looks like a module path (contains a dot or slash).
-				if len(f) == 2 && verRe.MatchString(f[1]) && (strings.Contains(f[0], ".") || strings.Contains(f[0], "/")) {
-					m[f[0]] = true
-				}
-				if f[0] == "require" && len(f) >= 3 && verRe.MatchString(f[2]) {
-					m[f[1]] = true
-				}
-			case "npm":
-				if strings.HasPrefix(f[0], "\"") && len(f) >= 2 {
-					m[strings.Trim(f[0], "\",")] = true
-				}
-			}
-		}
-		return m
-	}
-	oldD, newD := extract(oldText), extract(newText)
+	oldD := extractDeps(oldText, kind)
+	newD := extractDeps(newText, kind)
 	var added []string
 	for k := range newD {
 		if !oldD[k] {
@@ -126,6 +101,38 @@ func DiffDeps(oldText, newText, kind string) []string {
 		}
 	}
 	return added
+}
+
+var reGoVersion = regexp.MustCompile(`^v\d+\.\d+`)
+
+func extractDeps(t, kind string) map[string]bool {
+	m := map[string]bool{}
+	for _, line := range strings.Split(t, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		switch kind {
+		case "go":
+			extractGoDep(f, m)
+		case "npm":
+			if strings.HasPrefix(f[0], "\"") {
+				m[strings.Trim(f[0], "\",")] = true
+			}
+		}
+	}
+	return m
+}
+
+func extractGoDep(f []string, m map[string]bool) {
+	// Two fields where the second looks like a version and the first looks like
+	// a module path (contains a dot or slash).
+	if len(f) == 2 && reGoVersion.MatchString(f[1]) && (strings.Contains(f[0], ".") || strings.Contains(f[0], "/")) {
+		m[f[0]] = true
+	}
+	if f[0] == "require" && len(f) >= 3 && reGoVersion.MatchString(f[2]) {
+		m[f[1]] = true
+	}
 }
 
 // DepAllowed checks an added dependency against allow_deps. Go modules match by

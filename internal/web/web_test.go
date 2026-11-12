@@ -1,11 +1,13 @@
 package web
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -35,7 +37,7 @@ func newTestServer(t *testing.T, env config.Env) *Server {
 func TestHealthz(t *testing.T) {
 	s := newTestServer(t, config.EnvTest)
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", nil))
 	if rec.Code != 200 {
 		t.Fatalf("code = %d", rec.Code)
 	}
@@ -47,7 +49,7 @@ func TestHealthz(t *testing.T) {
 func TestSecurityHeadersPresent(t *testing.T) {
 	s := newTestServer(t, config.EnvTest)
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
 	csp := rec.Header().Get("Content-Security-Policy")
 	for _, want := range []string{"default-src 'self'", "frame-ancestors 'none'", "base-uri 'none'"} {
 		if !strings.Contains(csp, want) {
@@ -65,7 +67,7 @@ func TestSecurityHeadersPresent(t *testing.T) {
 func TestHomeRenders(t *testing.T) {
 	s := newTestServer(t, config.EnvTest)
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
 	if rec.Code != 200 {
 		t.Fatalf("code = %d", rec.Code)
 	}
@@ -78,7 +80,7 @@ func TestHomeRenders(t *testing.T) {
 func TestHomeNoTestHooksInProd(t *testing.T) {
 	s := newTestServer(t, config.EnvProd)
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
 	if strings.Contains(rec.Body.String(), "test-hooks.js") {
 		t.Error("prod render includes test hooks (must be compiled out per §5.1)")
 	}
@@ -87,7 +89,7 @@ func TestHomeNoTestHooksInProd(t *testing.T) {
 func TestHomeTestHooksInTestEnv(t *testing.T) {
 	s := newTestServer(t, config.EnvTest)
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
 	if !strings.Contains(rec.Body.String(), "test-hooks.js") {
 		t.Error("test render missing test hooks")
 	}
@@ -96,7 +98,7 @@ func TestHomeTestHooksInTestEnv(t *testing.T) {
 func TestStaticServed(t *testing.T) {
 	s := newTestServer(t, config.EnvTest)
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/css/app.css", nil))
+	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/static/css/app.css", nil))
 	if rec.Code != 200 {
 		t.Fatalf("css code = %d", rec.Code)
 	}
@@ -117,7 +119,11 @@ func TestRenderAll(t *testing.T) {
 		rec := httptest.NewRecorder()
 		s.tpl.renderPage(rec, filepath.Base(name), homeData{Title: "Groveland Lights", TestEnv: false, EnvLabel: "prod"})
 		out := filepath.Join(outDir, strings.TrimPrefix(name, "pages/"))
-		if err := os.WriteFile(out, rec.Body.Bytes(), 0o644); err != nil {
+		// Trim template-induced trailing whitespace before validating: the
+		// conditional tags leave indented blank lines, which html-validate
+		// would flag although the HTML itself is well-formed.
+		trimmed := regexp.MustCompile(`[ \t]+\n`).ReplaceAllString(rec.Body.String(), "\n")
+		if err := os.WriteFile(out, []byte(trimmed), 0o600); err != nil {
 			t.Fatalf("write %s: %v", out, err)
 		}
 	}

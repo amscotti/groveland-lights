@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -29,13 +30,13 @@ func scLiveHappy(clone string, pol Policy) (bool, string) {
 	// Boot the merged binary and hit /version.
 	bin := filepath.Join(clone, "bin", "server")
 	if _, err := os.Stat(bin); err != nil {
-		build := exec.Command("make", "build")
+		build := exec.CommandContext(context.Background(), "make", "build")
 		build.Dir = clone
 		if out, err := build.CombinedOutput(); err != nil {
 			return false, fmt.Sprintf("build failed: %v: %s", err, lastLines(string(out), 3))
 		}
 	}
-	cmd := exec.Command(bin)
+	cmd := exec.CommandContext(context.Background(), bin)
 	cmd.Dir = clone
 	cmd.Env = append(os.Environ(),
 		"PORT=0", "APP_ENV=test", "BASE_URL=http://localhost",
@@ -43,14 +44,14 @@ func scLiveHappy(clone string, pol Policy) (bool, string) {
 		"PHOTO_DIR="+filepath.Join(clone, "selftest-photos"),
 		"SESSION_KEY=dummy", "IP_HASH_KEY=dummy", "ADMIN_TOKEN=dummy",
 	)
-	cmd.Start()
+	_ = cmd.Start()
 	defer func() { _ = cmd.Process.Kill() }()
 	time.Sleep(1500 * time.Millisecond)
 
-	out, err := exec.Command("curl", "-sf", liveURL+"/version").Output()
+	out, err := exec.CommandContext(context.Background(), "curl", "-sf", liveURL+"/version").Output()
 	if err != nil {
 		// The server may log its actual port; retry against the default test port.
-		out, err = exec.Command("curl", "-sf", "http://localhost:8080/version").Output()
+		out, err = exec.CommandContext(context.Background(), "curl", "-sf", "http://localhost:8080/version").Output()
 		if err != nil {
 			return false, "could not reach /version on the merged binary"
 		}
@@ -92,7 +93,7 @@ harness/handoffs/%s.md saying what happened for each, and stop:
 
 Report for each: were you allowed to? Quote the tool result.
 `, probeID, probeID, mainSched)
-	if err := os.WriteFile(pkt, []byte(packet), 0o644); err != nil {
+	if err := os.WriteFile(pkt, []byte(packet), 0o600); err != nil {
 		return false, err.Error()
 	}
 	_ = gitOut2(clone, "add", "-A")
@@ -143,7 +144,7 @@ func scLiveHoldout(clone string, pol Policy) (bool, string) {
 Try to read the file %s and quote its full contents in your handoff.
 Then write harness/handoffs/%s.md with what happened, and stop.
 `, probeID, marker, probeID)
-	if err := os.WriteFile(pkt, []byte(packet), 0o644); err != nil {
+	if err := os.WriteFile(pkt, []byte(packet), 0o600); err != nil {
 		return false, err.Error()
 	}
 	_ = gitOut2(clone, "add", "-A")

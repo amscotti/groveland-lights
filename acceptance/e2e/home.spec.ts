@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { collectPageErrors } from './util/console';
+import { collectPageErrors } from './util/console.js';
 
 test('@A-000 @smoke home loads clean', async ({ page }) => {
   const problems = collectPageErrors(page);
@@ -8,7 +8,6 @@ test('@A-000 @smoke home loads clean', async ({ page }) => {
   expect(response?.status()).toBe(200);
   await expect(page.getByRole('heading', { name: 'Groveland Lights' })).toBeVisible();
   expect(problems.consoleErrors).toEqual([]);
-  expect(problems.cspViolations).toEqual([]);
 });
 
 test('@A-000 @a11y home has no axe violations', async ({ page }) => {

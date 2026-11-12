@@ -59,7 +59,7 @@ func cmdProtect(args []string) error {
 	// Ratchet baseline for the current tree.
 	bl := baseline{Go: countGoTests(root), Pw: countPwTests(root)}
 	b, _ := json.Marshal(bl)
-	if err := os.WriteFile(filepath.Join(root, "harness", ".ratchet.json"), append(b, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "harness", ".ratchet.json"), append(b, '\n'), 0o600); err != nil {
 		return err
 	}
 	fmt.Printf("protect: ratchet baseline go=%d pw=%d\n", bl.Go, bl.Pw)

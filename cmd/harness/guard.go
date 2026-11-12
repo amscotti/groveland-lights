@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -50,12 +51,12 @@ func cmdGuard(args []string) error {
 }
 
 func gitOut(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd := exec.CommandContext(context.Background(), "git", append([]string{"-C", dir}, args...)...)
 	var out, errB bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errB
 	if err := cmd.Run(); err != nil {
-		return out.String(), fmt.Errorf("git %v: %v: %s", args, err, strings.TrimSpace(errB.String()))
+		return out.String(), fmt.Errorf("git %v: %w: %s", args, err, strings.TrimSpace(errB.String()))
 	}
 	return out.String(), nil
 }
@@ -81,114 +82,144 @@ func repoRoot() (string, error) {
 func guardTask(root, wt string, t *Task, pol Policy) int {
 	changed := gitChanged(wt)
 
-	// 1. Protected paths. Exception: acceptance tasks (test-author) may touch
-	// acceptance/**, the manifest, their packet and the graph.
+	if code, ok := checkProtectedPaths(changed, t, pol); !ok {
+		return code
+	}
+	if err := VerifyManifest(wt); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		return exitProtected
+	}
+	if code, ok := checkOwnership(changed, t); !ok {
+		return code
+	}
+	if code, ok := checkRatchet(root, wt); !ok {
+		return code
+	}
+	if code, ok := checkMarkers(wt); !ok {
+		return code
+	}
+	if code, ok := checkDeps(changed, wt, t); !ok {
+		return code
+	}
+	if code, ok := checkHandoff(wt, t); !ok {
+		return code
+	}
+	// 8. Special-casing heuristic: warning only, surfaced to reviewer-alt.
+	for _, h := range specialCaseHeuristic(ParseUnifiedAdded(gitOut2(wt, "diff", "main...HEAD")), wt) {
+		fmt.Fprintf(os.Stderr, "WARN: possible fixture special-casing: %s\n", h)
+	}
+	if code, ok := checkCleanWorktree(wt); !ok {
+		return code
+	}
+	return 0
+}
+
+// checkProtectedPaths is check 1.
+func checkProtectedPaths(changed []string, t *Task, pol Policy) (int, bool) {
 	for _, p := range changed {
 		if pat, hit := protectedMatch(pol.Protected, p); hit {
 			if t.Type == "acceptance" && acceptanceAllowed(p) {
 				continue
 			}
-			if t.Type == "infra" && !matchGlob("acceptance/**", p) && !matchGlob(".opencode/**", p) && !matchGlob("cmd/harness/**", p) && !matchGlob("harness/**", p) {
-				// infra tasks may touch build/deploy files but not the above
-			} else if t.Type != "infra" {
-				fmt.Fprintf(os.Stderr, "ERROR: protected path %s (matches %s)\n", p, pat)
-				return exitProtected
-			}
+			fmt.Fprintf(os.Stderr, "ERROR: protected path %s (matches %s)\n", p, pat)
+			return exitProtected, false
 		}
 	}
+	return 0, true
+}
 
-	// 2. Checksum manifest.
-	if err := VerifyManifest(wt); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		return exitProtected
-	}
-
-	// 3. Ownership: every changed file must be covered by owns + the handoff.
+// checkOwnership is check 3.
+func checkOwnership(changed []string, t *Task) (int, bool) {
 	allowed := append(append([]string{}, t.Owns...), "harness/handoffs/"+t.ID+".md")
 	for _, p := range changed {
 		if !ownsCovered(allowed, p) {
 			fmt.Fprintf(os.Stderr, "ERROR: out of ownership: %s not covered by owns of %s\n", p, t.ID)
-			return exitOwnership
+			return exitOwnership, false
 		}
 	}
+	return 0, true
+}
 
-	// 4. Test ratchet: counts vs the baseline captured on main.
+// checkRatchet is check 4 (counts + new skip markers).
+func checkRatchet(root, wt string) (int, bool) {
 	if base := readBaseline(root); base != nil {
 		goBr, pwBr := countGoTests(wt), countPwTests(wt)
 		if err := RatchetCompare(base.Go, goBr, base.Pw, pwBr); err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: ratchet: %v\n", err)
-			return exitRatchet
+			return exitRatchet, false
 		}
 	} else {
 		fmt.Fprintln(os.Stderr, "WARN: no ratchet baseline; run `harness protect` once on main")
 	}
-
-	// 4b. New skip markers in added lines.
-	diff := gitOut2(wt, "diff", "main...HEAD")
-	added := ParseUnifiedAdded(diff)
-	for _, a := range added {
+	for _, a := range ParseUnifiedAdded(gitOut2(wt, "diff", "main...HEAD")) {
 		if strings.HasPrefix(a.path, "acceptance/") {
 			continue
 		}
 		for _, m := range []string{"t.Skip(", "test.skip(", "test.only(", ".fixme("} {
 			if strings.Contains(a.line, m) {
 				fmt.Fprintf(os.Stderr, "ERROR: ratchet: new %q at %s:%d\n", m, a.path, a.n)
-				return exitRatchet
+				return exitRatchet, false
 			}
 		}
 	}
+	return 0, true
+}
 
-	// 5. Forbidden markers in added lines.
-	for _, f := range ScanAddedLines(added) {
+// checkMarkers is check 5.
+func checkMarkers(wt string) (int, bool) {
+	for _, f := range ScanAddedLines(ParseUnifiedAdded(gitOut2(wt, "diff", "main...HEAD"))) {
 		fmt.Fprintf(os.Stderr, "ERROR: %s\n", f)
-		return exitMarkers
+		return exitMarkers, false
 	}
+	return 0, true
+}
 
-	// 6. Dependency additions outside allow_deps.
-	if depsChanged(changed) {
-		for _, d := range DiffDeps(gitShow(wt, "main:go.mod"), readFileOr(filepath.Join(wt, "go.mod")), "go") {
-			if strings.HasPrefix(d, "golang.org/x/vuln") || strings.HasPrefix(d, "(") {
-				continue
-			}
-			if !DepAllowed(d, t.AllowDeps) {
-				fmt.Fprintf(os.Stderr, "ERROR: dependency %q not in allow_deps of %s\n", d, t.ID)
-				return exitDeps
-			}
+// checkDeps is check 6.
+func checkDeps(changed []string, wt string, t *Task) (int, bool) {
+	if !depsChanged(changed) {
+		return 0, true
+	}
+	for _, d := range DiffDeps(gitShow(wt, "main:go.mod"), readFileOr(filepath.Join(wt, "go.mod")), "go") {
+		if strings.HasPrefix(d, "golang.org/x/vuln") || strings.HasPrefix(d, "(") {
+			continue
 		}
-		for _, d := range DiffDeps(gitShow(wt, "main:package.json"), readFileOr(filepath.Join(wt, "package.json")), "npm") {
-			if !DepAllowed(d, t.AllowDeps) {
-				fmt.Fprintf(os.Stderr, "ERROR: dependency %q not in allow_deps of %s\n", d, t.ID)
-				return exitDeps
-			}
+		if !DepAllowed(d, t.AllowDeps) {
+			fmt.Fprintf(os.Stderr, "ERROR: dependency %q not in allow_deps of %s\n", d, t.ID)
+			return exitDeps, false
 		}
 	}
+	for _, d := range DiffDeps(gitShow(wt, "main:package.json"), readFileOr(filepath.Join(wt, "package.json")), "npm") {
+		if !DepAllowed(d, t.AllowDeps) {
+			fmt.Fprintf(os.Stderr, "ERROR: dependency %q not in allow_deps of %s\n", d, t.ID)
+			return exitDeps, false
+		}
+	}
+	return 0, true
+}
 
-	// 7. Handoff exists and at least one commit on the branch.
+// checkHandoff is check 7.
+func checkHandoff(wt string, t *Task) (int, bool) {
 	if _, err := os.Stat(filepath.Join(wt, "harness", "handoffs", t.ID+".md")); err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: missing handoff harness/handoffs/%s.md\n", t.ID)
-		return exitHandoff
+		return exitHandoff, false
 	}
 	if strings.TrimSpace(gitOut2(wt, "rev-list", "--count", "main..HEAD")) == "0" {
 		fmt.Fprintf(os.Stderr, "ERROR: no commits on task/%s\n", t.ID)
-		return exitHandoff
+		return exitHandoff, false
 	}
+	return 0, true
+}
 
-	// 8. Special-casing heuristic: warning only, surfaced to reviewer-alt.
-	if hits := specialCaseHeuristic(added, wt); len(hits) > 0 {
-		for _, h := range hits {
-			fmt.Fprintf(os.Stderr, "WARN: possible fixture special-casing: %s\n", h)
-		}
+// checkCleanWorktree is check 9 (E3).
+func checkCleanWorktree(wt string) (int, bool) {
+	dirty := DirtyLines(gitOut2(wt, "status", "--porcelain"))
+	for _, d := range dirty {
+		fmt.Fprintf(os.Stderr, "ERROR: dirty worktree: %s\n", d)
 	}
-
-	// 9. Clean worktree (E3).
-	if dirty := DirtyLines(gitOut2(wt, "status", "--porcelain")); len(dirty) > 0 {
-		for _, d := range dirty {
-			fmt.Fprintf(os.Stderr, "ERROR: dirty worktree: %s\n", d)
-		}
-		return exitDirty
+	if len(dirty) > 0 {
+		return exitDirty, false
 	}
-
-	return 0
+	return 0, true
 }
 
 func acceptanceAllowed(p string) bool {
@@ -236,7 +267,7 @@ func stringLiterals(line string) []string {
 
 func fixtureContains(wt, lit string) bool {
 	// Cheap grep over testdata text fixtures only; images ignored.
-	cmd := exec.Command("grep", "-rF", lit, filepath.Join(wt, "testdata"))
+	cmd := exec.CommandContext(context.Background(), "grep", "-rF", lit, filepath.Join(wt, "testdata"))
 	return cmd.Run() == nil
 }
 
@@ -290,7 +321,7 @@ func readBaseline(root string) *baseline {
 }
 
 func countGoTests(dir string) int {
-	cmd := exec.Command("go", "test", "-list", ".*", "./...")
+	cmd := exec.CommandContext(context.Background(), "go", "test", "-list", ".*", "./...")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GOFLAGS=-count=1")
 	out, _ := cmd.CombinedOutput()
@@ -304,7 +335,7 @@ func countGoTests(dir string) int {
 }
 
 func countPwTests(dir string) int {
-	cmd := exec.Command("npx", "playwright", "test", "--list")
+	cmd := exec.CommandContext(context.Background(), "npx", "playwright", "test", "--list")
 	cmd.Dir = dir
 	out, _ := cmd.CombinedOutput()
 	n := 0

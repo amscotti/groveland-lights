@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -51,86 +52,87 @@ func cmdVerifyAgents(args []string) error {
 	}
 	sort.Strings(roles)
 
-	failed := false
 	fmt.Printf("verify-agents: %d roles in policy\n", len(roles))
+	failed := false
 	for _, role := range roles {
-		wantModelLogical := pol.Roles[role]
-		wantModelID := pol.Models[wantModelLogical]
-
-		info, live := byID[role]
-		fm, err := parseAgentFile(filepath.Join(root, ".opencode", "agents", role+".md"))
-		if err != nil {
+		if err := verifyOneAgent(root, role, pol, byID); err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: agent %s: %v\n", role, err)
 			failed = true
-			continue
 		}
-
-		rules := fm.Permissions
-		if live {
-			rules = info.Permissions
-		}
-		if len(rules) == 0 {
-			fmt.Fprintf(os.Stderr, "ERROR: agent %s: no permission rules found\n", role)
-			failed = true
-			continue
-		}
-
-		// Deny-all baseline: last match for (*,*) must be deny.
-		if eff := lastMatch(rules, "*", "*"); eff != "deny" {
-			fmt.Fprintf(os.Stderr, "ERROR: agent %s: deny-all baseline not effective (last match for */* is %q)\n", role, eff)
-			failed = true
-		}
-		// Trailing denies (E-group): subagent, execute, webfetch, websearch, question for all.
-		for _, action := range []string{"subagent", "execute", "webfetch", "websearch", "question"} {
-			if eff := lastMatch(rules, action, "*"); eff != "deny" {
-				fmt.Fprintf(os.Stderr, "ERROR: agent %s: %s not effectively denied\n", role, action)
-				failed = true
-			}
-		}
-		// external_directory: denied for all except test-author (scoped allow after the deny).
-		if eff := lastMatch(rules, "external_directory", "*"); eff != "deny" {
-			if role != "test-author" {
-				fmt.Fprintf(os.Stderr, "ERROR: agent %s: external_directory not denied\n", role)
-				failed = true
-			}
-		}
-		if role == "test-author" {
-			if eff := lastMatch(rules, "external_directory", pol.HoldoutDir+"/*"); eff != "allow" {
-				fmt.Fprintf(os.Stderr, "ERROR: test-author: holdout dir not allowed\n")
-				failed = true
-			}
-		}
-
-		// Model: frontmatter must match policy; live model if available.
-		if fm.Model != wantModelID {
-			fmt.Fprintf(os.Stderr, "ERROR: agent %s: model %q != policy %q\n", role, fm.Model, wantModelID)
-			failed = true
-		}
-		if live && info.Model != "" && info.Model != wantModelID {
-			fmt.Fprintf(os.Stderr, "ERROR: agent %s: live model %q != policy %q\n", role, info.Model, wantModelID)
-			failed = true
-		}
-
-		// Vision routing: vision roles must be on vision models.
-		if contains(pol.VisionRoles, role) && !contains(pol.VisionModels, wantModelLogical) {
-			fmt.Fprintf(os.Stderr, "ERROR: vision role %s on non-vision model %s\n", role, wantModelLogical)
-			failed = true
-		}
-
-		src := "file"
-		if live {
-			src = "live"
-		}
-		vision := ""
-		if contains(pol.VisionRoles, role) {
-			vision = " [vision]"
-		}
-		fmt.Printf("  %-16s model=%s (%s)%s ok\n", role, wantModelID, src, vision)
 	}
 	if failed {
 		return fmt.Errorf("verify-agents: FAILED")
 	}
 	fmt.Println("verify-agents: all agents conform to policy")
+	return nil
+}
+
+// verifyOneAgent checks one role; nil means conforming.
+func verifyOneAgent(root, role string, pol Policy, byID map[string]agentInfo) error {
+	wantModelLogical := pol.Roles[role]
+	wantModelID := pol.Models[wantModelLogical]
+
+	info, live := byID[role]
+	fm, err := parseAgentFile(filepath.Join(root, ".opencode", "agents", role+".md"))
+	if err != nil {
+		return err
+	}
+
+	rules := fm.Permissions
+	if live {
+		rules = info.Permissions
+	}
+	if len(rules) == 0 {
+		return fmt.Errorf("no permission rules found")
+	}
+	if err := checkPermissionBaselines(rules, role, pol); err != nil {
+		return err
+	}
+	if fm.Model != wantModelID {
+		return fmt.Errorf("model %q != policy %q", fm.Model, wantModelID)
+	}
+	if live && info.Model != "" && info.Model != wantModelID {
+		return fmt.Errorf("live model %q != policy %q", info.Model, wantModelID)
+	}
+	if contains(pol.VisionRoles, role) && !contains(pol.VisionModels, wantModelLogical) {
+		return fmt.Errorf("vision role on non-vision model %s", wantModelLogical)
+	}
+
+	src := "file"
+	if live {
+		src = "live"
+	}
+	vision := ""
+	if contains(pol.VisionRoles, role) {
+		vision = " [vision]"
+	}
+	fmt.Printf("  %-16s model=%s (%s)%s ok\n", role, wantModelID, src, vision)
+	return nil
+}
+
+// checkPermissionBaseline enforces the deny-all baseline and the trailing denies.
+func checkPermissionBaselines(rules []permissionRule, role string, pol Policy) error {
+	// Deny-all baseline: last match for (*,*) must be deny.
+	if eff := lastMatch(rules, "*", "*"); eff != "deny" {
+		return fmt.Errorf("deny-all baseline not effective (last match for */* is %q)", eff)
+	}
+	// Trailing denies for all agents.
+	for _, action := range []string{"subagent", "execute", "webfetch", "websearch", "question"} {
+		if eff := lastMatch(rules, action, "*"); eff != "deny" {
+			return fmt.Errorf("%s not effectively denied", action)
+		}
+	}
+	// external_directory: denied for all except test-author (scoped allow).
+	if eff := lastMatch(rules, "external_directory", "*"); eff != "deny" {
+		if role != "test-author" {
+			return fmt.Errorf("external_directory not denied")
+		}
+	}
+	if role == "test-author" {
+		if eff := lastMatch(rules, "external_directory", pol.HoldoutDir+"/*"); eff != "allow" {
+			return fmt.Errorf("holdout dir not allowed")
+		}
+	}
 	return nil
 }
 
@@ -169,7 +171,7 @@ func agentsFromDebug(root string) []agentInfo {
 	if err != nil {
 		return nil
 	}
-	cmd := exec.Command("opencode", "debug", "agents")
+	cmd := exec.CommandContext(context.Background(), "opencode", "debug", "agents")
 	cmd.Dir = dir
 	var out bytes.Buffer
 	cmd.Stdout = &out

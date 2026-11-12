@@ -5,13 +5,18 @@
 useDefault = true
 
 [allowlist]
-description = "Turnstile documented test keys"
+description = "Turnstile documented test keys + committed dummy test-config values (they decode to 'test-…' strings; no real secrets)"
 regexes = [
   '''XXXX\.XXXX\.XXXX\.XXXX''',
-  '''0x4AAAAAAAAjq_YWTh8pLfjF''',
   '''1x00000000000000000000AA''',
   '''2x00000000000000000000AB''',
   '''1x00000000000000000000BB''',
   '''2x00000000000000000000BB''',
   '''3x00000000000000000000FF''',
+  '''dGVzdC1zZXNzaW9uLWtleS0zMi1ieXRlcy1hYQ==''',
+  '''dGVzdC1pcGhhc2gta2V5LTMyLWJ5dGVzLWJi''',
+  '''dGVzdC1hZG1pbi10b2tlbi0zMi1ieXRl''',
+  '''c2Vzc2lvbi1rZXktMzItYnl0ZXMtYWFiYmNjZGQ=''',
+  '''aXAtaGFzaC1rZXktMzItYnl0ZXMtZWVmZmdoaGk=''',
+  '''YWRtaW4tdG9rZW4tMzItYnl0ZXMtamprbGxtbQ==''',
 ]

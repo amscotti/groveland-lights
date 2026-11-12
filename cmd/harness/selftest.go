@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -43,19 +44,19 @@ func cmdSelftest(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 	clone := filepath.Join(tmp, "repo")
 	if out, err := gitOut("", "clone", root, clone); err != nil {
-		return fmt.Errorf("clone: %v: %s", err, out)
+		return fmt.Errorf("clone: %w: %s", err, out)
 	}
 	linkNodeModules(root, clone)
 	// Never let the selftest push to the real repo: origin becomes a local bare.
 	bare := filepath.Join(tmp, "origin.git")
 	if out, err := gitOut("", "init", "--bare", bare); err != nil {
-		return fmt.Errorf("bare: %v: %s", err, out)
+		return fmt.Errorf("bare: %w: %s", err, out)
 	}
 	if out, err := gitOut(clone, "remote", "set-url", "origin", bare); err != nil {
-		return fmt.Errorf("remote: %v: %s", err, out)
+		return fmt.Errorf("remote: %w: %s", err, out)
 	}
 
 	if err := selftestFixture(clone); err != nil {
@@ -116,7 +117,7 @@ test('@A-900 @smoke /version returns JSON', async ({ request }) => {
 	if err := os.MkdirAll(filepath.Join(clone, "acceptance", "e2e"), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(clone, "acceptance", "e2e", "version.spec.ts"), []byte(spec), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(clone, "acceptance", "e2e", "version.spec.ts"), []byte(spec), 0o600); err != nil {
 		return err
 	}
 
@@ -133,7 +134,7 @@ test('@A-900 @smoke /version returns JSON', async ({ request }) => {
 		ID: "A-900", When: "GET /version", Shall: "return 200 JSON {version, commit}", Gate: &gateTrue,
 	})
 	cb, _ := json.MarshalIndent(contract, "", "  ")
-	if err := os.WriteFile(contractPath, append(cb, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(contractPath, append(cb, '\n'), 0o600); err != nil {
 		return err
 	}
 
@@ -149,7 +150,7 @@ func TestSelftestDummyAlwaysPasses(t *testing.T) {
 	t.Log("fixture test for the ratchet scenario")
 }
 `
-	if err := os.WriteFile(filepath.Join(clone, "internal", "web", "dummy_fixture_test.go"), []byte(dummy), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(clone, "internal", "web", "dummy_fixture_test.go"), []byte(dummy), 0o600); err != nil {
 		return err
 	}
 
@@ -168,7 +169,7 @@ func TestSelftestDummyAlwaysPasses(t *testing.T) {
 	for i := range g.Tasks {
 		pkt := fmt.Sprintf("# %s\n\n%s\n", tasks[i].ID, tasks[i].Title)
 		p := filepath.Join(clone, "harness", "tasks", tasks[i].ID+".md")
-		if err := os.WriteFile(p, []byte(pkt), 0o644); err != nil {
+		if err := os.WriteFile(p, []byte(pkt), 0o600); err != nil {
 			return err
 		}
 	}
@@ -184,7 +185,7 @@ func TestSelftestDummyAlwaysPasses(t *testing.T) {
 	}
 	bl := baseline{Go: countGoTests(clone), Pw: countPwTests(clone)}
 	b, _ := json.Marshal(bl)
-	if err := os.WriteFile(filepath.Join(clone, "harness", ".ratchet.json"), append(b, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(clone, "harness", ".ratchet.json"), append(b, '\n'), 0o600); err != nil {
 		return err
 	}
 
@@ -201,7 +202,7 @@ func worktreeFor(clone, id string) (string, error) {
 	wt := filepath.Join(filepath.Dir(clone), "wt", id)
 	_ = os.MkdirAll(filepath.Dir(wt), 0o755)
 	if out, err := gitOut(clone, "worktree", "add", wt, "-b", "task/"+id, "main"); err != nil {
-		return "", fmt.Errorf("worktree add: %v: %s", err, out)
+		return "", fmt.Errorf("worktree add: %w: %s", err, out)
 	}
 	linkNodeModules(clone, wt)
 	return wt, nil
@@ -249,7 +250,7 @@ func scOwnership(clone string, pol Policy) (bool, string) {
 	}
 	defer func() { _, _ = gitOut(clone, "worktree", "remove", "--force", wt) }()
 
-	if err := os.WriteFile(filepath.Join(wt, "README-extra.md"), []byte("stray\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(wt, "README-extra.md"), []byte("stray\n"), 0o600); err != nil {
 		return false, err.Error()
 	}
 	handoffFor(wt, "T-S3")
@@ -300,7 +301,7 @@ func TestRedCheckScenario(t *testing.T) {
 	t.Fatal("intentional red for the gate scenario")
 }
 `
-	if err := os.WriteFile(filepath.Join(wt, "internal", "web", "red_scenario_test.go"), []byte(red), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(wt, "internal", "web", "red_scenario_test.go"), []byte(red), 0o600); err != nil {
 		return false, err.Error()
 	}
 	handoffFor(wt, "T-S5")
@@ -310,7 +311,7 @@ func TestRedCheckScenario(t *testing.T) {
 
 	// Gate must refuse (make test-unit fails) and leave main unchanged.
 	_ = t
-	cmd := exec.Command(os.Args[0], "gate", "T-S5")
+	cmd := exec.CommandContext(context.Background(), os.Args[0], "gate", "T-S5")
 	cmd.Dir = clone
 	cmd.Env = append(os.Environ(), "CHECK_TARGET=test-unit")
 	out, _ := cmd.CombinedOutput()
@@ -323,7 +324,7 @@ func TestRedCheckScenario(t *testing.T) {
 func scOverlap(clone string, pol Policy) (bool, string) {
 	// sched --dry-run in a copy of the clone with only T-010/T-011 left.
 	tmp, _ := os.MkdirTemp("", "gl-dryrun-")
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 	dr := filepath.Join(tmp, "repo")
 	if out, err := gitOut("", "clone", clone, dr); err != nil {
 		return false, out
@@ -335,7 +336,7 @@ func scOverlap(clone string, pol Policy) (bool, string) {
 		}
 	}
 	_ = saveGraph(dr, g)
-	cmd := exec.Command(os.Args[0], "sched", "--dry-run")
+	cmd := exec.CommandContext(context.Background(), os.Args[0], "sched", "--dry-run")
 	cmd.Dir = dr
 	out, _ := cmd.CombinedOutput()
 	s := string(out)
@@ -359,7 +360,7 @@ func scDirty(clone string, pol Policy) (bool, string) {
 // dirty_scenario is a legitimate committed change.
 func dirtyScenario() string { return "ok" }
 `
-	if err := os.WriteFile(filepath.Join(wt, "internal", "web", "dirty_scenario.go"), []byte(codeChange), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(wt, "internal", "web", "dirty_scenario.go"), []byte(codeChange), 0o600); err != nil {
 		return false, err.Error()
 	}
 	handoffFor(wt, "T-S9")

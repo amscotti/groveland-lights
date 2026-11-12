@@ -6,7 +6,6 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
-	"net/http"
 	"path/filepath"
 	"sort"
 
@@ -83,14 +82,4 @@ func (t *templates) renderPage(w io.Writer, page string, data any) error {
 	}
 	_, err := w.Write(buf.Bytes())
 	return err
-}
-
-// renderPartial executes a partial bare.
-func (t *templates) renderPartial(w http.ResponseWriter, partial string, data any) error {
-	tpl, ok := t.partials[partial]
-	if !ok {
-		return fmt.Errorf("unknown partial %s", partial)
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	return tpl.Execute(w, data)
 }

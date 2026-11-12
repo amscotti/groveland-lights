@@ -2,12 +2,15 @@ import type { Page } from '@playwright/test';
 
 export interface PageProblems {
   consoleErrors: string[];
-  cspViolations: string[];
 }
 
-/** Collect console errors and CSP violation reports for the page lifetime. */
+/**
+ * Collect console errors for the page lifetime. CSP violations are included:
+ * browsers log "Refused to load ..." refusals as console errors, which is
+ * exactly the contract ("no CSP violations reported in the console").
+ */
 export function collectPageErrors(page: Page): PageProblems {
-  const problems: PageProblems = { consoleErrors: [], cspViolations: [] };
+  const problems: PageProblems = { consoleErrors: [] };
   page.on('console', (msg) => {
     if (msg.type() === 'error') {
       problems.consoleErrors.push(msg.text());
@@ -15,9 +18,6 @@ export function collectPageErrors(page: Page): PageProblems {
   });
   page.on('pageerror', (err) => {
     problems.consoleErrors.push(String(err));
-  });
-  page.on('securitypolicyviolation' as never, (event: { violatedDirective: string; blockedURI: string }) => {
-    problems.cspViolations.push(`${event.violatedDirective}: ${event.blockedURI}`);
   });
   return problems;
 }

@@ -6,7 +6,6 @@ package web
 import (
 	"log/slog"
 	"net/http"
-	"strings"
 
 	assets "github.com/amscotti/groveland-lights"
 	"github.com/amscotti/groveland-lights/internal/config"
@@ -16,9 +15,6 @@ import (
 type route struct {
 	pattern string
 	handler http.HandlerFunc
-	// hx marks HTMX partial endpoints; the contract test (§9.4) drives these
-	// twice, with and without HX-Request.
-	hx bool
 }
 
 // routes accumulates init()-time registrations.
@@ -165,13 +161,4 @@ func home(w http.ResponseWriter, r *http.Request) {
 	if err := s.tpl.renderPage(w, "index.html", data); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
-}
-
-// splitPath is a small helper used by list-ish handlers later.
-func splitPath(p string) []string {
-	out := strings.Split(strings.Trim(p, "/"), "/")
-	if len(out) == 1 && out[0] == "" {
-		return nil
-	}
-	return out
 }

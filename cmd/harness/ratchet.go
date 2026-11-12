@@ -70,7 +70,7 @@ func GenerateManifest(root string) error {
 	}
 	sort.Strings(lines)
 	out := strings.Join(lines, "\n") + "\n"
-	return os.WriteFile(filepath.Join(root, "harness", "protected.sha256"), []byte(out), 0o644)
+	return os.WriteFile(filepath.Join(root, "harness", "protected.sha256"), []byte(out), 0o600)
 }
 
 func manifestCovered(rel string) bool {

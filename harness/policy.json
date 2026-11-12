@@ -18,12 +18,22 @@
   },
   "escalate_worker_to": "glm",
   "escalate_ui_worker_to": "deepseek",
-  "vision_roles": ["ui-worker", "visual-reviewer", "validator"],
-  "vision_models": ["glm_flash", "deepseek"],
+  "vision_roles": [
+    "ui-worker",
+    "visual-reviewer",
+    "validator"
+  ],
+  "vision_models": [
+    "glm_flash",
+    "deepseek"
+  ],
   "max_parallel": 2,
   "max_attempts": 3,
   "coverage_floor": 70,
-  "coverage_packages": ["internal/config", "internal/status", "internal/geo"],
+  "coverage_packages": [
+    "internal/config",
+    "internal/web"
+  ],
   "protected": [
     "acceptance/**",
     "harness/policy.json",

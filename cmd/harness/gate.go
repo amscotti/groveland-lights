@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -34,77 +35,97 @@ func cmdGate(args []string) error {
 	}
 	wt := filepath.Join(filepath.Dir(root), "wt", t.ID)
 
-	// 1. Serial merge lock.
-	lockPath := filepath.Join(root, "harness", ".merge.lock")
-	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	lock, err := takeMergeLock(root)
 	if err != nil {
 		return err
 	}
-	defer lf.Close()
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("merge lock: %w", err)
-	}
+	defer func() { _ = lock.Close() }()
 
-	// Precondition (E4): the main checkout must be clean.
-	if dirty := DirtyLines(gitOut2(root, "status", "--porcelain")); len(dirty) > 0 {
-		for _, d := range dirty {
-			fmt.Fprintf(os.Stderr, "ERROR: main checkout dirty: %s\n", d)
-		}
-		return fmt.Errorf("main is dirty; an agent may have reached the main checkout")
+	if err := requireCleanMain(root); err != nil {
+		return err
 	}
-
-	// 2. Rebase onto main.
-	if out, err := gitOut(wt, "rebase", "main"); err != nil {
-		progress(root, "gate_conflict "+t.ID)
-		// Try the integrator agent (live), limited to owns.
-		if err := runIntegrator(root, wt, t, pol); err != nil {
-			_, _ = gitOut(wt, "rebase", "--abort")
-			setTaskStatus(root, t.ID, StatusBlocked, "rebase conflict unresolved")
-			return fmt.Errorf("rebase conflict, integrator failed: %v (%s)", err, strings.TrimSpace(out))
-		}
+	if err := rebaseOntoMain(root, wt, t, pol); err != nil {
+		return err
 	}
-
-	// 3. Guard re-run (includes clean-worktree check).
 	if code := guardTask(root, wt, t, pol); code != 0 {
 		progress(root, fmt.Sprintf("gate_guard_fail %s exit=%d", t.ID, code))
 		return fmt.Errorf("guard failed with exit %d", code)
 	}
+	if err := gateChecks(root, wt, pol); err != nil {
+		progress(root, fmt.Sprintf("gate_check_fail %s", t.ID))
+		return err
+	}
+	return finalizeMerge(root, wt, t)
+}
 
-	// 4. Full make check with the flake policy (E10).
+func takeMergeLock(root string) (*os.File, error) {
+	lf, err := os.OpenFile(filepath.Join(root, "harness", ".merge.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+		return nil, fmt.Errorf("merge lock: %w", err)
+	}
+	return lf, nil
+}
+
+// requireCleanMain enforces the E4 precondition.
+func requireCleanMain(root string) error {
+	dirty := DirtyLines(gitOut2(root, "status", "--porcelain"))
+	if len(dirty) == 0 {
+		return nil
+	}
+	for _, d := range dirty {
+		fmt.Fprintf(os.Stderr, "ERROR: main checkout dirty: %s\n", d)
+	}
+	return fmt.Errorf("main is dirty; an agent may have reached the main checkout")
+}
+
+// rebaseOntoMain is gate step 2, with the integrator fallback.
+func rebaseOntoMain(root, wt string, t *Task, pol Policy) error {
+	if out, err := gitOut(wt, "rebase", "main"); err != nil {
+		progress(root, "gate_conflict "+t.ID)
+		if err := runIntegrator(root, wt, t, pol); err != nil {
+			_, _ = gitOut(wt, "rebase", "--abort")
+			setTaskStatus(root, t.ID, StatusBlocked, "rebase conflict unresolved")
+			return fmt.Errorf("rebase conflict, integrator failed: %w (%s)", err, strings.TrimSpace(out))
+		}
+	}
+	return nil
+}
+
+// gateChecks runs make check (with the flake policy) and the holdout suite.
+func gateChecks(root, wt string, pol Policy) error {
 	checkTarget := os.Getenv("CHECK_TARGET") // selftest only; never set in production
 	if checkTarget == "" {
 		checkTarget = "check"
 	}
 	if err := runMake(root, wt, checkTarget, pol); err != nil {
-		progress(root, fmt.Sprintf("gate_check_fail %s", t.ID))
 		return fmt.Errorf("make %s failed: %w", checkTarget, err)
 	}
-
-	// 5. Holdout suite (absolute path per E1).
-	if pol.HoldoutDir != "" {
-		if _, err := os.Stat(pol.HoldoutDir); err == nil {
-			if err := runMake(root, wt, "holdout", pol); err != nil {
-				progress(root, fmt.Sprintf("gate_holdout_fail %s", t.ID))
-				return fmt.Errorf("make holdout failed: %w", err)
-			}
-		}
+	if pol.HoldoutDir == "" {
+		return nil
 	}
+	if _, err := os.Stat(pol.HoldoutDir); err != nil {
+		return nil
+	}
+	if err := runMake(root, wt, "holdout", pol); err != nil {
+		return fmt.Errorf("make holdout failed: %w", err)
+	}
+	return nil
+}
 
-	// 6. ff-only merge into main.
+// finalizeMerge: ff-only merge, push, progress log, worktree removal.
+func finalizeMerge(root, wt string, t *Task) error {
 	if _, err := gitOut(root, "merge", "--ff-only", "task/"+t.ID); err != nil {
 		return fmt.Errorf("ff-only merge refused (diverged?): %w", err)
 	}
-
-	// 7. Push. The script pushes; agents never do.
 	if out, err := gitOut(root, "push", "origin", "main"); err != nil {
-		return fmt.Errorf("push failed: %v: %s", err, strings.TrimSpace(out))
+		return fmt.Errorf("push failed: %w: %s", err, strings.TrimSpace(out))
 	}
-
 	sha := strings.TrimSpace(gitOut2(root, "rev-parse", "HEAD"))
 	progress(root, "gate_ok "+t.ID)
 	progress(root, "merged "+t.ID+" "+sha)
-
-	// 8. Remove the worktree and branch.
 	if out, err := gitOut(root, "worktree", "remove", "--force", wt); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: worktree remove: %v %s\n", err, out)
 	}
@@ -148,7 +169,7 @@ func runMakeSimple(wt, target string, pol Policy) error {
 }
 
 func makeCmd(wt, target string, pol Policy) *exec.Cmd {
-	cmd := exec.Command("make", target)
+	cmd := exec.CommandContext(context.Background(), "make", target)
 	cmd.Dir = wt
 	cmd.Env = append(os.Environ(),
 		"HOLDOUT_DIR="+pol.HoldoutDir,
@@ -167,11 +188,11 @@ func truncate(s string, n int) string {
 func progress(root, event string) {
 	f := filepath.Join(root, "harness", "progress.log")
 	line := time.Now().UTC().Format(time.RFC3339) + " " + event + "\n"
-	fh, err := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	fh, err := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
 	}
-	defer fh.Close()
+	defer func() { _ = fh.Close() }()
 	_, _ = fh.WriteString(line)
 }
 

@@ -5,15 +5,22 @@ import "fmt"
 // ValidateGraph enforces the task-graph invariants that don't need git:
 // cycles, contract-first readiness, and assertion coverage.
 func ValidateGraph(g Graph, assertions []Assertion) error {
+	byID := indexTasks(g)
+	if err := checkNoCycles(g, byID); err != nil {
+		return err
+	}
+	return checkClaimCoverage(g, assertions)
+}
+
+func indexTasks(g Graph) map[string]*Task {
 	byID := map[string]*Task{}
 	for i := range g.Tasks {
-		t := &g.Tasks[i]
-		if _, dup := byID[t.ID]; dup {
-			return fmt.Errorf("duplicate task %s", t.ID)
-		}
-		byID[t.ID] = t
+		byID[g.Tasks[i].ID] = &g.Tasks[i]
 	}
-	// Cycle detection over deps.
+	return byID
+}
+
+func checkNoCycles(g Graph, byID map[string]*Task) error {
 	const white, grey, black = 0, 1, 2
 	color := map[string]int{}
 	var visit func(string) error
@@ -42,8 +49,12 @@ func ValidateGraph(g Graph, assertions []Assertion) error {
 			return err
 		}
 	}
-	// Every gating assertion is claimed by at least one task; non-gating
-	// (gate:false / verified:human) still needs an owner.
+	return nil
+}
+
+// checkClaimCoverage: every assertion is claimed by at least one task; no task
+// claims an unknown assertion. Non-gating assertions still need an owner.
+func checkClaimCoverage(g Graph, assertions []Assertion) error {
 	claimed := map[string]bool{}
 	for _, t := range g.Tasks {
 		for _, c := range t.Claims {
@@ -71,58 +82,17 @@ func ValidateGraph(g Graph, assertions []Assertion) error {
 
 // ReadyTasks returns tasks whose deps are done, that don't overlap owns with
 // any running/merging task or a task already selected in this batch, capped at
-// remaining slots. rework tasks count as ready once their findings are appended.
+// remaining slots.
 func ReadyTasks(g *Graph, p Policy) []*Task {
 	var out []*Task
 	var selectedOwns [][]string
-	running := 0
-	for i := range g.Tasks {
-		s := g.Tasks[i].Status
-		if s == StatusRunning || s == StatusReview || s == StatusMerging {
-			running++
-		}
-	}
-	slots := p.MaxParallel - running
+	slots := p.MaxParallel - countActive(g)
 	if slots <= 0 {
 		return nil
 	}
 	for i := range g.Tasks {
 		t := &g.Tasks[i]
-		if t.Status != StatusReady && t.Status != StatusRework {
-			continue
-		}
-		depsDone := true
-		for _, d := range t.Deps {
-			dt := g.task(d)
-			if dt == nil || dt.Status != StatusDone {
-				depsDone = false
-				break
-			}
-		}
-		if !depsDone {
-			continue
-		}
-		conflict := false
-		for j := range g.Tasks {
-			o := &g.Tasks[j]
-			if o.ID == t.ID {
-				continue
-			}
-			if o.Status == StatusRunning || o.Status == StatusReview || o.Status == StatusMerging {
-				if ownsOverlap(t.Owns, o.Owns) {
-					conflict = true
-					break
-				}
-			}
-		}
-		// Also never select two overlapping tasks in the same batch.
-		for _, so := range selectedOwns {
-			if ownsOverlap(t.Owns, so) {
-				conflict = true
-				break
-			}
-		}
-		if conflict {
+		if !eligible(t, g) || conflictsActive(t, g) || conflictsBatch(t.Owns, selectedOwns) {
 			continue
 		}
 		out = append(out, t)
@@ -132,6 +102,54 @@ func ReadyTasks(g *Graph, p Policy) []*Task {
 		}
 	}
 	return out
+}
+
+func countActive(g *Graph) int {
+	n := 0
+	for i := range g.Tasks {
+		switch g.Tasks[i].Status {
+		case StatusRunning, StatusReview, StatusMerging:
+			n++
+		}
+	}
+	return n
+}
+
+func eligible(t *Task, g *Graph) bool {
+	if t.Status != StatusReady && t.Status != StatusRework {
+		return false
+	}
+	for _, d := range t.Deps {
+		dt := g.task(d)
+		if dt == nil || dt.Status != StatusDone {
+			return false
+		}
+	}
+	return true
+}
+
+func conflictsActive(t *Task, g *Graph) bool {
+	for j := range g.Tasks {
+		o := &g.Tasks[j]
+		if o.ID == t.ID {
+			continue
+		}
+		if o.Status == StatusRunning || o.Status == StatusReview || o.Status == StatusMerging {
+			if ownsOverlap(t.Owns, o.Owns) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func conflictsBatch(owns []string, selected [][]string) bool {
+	for _, so := range selected {
+		if ownsOverlap(owns, so) {
+			return true
+		}
+	}
+	return false
 }
 
 // ContractFirstReady enforces: a feature task may only be ready if every one of its

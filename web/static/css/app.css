@@ -5,6 +5,17 @@
   font-size: 0.85rem;
 }
 
+/* htmx indicator styles, vendored here because includeIndicatorStyles=false
+   under the strict CSP (htmx would otherwise inject an inline <style>). */
+.htmx-indicator {
+  opacity: 0;
+  transition: opacity 200ms ease-in;
+}
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+  opacity: 1;
+}
+
 /* The map owns its element and is initialised exactly once (§3.3). */
 #map {
   width: 100%;
@@ -12,7 +23,7 @@
   border-radius: var(--pico-border-radius, 4px);
 }
 
-/* Bottom sheet used from the map (Phase 3+). */
+/* Bottom sheet used from the map (lands with the public map). */
 .bottom-sheet {
   position: fixed;
   left: 0;

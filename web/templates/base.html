@@ -1,16 +1,17 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.Title}} — Groveland Lights</title>
+  <meta name="htmx-config" content='{"allowEval": false, "includeIndicatorStyles": false}'>
   <link rel="stylesheet" href="/static/vendor/pico-2.1.1.min.css">
   <link rel="stylesheet" href="/static/css/app.css">
   <script src="/static/vendor/htmx-2.0.11.min.js" defer></script>
   <script src="/static/vendor/alpine-csp-3.17.5.min.js" defer></script>
   <script src="/static/js/app.js" defer></script>
-  {{if .TestEnv}}<script src="/static/js/test-hooks.js" defer></script>{{end}}
-</head>
+{{if .TestEnv}}  <script src="/static/js/test-hooks.js" defer></script>
+{{end}}</head>
 <body>
   <header class="container">
     <nav>

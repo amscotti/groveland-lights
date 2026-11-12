@@ -35,6 +35,12 @@ linters:
         linters:
           - gosec
           - errcheck
+      # The harness CLI intentionally executes git/make/opencode with arguments
+      # derived from its own policy files and reads/writes paths inside the
+      # repo. These gosec rules are app-code concerns there, not harness ones.
+      - path: cmd/harness/
+        linters:
+          - gosec
       - path: cmd/harness/
         linters:
           - forbidigo

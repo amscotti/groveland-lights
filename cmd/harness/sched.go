@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -47,18 +48,18 @@ func cmdSched(args []string) error {
 	if dryRun {
 		return schedDryRun(root, pol)
 	}
-
-	if _, err := os.Stat(filepath.Join(root, "harness", "STOP")); err == nil {
-		fmt.Println("harness/STOP exists; not starting")
-		return nil
-	}
-
-	// start-up: holdout path is absolute by construction (policy.json).
-	if pol.HoldoutDir != "" && !filepath.IsAbs(pol.HoldoutDir) {
-		return fmt.Errorf("policy holdout_dir must be absolute (E1), got %q", pol.HoldoutDir)
+	if err := schedPreconditions(root, pol); err != nil {
+		if errors.Is(err, errStopRequested) {
+			return nil
+		}
+		return err
 	}
 
 	var wg sync.WaitGroup
+	return schedLoop(root, pol, &wg)
+}
+
+func schedLoop(root string, pol Policy, wg *sync.WaitGroup) error {
 	for {
 		g, err := loadGraph(root)
 		if err != nil {
@@ -69,52 +70,65 @@ func cmdSched(args []string) error {
 			wg.Wait()
 			return nil
 		}
-		active := countActive(&g)
-		ready := ReadyTasks(&g, pol)
-		if len(ready) == 0 && active == 0 {
+		if err := dispatchReady(root, pol, &g, wg); err != nil {
+			return err
+		}
+		if countActive(&g) > 0 {
+			time.Sleep(10 * time.Second)
+			continue
+		}
+		if len(ReadyTasks(&g, pol)) == 0 {
 			fmt.Println("no ready or active tasks remain")
 			return nil
 		}
-		for _, t := range ready {
-			// Contract-first (feature tasks need a done acceptance dep).
-			if err := ContractFirstReady(t, &g); err != nil {
-				setTaskStatus(root, t.ID, StatusBlocked, err.Error())
-				progress(root, "blocked "+t.ID+" "+err.Error())
-				continue
-			}
-			// E4: main must be clean before claiming.
-			if dirty := DirtyLines(gitOut2(root, "status", "--porcelain")); len(dirty) > 0 {
-				return fmt.Errorf("main checkout dirty: %v — stopping the world", dirty)
-			}
-			// E9: commit graph + new packets before creating worktrees.
-			if err := commitHarnessState(root); err != nil {
-				return err
-			}
-			if err := spawnTask(root, pol, t, &wg); err != nil {
-				setTaskStatus(root, t.ID, StatusBlocked, err.Error())
-				progress(root, "blocked "+t.ID+" "+err.Error())
-			}
+	}
+}
+
+func schedPreconditions(root string, pol Policy) error {
+	if _, err := os.Stat(filepath.Join(root, "harness", "STOP")); err == nil {
+		fmt.Println("harness/STOP exists; not starting")
+		return errStopRequested
+	}
+	// start-up: holdout path is absolute by construction (policy.json).
+	if pol.HoldoutDir != "" && !filepath.IsAbs(pol.HoldoutDir) {
+		return fmt.Errorf("policy holdout_dir must be absolute (E1), got %q", pol.HoldoutDir)
+	}
+	return nil
+}
+
+// errStopRequested signals a clean exit when harness/STOP exists.
+var errStopRequested = errors.New("stop requested")
+
+// dispatchReady claims the currently-ready tasks. Returns an error only for
+// stop-the-world conditions (dirty main, bad state).
+func dispatchReady(root string, pol Policy, g *Graph, wg *sync.WaitGroup) error {
+	ready := ReadyTasks(g, pol)
+	for _, t := range ready {
+		// Contract-first (feature tasks need a done acceptance dep).
+		if err := ContractFirstReady(t, g); err != nil {
+			setTaskStatus(root, t.ID, StatusBlocked, err.Error())
+			progress(root, "blocked "+t.ID+" "+err.Error())
+			continue
 		}
-		if active > 0 {
-			time.Sleep(10 * time.Second)
+		// E4: main must be clean before claiming.
+		if dirty := DirtyLines(gitOut2(root, "status", "--porcelain")); len(dirty) > 0 {
+			return fmt.Errorf("main checkout dirty: %v — stopping the world", dirty)
+		}
+		// E9: commit graph + new packets before creating worktrees.
+		if err := commitHarnessState(root); err != nil {
+			return err
+		}
+		if err := spawnTask(root, pol, t, wg); err != nil {
+			setTaskStatus(root, t.ID, StatusBlocked, err.Error())
+			progress(root, "blocked "+t.ID+" "+err.Error())
 		}
 	}
+	return nil
 }
 
 func stopExists(root string) bool {
 	_, err := os.Stat(filepath.Join(root, "harness", "STOP"))
 	return err == nil
-}
-
-func countActive(g *Graph) int {
-	n := 0
-	for i := range g.Tasks {
-		switch g.Tasks[i].Status {
-		case StatusRunning, StatusReview, StatusMerging:
-			n++
-		}
-	}
-	return n
 }
 
 func commitHarnessState(root string) error {
@@ -138,7 +152,7 @@ func spawnTask(root string, pol Policy, t *Task, wg *sync.WaitGroup) error {
 		return fmt.Errorf("worktree %s already exists", wt)
 	}
 	if out, err := gitOut(root, "worktree", "add", wt, "-b", "task/"+t.ID, "main"); err != nil {
-		return fmt.Errorf("worktree add: %v: %s", err, out)
+		return fmt.Errorf("worktree add: %w: %s", err, out)
 	}
 	linkNodeModules(root, wt)
 	if _, err := os.Stat(filepath.Join(root, ".env.test")); err == nil {
@@ -179,7 +193,7 @@ func runTaskLifecycle(root string, pol Policy, id string) {
 	modelLogical := t.modelLogical(pol)
 	role := t.Role
 	transcript := filepath.Join(root, "harness", "runs", timestamp(), id, role+".jsonl")
-	_ = os.MkdirAll(filepath.Dir(transcript), 0o755)
+	_ = os.MkdirAll(filepath.Dir(transcript), 0o750)
 
 	msg := fmt.Sprintf("Execute the attached task packet. Follow AGENTS.md. Write harness/handoffs/%s.md.", id)
 	if err := runAgent(root, wt(root, id), role, modelLogical, id, filepath.Join(root, "harness", "tasks", id+".md"), msg, transcript, t.Budget.WallMin); err != nil {
@@ -212,8 +226,8 @@ func runTaskLifecycle(root string, pol Policy, id string) {
 
 	// Reviews (parallel): reviewer + reviewer-alt (+ visual-reviewer if ui).
 	diffFile := filepath.Join(root, "harness", "reviews", id+".diff")
-	_ = os.MkdirAll(filepath.Dir(diffFile), 0o755)
-	_ = os.WriteFile(diffFile, []byte(gitOut2(wt(root, id), "diff", "main...HEAD")), 0o644)
+	_ = os.MkdirAll(filepath.Dir(diffFile), 0o750)
+	_ = os.WriteFile(diffFile, []byte(gitOut2(wt(root, id), "diff", "main...HEAD")), 0o600)
 
 	setTaskStatus(root, id, StatusReview, "")
 	roles := []string{"reviewer", "reviewer-alt"}
@@ -305,11 +319,11 @@ func appendFindings(root, id string, roles []string, verdicts map[string]string)
 		}
 	}
 	pkt := filepath.Join(root, "harness", "tasks", id+".md")
-	fh, err := os.OpenFile(pkt, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	fh, err := os.OpenFile(pkt, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
 	}
-	defer fh.Close()
+	defer func() { _ = fh.Close() }()
 	_, _ = fh.WriteString(b.String())
 }
 
@@ -317,7 +331,7 @@ func appendFindings(root, id string, roles []string, verdicts map[string]string)
 func runReview(root, wt, id, role string, pol Policy) string {
 	out := filepath.Join(root, "harness", "reviews", id+"-"+role+".md")
 	transcript := filepath.Join(root, "harness", "runs", timestamp(), id, role+".jsonl")
-	_ = os.MkdirAll(filepath.Dir(transcript), 0o755)
+	_ = os.MkdirAll(filepath.Dir(transcript), 0o750)
 
 	diffPath := filepath.Join(root, "harness", "reviews", id+".diff")
 	extraFiles := []string{diffPath}
@@ -378,7 +392,7 @@ func runAgent(mainRoot, dir, role, modelLogical, title, file, msg, transcriptPat
 	if err != nil {
 		return err
 	}
-	defer outFh.Close()
+	defer func() { _ = outFh.Close() }()
 	cmd.Stdout = outFh
 	cmd.Stderr = io.Discard
 	return cmd.Run()
@@ -476,12 +490,12 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 	_, err = io.Copy(out, in)
 	return err
 }
@@ -490,7 +504,7 @@ var reIntegratorPrompt = regexp.MustCompile(`integrator`)
 
 func runIntegrator(root, wtPath string, t *Task, pol Policy) error {
 	transcript := filepath.Join(root, "harness", "runs", timestamp(), t.ID, "integrator.jsonl")
-	_ = os.MkdirAll(filepath.Dir(transcript), 0o755)
+	_ = os.MkdirAll(filepath.Dir(transcript), 0o750)
 	conflicts := gitOut2(wtPath, "diff", "--name-only", "--diff-filter=U")
 	msg := "Resolve the rebase conflicts in these files only: " + conflicts +
 		" Task owns: " + strings.Join(t.Owns, ", ") + ". Preserve both sides' intent, run make check-fast, write harness/handoffs/" + t.ID + ".md."

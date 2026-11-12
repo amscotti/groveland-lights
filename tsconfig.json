@@ -11,6 +11,7 @@
   },
   "include": [
     "web/static/js/**/*.js",
+    "web/static/js/**/*.d.ts",
     "acceptance/e2e/**/*.ts",
     "playwright.config.ts"
   ]

@@ -5,16 +5,19 @@
 (function () {
   'use strict';
 
-  window.addEventListener('DOMContentLoaded', function () {
+  function boot() {
     if (window.htmx) {
       window.htmx.config.allowEval = false;
     }
     if (window.Alpine) {
       window.Alpine.data('glPage', function () {
+        var note = document.querySelector('.env-note');
         return {
-          envLabel: (document.querySelector('.env-note') || {}).dataset ? document.querySelector('.env-note').dataset.env : 'dev'
+          envLabel: note instanceof HTMLElement ? String(note.dataset.env ?? '') : 'dev'
         };
       });
     }
-  });
+  }
+
+  window.addEventListener('DOMContentLoaded', boot);
 })();

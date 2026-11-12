@@ -83,7 +83,7 @@ generate-check:
 .PHONY: cover
 cover: ## Coverage floor on the policy's coverage packages
 	@floor=$$(jq -r '.coverage_floor' harness/policy.json); \
-	pkgs=$$(jq -r '.coverage_packages | join(" ")' harness/policy.json); \
+	pkgs=$$(jq -r '.coverage_packages | map("./" + .) | join(" ")' harness/policy.json); \
 	if [ -z "$$pkgs" ]; then echo "cover: no coverage packages pinned yet, skip"; exit 0; fi; \
 	go test -cover $$pkgs | awk -v floor=$$floor '/^ok/ { cov=$$5; gsub(/%/,"",cov); print; if (cov+0 < floor+0) { print "coverage floor miss: " $$2 " " cov "% < " floor "%"; bad=1 } } END { exit bad?1:0 }'
 
