@@ -51,7 +51,7 @@ Those claims are evaluated mechanically against the code and the templates.
   `go.mod/go.sum` are absent. `net/http/cookiejar` is stdlib and
   `internal/store` is intra-module, so `allow_deps: []` is respected.
 - **The header placement is safe.** Both sets happen immediately before
-  `renderPartial`, which buffers (`internal/web/probe.go:52-67`); a render
+  `renderPartial`, which buffers (`internal/web/probe.go:55-66`); a render
   failure writes nothing first, so `http.Error` can overwrite the type with its
   own plain-text 500. The no-JS 303 branch is untouched, as the packet allows.
 
