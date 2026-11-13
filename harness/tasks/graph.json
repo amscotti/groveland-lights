@@ -81,13 +81,14 @@
         "github.com/remyoudompheng/bigfft",
         "modernc.org/libc"
       ],
-      "status": "review",
-      "attempts": 3,
+      "status": "blocked",
+      "attempts": 4,
       "model": "glm",
       "budget": {
         "steps": 200,
         "wall_min": 90
-      }
+      },
+      "findings": "gate: main is dirty; an agent may have reached the main checkout"
     },
     {
       "id": "T-102",
