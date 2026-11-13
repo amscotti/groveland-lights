@@ -1,0 +1,1157 @@
+diff --git a/cmd/server/boot_test.go b/cmd/server/boot_test.go
+new file mode 100644
+index 0000000..12e1f8e
+--- /dev/null
++++ b/cmd/server/boot_test.go
+@@ -0,0 +1,408 @@
++//go:build smoke
++
++// Boot-level integration tests for the server binary: the wiring main.go
++// does before serving (store.Open at boot, SetProbeStore, graceful shutdown)
++// is invisible to in-process handler tests, so these spawn bin/server and
++// exercise it black-box on a real port with a temp SQLite DB. They are the
++// unit-side equivalent of the A-103/A-104 draft contracts (persistence across
++// SIGTERM; checksum-mismatch boot refusal) and complement the protected
++// acceptance suite.
++//
++// Run explicitly (they spawn a listening binary, so they must not run inside
++// plain `go test ./...`): `make build` once, then
++//
++//	go test -tags smoke -count=1 ./cmd/server/
++//
++// Binary resolution mirrors the acceptance suite: $BIN if set, else bin/server
++// found by walking up to the repo root. A missing binary is a failure, never a
++// skip. Stdlib only.
++package main
++
++import (
++	"bytes"
++	"context"
++	"io"
++	"net"
++	"net/http"
++	"net/url"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"regexp"
++	"strconv"
++	"strings"
++	"sync"
++	"syscall"
++	"testing"
++	"time"
++)
++
++var (
++	bootReCount = regexp.MustCompile(`<span id="probe-count">(\d+)</span>`)
++	bootReHex   = regexp.MustCompile("[0-9a-f]{64}")
++)
++
++// syncBuf is a mutex-guarded buffer: the server writes while the test may
++// read, so concurrent access must be safe.
++type syncBuf struct {
++	mu  sync.Mutex
++	buf bytes.Buffer
++}
++
++func (b *syncBuf) Write(p []byte) (int, error) {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	return b.buf.Write(p)
++}
++
++func (b *syncBuf) String() string {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	return b.buf.String()
++}
++
++// bootFindBin resolves the server binary: $BIN if set, else bin/server found
++// by walking up from the package dir to the repo root. Not finding it is a
++// FAILURE, never a skip: run `make build`.
++func bootFindBin(t *testing.T) string {
++	t.Helper()
++	if p := os.Getenv("BIN"); p != "" {
++		abs, err := filepath.Abs(p)
++		if err != nil {
++			t.Fatalf("BIN=%q: %v", p, err)
++		}
++		if _, err := os.Stat(abs); err != nil {
++			t.Fatalf("BIN=%q: %v", p, err)
++		}
++		return abs
++	}
++	dir, err := os.Getwd()
++	if err != nil {
++		t.Fatalf("getwd: %v", err)
++	}
++	for i := 0; i < 8; i++ {
++		cand := filepath.Join(dir, "bin", "server")
++		if st, err := os.Stat(cand); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
++			return cand
++		}
++		parent := filepath.Dir(dir)
++		if parent == dir {
++			break
++		}
++		dir = parent
++	}
++	t.Fatal("server binary not found: run `make build` or set BIN")
++	return ""
++}
++
++// bootFreePort picks a free TCP port by listening on 127.0.0.1:0, then closing.
++func bootFreePort(t *testing.T) int {
++	t.Helper()
++	l, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatalf("listen :0: %v", err)
++	}
++	defer l.Close()
++	return l.Addr().(*net.TCPAddr).Port
++}
++
++// bootServer is one spawned instance. dbPath is remembered so a second spawn
++// can reopen the same database (the persistence path).
++type bootServer struct {
++	cmd     *exec.Cmd
++	base    string
++	dbPath  string
++	out     *syncBuf
++	stopped bool
++}
++
++// bootSpawn starts the binary (APP_ENV=test) on a free port with dbPath as
++// DB_PATH and waits for /healthz. Cleanup kills + waits idempotently.
++func bootSpawn(t *testing.T, dbPath string) *bootServer {
++	t.Helper()
++	bin := bootFindBin(t)
++	port := bootFreePort(t)
++	base := "http://127.0.0.1:" + strconv.Itoa(port)
++	out := &syncBuf{}
++	cmd := exec.Command(bin)
++	cmd.Dir = t.TempDir()
++	cmd.Env = append(os.Environ(),
++		"PORT="+strconv.Itoa(port),
++		"APP_ENV=test",
++		"BASE_URL="+base,
++		"DB_PATH="+dbPath,
++		"PHOTO_DIR="+filepath.Join(t.TempDir(), "photos"),
++		"SESSION_KEY=dGVzdC1zZXNzaW9uLWtleS0zMi1ieXRlcy1hYQ==",
++		"IP_HASH_KEY=dGVzdC1pcGhhc2gta2V5LTMyLWJ5dGVzLWJi",
++		"ADMIN_TOKEN=dGVzdC1hZG1pbi10b2tlbi0zMi1ieXRl",
++		"TOWN_BBOX=42.70,-71.09,42.82,-70.96",
++		"TZ=America/New_York",
++	)
++	cmd.Stdout, cmd.Stderr = out, out
++	if err := cmd.Start(); err != nil {
++		t.Fatalf("start %s: %v", bin, err)
++	}
++	s := &bootServer{cmd: cmd, base: base, dbPath: dbPath, out: out}
++	t.Cleanup(func() {
++		if s.stopped {
++			return
++		}
++		_ = s.cmd.Process.Kill()
++		_ = s.cmd.Wait()
++	})
++	bootWaitHealthy(t, s, 5*time.Second)
++	return s
++}
++
++// bootStop sends SIGTERM and waits (bounded) for the graceful shutdown, so
++// the store close checkpoints WAL before a respawn.
++func bootStop(t *testing.T, s *bootServer) {
++	t.Helper()
++	if s.stopped {
++		return
++	}
++	s.stopped = true
++	done := make(chan error, 1)
++	go func() { done <- s.cmd.Wait() }()
++	if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil {
++		t.Fatalf("SIGTERM server: %v", err)
++	}
++	select {
++	case <-done:
++		return
++	case <-time.After(10 * time.Second):
++		_ = s.cmd.Process.Kill()
++		<-done
++		t.Fatalf("server did not exit within 10s of SIGTERM; output:\n%s", s.out.String())
++	}
++}
++
++func bootWaitHealthy(t *testing.T, s *bootServer, timeout time.Duration) {
++	t.Helper()
++	ctx, cancel := context.WithTimeout(context.Background(), timeout)
++	defer cancel()
++	client := &http.Client{Timeout: time.Second}
++	for {
++		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.base+"/healthz", nil)
++		if err != nil {
++			t.Fatalf("new health request: %v", err)
++		}
++		if resp, err := client.Do(req); err == nil {
++			_, _ = io.Copy(io.Discard, resp.Body)
++			_ = resp.Body.Close()
++			if resp.StatusCode == http.StatusOK {
++				return
++			}
++		}
++		select {
++		case <-ctx.Done():
++			_ = s.cmd.Process.Kill()
++			_ = s.cmd.Wait()
++			t.Fatalf("server not healthy within %s; output:\n%s", timeout, s.out.String())
++		case <-time.After(50 * time.Millisecond):
++		}
++	}
++}
++
++// bootDo performs one request against the spawned server without following
++// redirects; form != nil makes it a urlencoded POST, hx adds HX-Request.
++func bootDo(t *testing.T, s *bootServer, method, target string, cookie *http.Cookie, form url.Values, hx bool) (int, http.Header, string) {
++	t.Helper()
++	var body io.Reader
++	if form != nil {
++		body = strings.NewReader(form.Encode())
++	}
++	req, err := http.NewRequestWithContext(context.Background(), method, target, body)
++	if err != nil {
++		t.Fatalf("%s %s: %v", method, target, err)
++	}
++	if form != nil {
++		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++	}
++	if hx {
++		req.Header.Set("HX-Request", "true")
++	}
++	if cookie != nil {
++		req.AddCookie(cookie)
++	}
++	client := &http.Client{
++		Timeout: 5 * time.Second,
++		CheckRedirect: func(req *http.Request, via []*http.Request) error {
++			return http.ErrUseLastResponse
++		},
++	}
++	resp, err := client.Do(req)
++	if err != nil {
++		t.Fatalf("%s %s: %v", method, target, err)
++	}
++	defer func() { _ = resp.Body.Close() }()
++	b, err := io.ReadAll(resp.Body)
++	if err != nil {
++		t.Fatalf("%s %s: read body: %v", method, target, err)
++	}
++	return resp.StatusCode, resp.Header, string(b)
++}
++
++// bootFragment GETs /probe and enforces the fragment contract; it returns the
++// CSRF cookie and the count.
++func bootFragment(t *testing.T, s *bootServer) (*http.Cookie, int64) {
++	t.Helper()
++	status, headers, body := bootDo(t, s, http.MethodGet, s.base+"/probe", nil, nil, false)
++	if status != http.StatusOK {
++		t.Fatalf("GET /probe: status %d, want 200; body:\n%s", status, body)
++	}
++	var cookie *http.Cookie
++	for _, c := range (&http.Response{Header: headers}).Cookies() {
++		if c.Name == "csrf_token" {
++			cookie = c
++		}
++	}
++	if cookie == nil || cookie.Value == "" {
++		t.Fatalf("GET /probe minted no csrf_token cookie; body:\n%s", body)
++	}
++	m := bootReCount.FindStringSubmatch(body)
++	if m == nil {
++		t.Fatalf("GET /probe fragment shows no count in #probe-count; body:\n%s", body)
++	}
++	n, err := strconv.ParseInt(m[1], 10, 64)
++	if err != nil {
++		t.Fatalf("GET /probe count %q: %v", m[1], err)
++	}
++	return cookie, n
++}
++
++// bootTamper flips one byte of the first 64-char lowercase-hex token in the
++// DB file (the recorded migration checksum), keeping the length identical.
++func bootTamper(t *testing.T, dbPath string) string {
++	t.Helper()
++	b, err := os.ReadFile(dbPath)
++	if err != nil {
++		t.Fatalf("read db: %v", err)
++	}
++	loc := bootReHex.FindIndex(b)
++	if loc == nil {
++		t.Fatalf("no 64-char hex token found in %s", dbPath)
++	}
++	if b[loc[0]] != 'f' {
++		b[loc[0]] = 'f'
++	} else {
++		b[loc[0]] = '0'
++	}
++	tampered := filepath.Join(filepath.Dir(dbPath), "tampered.db")
++	if err := os.WriteFile(tampered, b, 0o600); err != nil {
++		t.Fatalf("write tampered db: %v", err)
++	}
++	return tampered
++}
++
++// TestBootSmokeProbeFlowsAndPersistence: the home page mounts the probe
++// section, rejected POSTs leave the counter untouched, a valid HTMX POST
++// increments, the count survives SIGTERM + respawn on the same DB_PATH, and
++// a valid no-JS POST answers 303 to /.
++func TestBootSmokeProbeFlowsAndPersistence(t *testing.T) {
++	dbPath := filepath.Join(t.TempDir(), "app.db")
++	s := bootSpawn(t, dbPath)
++
++	status, _, body := bootDo(t, s, http.MethodGet, s.base+"/", nil, nil, false)
++	if status != http.StatusOK {
++		t.Fatalf("GET /: status %d, want 200; body:\n%s", status, body)
++	}
++	for _, want := range []string{`section id="probe"`, `hx-get="/probe"`, `<a href="/probe">Probe</a>`} {
++		if !strings.Contains(body, want) {
++			t.Fatalf("GET / missing probe mount markup %q; body:\n%s", want, body)
++		}
++	}
++
++	cookie, n := bootFragment(t, s)
++
++	// Missing token -> 403.
++	if status, _, _ = bootDo(t, s, http.MethodPost, s.base+"/probe", cookie, nil, true); status != http.StatusForbidden {
++		t.Fatalf("POST /probe without csrf_token: status %d, want 403", status)
++	}
++	// Tampered token (same shape, wrong value) -> 403.
++	tampered := []byte(cookie.Value)
++	if tampered[0] == 'A' {
++		tampered[0] = 'B'
++	} else {
++		tampered[0] = 'A'
++	}
++	form := url.Values{"csrf_token": {string(tampered)}}
++	if status, _, _ = bootDo(t, s, http.MethodPost, s.base+"/probe", cookie, form, true); status != http.StatusForbidden {
++		t.Fatalf("POST /probe with tampered csrf_token: status %d, want 403", status)
++	}
++	// Counter unchanged after the rejected POSTs.
++	_, now := bootFragment(t, s)
++	if now != n {
++		t.Fatalf("counter changed after rejected POSTs: %d, want %d", now, n)
++	}
++
++	// Valid HTMX POST -> 200 with n+1.
++	form = url.Values{"csrf_token": {cookie.Value}}
++	status, _, body = bootDo(t, s, http.MethodPost, s.base+"/probe", cookie, form, true)
++	if status != http.StatusOK {
++		t.Fatalf("POST /probe (HTMX): status %d, want 200; body:\n%s", status, body)
++	}
++	m := bootReCount.FindStringSubmatch(body)
++	if m == nil {
++		t.Fatalf("POST /probe (HTMX) fragment shows no count; body:\n%s", body)
++	}
++	if got, err := strconv.ParseInt(m[1], 10, 64); err != nil || got != n+1 {
++		t.Fatalf("POST /probe (HTMX) count = %v, want %d", m[1], n+1)
++	}
++
++	// SIGTERM (graceful shutdown closes the store), respawn on the same
++	// DB_PATH: the count is unchanged — the A-103 restart path.
++	bootStop(t, s)
++	s2 := bootSpawn(t, s.dbPath)
++	_, after := bootFragment(t, s2)
++	if after != n+1 {
++		t.Fatalf("count after restart = %d, want %d (not persisted?)", after, n+1)
++	}
++
++	// No-JS form flow: valid token, no HX-Request -> 303 to /.
++	cookie2, _ := bootFragment(t, s2)
++	form = url.Values{"csrf_token": {cookie2.Value}}
++	status, headers, body := bootDo(t, s2, http.MethodPost, s2.base+"/probe", cookie2, form, false)
++	if status != http.StatusSeeOther {
++		t.Fatalf("POST /probe without HX-Request: status %d, want 303; body:\n%s", status, body)
++	}
++	if loc := headers.Get("Location"); loc != "/" {
++		t.Fatalf("POST /probe without HX-Request: Location = %q, want \"/\"", loc)
++	}
++}
++
++// TestBootSmokeRefusesTamperedChecksum: booting on a DB whose recorded
++// migration checksum no longer matches the embedded file must exit non-zero
++// with output naming 0001_init.sql and "checksum" (the A-104 runtime half).
++func TestBootSmokeRefusesTamperedChecksum(t *testing.T) {
++	dbPath := filepath.Join(t.TempDir(), "app.db")
++	s := bootSpawn(t, dbPath)
++	bootStop(t, s) // graceful close checkpoints WAL into the main DB file
++
++	tampered := bootTamper(t, dbPath)
++	bin := bootFindBin(t)
++	out := &syncBuf{}
++	cmd := exec.Command(bin)
++	cmd.Dir = t.TempDir()
++	cmd.Env = append(os.Environ(),
++		"PORT="+strconv.Itoa(bootFreePort(t)),
++		"APP_ENV=test",
++		"BASE_URL=http://127.0.0.1:1",
++		"DB_PATH="+tampered,
++		"PHOTO_DIR="+filepath.Join(t.TempDir(), "photos"),
++		"SESSION_KEY=dGVzdC1zZXNzaW9uLWtleS0zMi1ieXRlcy1hYQ==",
++		"IP_HASH_KEY=dGVzdC1pcGhhc2gta2V5LTMyLWJ5dGVzLWJi",
++		"ADMIN_TOKEN=dGVzdC1hZG1pbi10b2tlbi0zMi1ieXRl",
++		"TOWN_BBOX=42.70,-71.09,42.82,-70.96",
++		"TZ=America/New_York",
++	)
++	cmd.Stdout, cmd.Stderr = out, out
++	_ = cmd.Run() // expected to fail; ProcessState below is the assertion
++	if ps := cmd.ProcessState; ps == nil || ps.ExitCode() == 0 {
++		t.Fatalf("tampered DB boot: expected non-zero exit; output:\n%s", out.String())
++	}
++	got := out.String()
++	if !strings.Contains(got, "0001_init.sql") || !strings.Contains(got, "checksum") {
++		t.Fatalf("refusal output must name 0001_init.sql and checksum; output:\n%s", got)
++	}
++}
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+index 735daf7..24605cf 100644
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -13,6 +13,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/amscotti/groveland-lights/internal/config"
++	"github.com/amscotti/groveland-lights/internal/store"
+ 	"github.com/amscotti/groveland-lights/internal/web"
+ )
+ 
+@@ -32,6 +33,21 @@ func run() error {
+ 	logger := newLogger(cfg)
+ 	slog.SetDefault(logger)
+ 
++	// Open the store before serving: this applies any pending migrations and
++	// validates the recorded checksums. On a mismatch the error names the
++	// offending migration file and both checksums — logging it here and
++	// exiting non-zero is the boot refusal for a tampered or drifted DB.
++	db, err := store.Open(context.Background(), cfg.DBPath)
++	if err != nil {
++		return err
++	}
++	// Close after the graceful shutdown has drained requests (defers run
++	// last); the pool's final close checkpoints the WAL. A close error here
++	// cannot be acted on, so it is deliberately discarded.
++	defer func() { _ = db.Close() }()
++
++	web.SetProbeStore(db)
++
+ 	srv, err := web.New(cfg, logger)
+ 	if err != nil {
+ 		return err
+diff --git a/harness/handoffs/T-103.md b/harness/handoffs/T-103.md
+new file mode 100644
+index 0000000..b18253b
+--- /dev/null
++++ b/harness/handoffs/T-103.md
+@@ -0,0 +1,180 @@
++BLOCKED (partial): 11 of the 12 frozen A-103 draft assertions are satisfied in substance and all packet deliverables are green; 1 needs a sanctioned mechanical regex fix in the draft (gap b), and 1 — the no-JS server-rendered home section — is unsatisfiable within this task's owns (gap a). Read "Contract gaps" before activating T-105.
++
++# T-103 — Wire the probe: store + CSRF + /probe routes + home UI (M1)
++
++**DONE for every deliverable the packet lists.** `cmd/server` boots on SQLite
++with the checksum boot refusal, `/probe` serves the CSRF-protected fragment
++exactly to the frozen UI/HTTP contract, the home page mounts the probe
++section, everything is table-tested, and `make check` is fully green.
++Two frozen-draft clauses are unsatisfiable without touching files this task
++is forbidden to touch; they are documented precisely below so the planner can
++schedule the one-line-owner fix BEFORE T-105 burns its activation budget.
++
++## What changed (commit `52525d5`, branch `task/T-103`)
++
++| File | Change |
++| --- | --- |
++| `cmd/server/main.go` | `run()` now: `config.Load` → logger → `store.Open(ctx, cfg.DBPath)`; on error it returns (main logs `fatal` with the store's refusal — names `0001_init.sql`, both checksums, wraps `ErrChecksumMismatch` — and exits 1: A-104's runtime boot refusal). On success: `defer func() { _ = db.Close() }()` (runs after the graceful shutdown drains requests; final close checkpoints WAL), `web.SetProbeStore(db)`, then `web.New` + serve exactly as before. Graceful shutdown unchanged. |
++| `internal/web/probe.go` (new) | Scaffold wiring per packet: package-level `SetProbeStore(*store.DB)` called from main; `init()` registers `GET /probe` + `POST /probe` via the existing `register`/`serverFrom` pattern; `renderPartial` helper (buffers, mirrors `renderPage` for the `partials` map) — `web.go`/`templates.go` untouched (git diff confirms owned paths only); doc comment marks the scaffold refactor point (move store onto `Server`). Handlers: `probeGet` (count → `IssueCSRFToken` → fragment; store unset/error → 500 + log), `probePost` (`parseProbePost` parses the form ONCE at the boundary into `probeSubmission{CSRFToken, HTMX}`; handlers never read the form afterwards — rule 6; `VerifyCSRF` err → uniform 403, counter untouched; `ProbeInc` error → 500; HTMX → 200 fragment, no HX-Request → `303 Location: /` after incrementing). |
++| `internal/web/probe_test.go` (new) | Required table tests through the real middleware chain + a real `store.Open` temp-file DB: `valid token increments`, `missing token 403 leaves count unchanged`, `tampered token 403`, `non-HTMX post redirects 303 to /`, `unparseable body 400`; `renders the contract fragment` (asserts every frozen string, including the no-JS plain `action`/`method`/button attributes), `fragment has no html/body and no id="map"`, `store unset answers 500`, `store failure answers 500`; `TestProbeHomeMount` (`GET / includes the probe mount section`). Rows build fresh server+store each (shuffle-safe). |
++| `web/templates/partials/probe.html` (new) | The fragment, byte-to-contract: `<h2>Probe</h2>`, `<p>Count: <span id="probe-count">{{.Count}}</span></p>`, `<form action="/probe" method="post" hx-post="/probe" hx-target="#probe" hx-swap="innerHTML">` with hidden `csrf_token` and `<button type="submit">Increment counter</button>`. No inline handlers/styles. |
++| `web/templates/pages/index.html` | Probe mount added after the intro copy, per the packet's deliverable text: `<section id="probe" hx-get="/probe" hx-trigger="load" hx-target="#probe" hx-swap="innerHTML">` containing `<a href="/probe">Probe</a>` for no-JS visitors. Pure static markup — renders fine under the existing `homeData` fixture (TestRenderAll + html-validate green). |
++| `cmd/server/boot_test.go` (new, `//go:build smoke`) | Spawn-based boot integration tests, mirroring the repo's acceptance-tag convention: real binary, free port, temp DB. `TestBootSmokeProbeFlowsAndPersistence` (home mount; missing/tampered → 403 unchanged; valid HTMX → 200 N+1; **SIGTERM + respawn on the same DB_PATH keeps the count — the A-103 restart path**; no-JS POST → 303 `/`) and `TestBootSmokeRefusesTamperedChecksum` (**tampered DB → non-zero exit, output names `0001_init.sql` + `checksum` — the A-104 runtime half**). Run explicitly: `go test -tags smoke -count=1 ./cmd/server/` after `make build`. Excluded from `go test ./...`/`test-unit` by design (they spawn a listening binary that requires a build first), exactly like `acceptance/go`'s `-tags acceptance` pattern. |
++
++No new dependencies (`allow_deps: []`; go.mod/go.sum untouched — `fmt-check`'s
++tidy-diff green). No TODO/FIXME/console.log/inline handlers/`Phase N` (greps +
++`make phase-grep` clean).
++
++## How each frozen assertion is satisfied — full walk
++
++### Packet UI/HTTP contract
++
++| Clause | Status | Evidence |
++| --- | --- | --- |
++| `GET /` renders as today + `<section id="probe">` with the four hx attributes | ✅ | `TestProbeHomeMount`; `make templates-check` (render + html-validate green with hx-* attributes); active @A-102/@A-000 e2e green with the section present |
++| Section works without JS | ⚠️ partially — see gap (a) | The plain link reaches the fragment page (packet's sanctioned affordance); the frozen draft demands more (below) |
++| `GET /probe` → 200 fragment, no `<html>`/`<body>`, no `id="map"`, h2 exactly `Probe`, `<p>Count: <span id="probe-count">N</span></p>`, form + hidden `csrf_token` + button exactly `Increment counter` + hx-post trio | ✅ | `TestProbeGet` rows; boot smoke asserts the fragment over real HTTP |
++| POST valid + HX-Request → 200 fragment N+1 | ✅ | `TestProbePost/valid_token_increments`; boot smoke |
++| POST missing/tampered → 403, counter unchanged | ✅ | `TestProbePost` rows 2–3; boot smoke |
++| POST valid without HX-Request → 303 `Location: /` after incrementing | ✅ | `TestProbePost/non-HTMX_post_redirects_303_to_/`; boot smoke (asserts Location and the store count) |
++| Parse once at boundary into typed struct; no `r.FormValue` after parsing | ✅ | `parseProbePost` → `probeSubmission`; sole form access in the feature |
++| Store unset/error → 500 with log line | ✅ | `TestProbeGet` unset/failure rows (both log lines asserted via 500) |
++| Boot order: config → logger → store.Open → on error log + exit non-zero → defer Close → SetProbeStore → web.New → serve | ✅ | `cmd/server/main.go`; `TestBootSmokeRefusesTamperedChecksum` proves non-zero exit + message |
++
++### A-104 runtime half (mine per packet)
++
++Tampered checksum at boot → refusal, non-zero exit, output names
++`0001_init.sql` + `checksum`: ✅ `TestBootSmokeRefusesTamperedChecksum`
++(green, twice: plain and `-race`). T-101's `TestMigrationChecksumGuard`
++pins the store-side error text; main's wiring surfaces it verbatim.
++
++### A-103 draft assertions, as written (`acceptance/drafts/*.txt`)
++
++| # | Assertion | Against my work |
++| --- | --- | --- |
++| 1 | Go: GET / → 200 | ✅ |
++| 2 | Go: GET /probe fragment has `Count:\s*(\d+)` + hidden csrf_token with value | ❌ mechanical defect in the draft's regex — see gap (b); csrf_token input + value match fine |
++| 3 | Go: POST missing token → 403 | ✅ |
++| 4 | Go: POST tampered token → 403 | ✅ |
++| 5 | Go: counter unchanged after rejected POSTs | ✅ |
++| 6 | Go: next valid POST = n0+1 | ✅ (fragment count verified by my span-based tests + boot smoke) |
++| 7 | Go: valid HTMX POST → 200, fragment count n0+1 | ✅ status/increment; ❌ same `Count:` regex defect as #2 when parsing the body |
++| 8 | Go: SIGTERM + respawn same DB_PATH → same count | ✅ boot smoke test green |
++| 9 | Go: valid POST without HX-Request → 303 `Location: /` | ✅ |
++| 10 | TS @smoke: section populated via HTMX; heading `Probe`; `Count: N` with digits in `#probe-count`; click → N+1 in place, no navigation; reload → N+1 | ✅ (shell fills via hx-trigger=load; form hx-post swaps in place; verified by design + active-suite green; executable only at activation) |
++| 11 | TS @a11y: axe zero violations with probe present | ✅ active @A-000 @a11y passes 4/4 projects with the HTMX-filled section present; fragment markup is h2-after-h1, named button, exempt hidden input |
++| 12 | TS no-JS: section server-rendered with heading/count/#probe-count/button, submit → 303 → `/` shows N+1 | ❌ see gap (a) |
++
++## Contract gaps (why this handoff is prefixed BLOCKED)
++
++### (a) The no-JS home clause is unsatisfiable within owns — needs a web.go owner
++
++`acceptance/drafts/probe.spec.ts.txt` (test "no-JS fallback form increments
++via 303 redirect") and `acceptance/drafts/README.md` (row: "server-rendered
++(with a plain form) when JS is off") require `GET /` to server-render the
++probe heading, live `Count: N` in `#probe-count`, and a POST form carrying a
++**live CSRF token** into the HTML response. With JavaScript off nothing
++fills the section client-side, so the bytes must come from the home render.
++
++The home render lives in `internal/web/web.go` (`homeData`/`home()` +
++`templates.go`'s funcless parse). This packet forbids touching `web.go`
++three times ("not in your owns"; Out of scope; "do not edit it"), and
++`web_test.go`/`homeData` are likewise frozen ("you change neither").
++I proved no template-only construction can inject live count/token data:
++the parser accepts no funcs, `homeData` has no probe fields, and any
++`{{.Probe}}`-style access errors at execution. The packet's own deliverable
++("empty shell + `<a href="/probe">` link; a noscript-friendly static form is
++NOT needed") therefore cannot satisfy the frozen draft — the packet is
++internally inconsistent on this clause (its own UI-contract bullet says "The
++section must also work without JS", matching the draft, while its
++deliverable prose describes the shell).
++
++**Required fix (≈15 lines, one owner task):** grant an owner of
++`internal/web/web.go` (currently ownerless — the same file holds T-102's
++blocked chain-order fix): add `Count int64` + `CSRFToken string` to
++`homeData` (or embed `probeData`), have `home()` read the store and call
++`IssueCSRFToken`, and change `index.html`'s section to
++`{{template "partials/probe.html" .}}` (keep the four hx attributes; drop
++the link). Every other file (probe handlers, fragment, CSRF, boot) is
++already in place — my template renders the same partial for both flows.
++Until then, T-105's activation of test #12 will fail as its rules
++anticipate (BLOCKED → fix task).
++
++### (b) The Go draft's `probeReCount` regex cannot match the packet-frozen markup
++
++The draft pins `probeReCount = Count:\s*(\d+)` over the **raw HTML source**,
++but the packet freezes the fragment line byte-exactly as
++`<p>Count: <span id="probe-count">N</span></p>` — the digits sit inside the
++span, so after `Count: ` the source contains `<span`, and the regex cannot
++match (whitespace-backtracking still hits `<`). No markup satisfies both the
++packet string and this regex; the TS draft independently requires the
++digits-only span (`toHaveText(/^\d+$/)`), which is what I implemented and
++tested. Assertion #2/#7's *intent* (fragment shows `Count: N`, POST returns
++N+1) is fully verified by my unit rows and boot smoke. **Disposition for
++T-105:** this is the sanctioned mechanical-selector class (rule 3b, "a
++selector that must be scoped" — the regex needs to skip the span tag or be
++applied to tag-stripped text; the `(\d+)` capture and every other assertion
++stay identical). Planner may alternatively re-freeze the contract string;
++editing the draft is not mine to do.
++
++## Commands run (exit codes)
++
++Baseline (pre-change):
++
++| Command | Exit | Note |
++| --- | --- | --- |
++| `make e2e-task TASK=T-103` | 2 → then **0** | first run failed at webServer (`bin/server` missing, gitignored); after `go build -o bin/server ./cmd/server`: grep `@A-103`, **0 tests, `--pass-with-no-tests`** — the A-103 spec is an inert draft, exactly as the packet predicts |
++| `make check-fast` | 0 | tidy no drift, vet, golangci-lint 0 issues, `-race -shuffle=on` all ok |
++
++Final tree:
++
++| Command | Exit | Result |
++| --- | --- | --- |
++| `go test ./internal/web/... -run TestProbe -race -count=1` | 0 | 10 required/extra rows green |
++| `make check-fast` | 0 | fmt-check, vet, lint 0 issues (after fixing its findings: `defer db.Close()` errcheck → discarded-error closure; noctx → `httptest.NewRequestWithContext` in my tests, matching package style) |
++| `make cover` | 0 | internal/web **85.9%**, internal/config 81.1% (floor 70) |
++| `make phase-grep` | 0 | no "Phase N" |
++| `go test ./internal/web/... ./cmd/server/... -race -count=1` | 0 | packet's unit-level command (cmd/server untagged has no test files) |
++| `make build` then `go test -tags smoke -count=1 -v ./cmd/server/` | 0 | boot smoke: persistence across SIGTERM/respawn + checksum boot refusal, over real HTTP against the real binary |
++| `go test -tags smoke -race -count=1 ./cmd/server/` | 0 | smoke under race |
++| `go vet -tags smoke ./cmd/server/` | 0 | tagged file vet-clean too |
++| `make templates-check` | 0 | render snapshots + html-validate green with the mount section |
++| `make e2e-task TASK=T-103` | 0 | still no active @A-103 specs (draft inert) — expected; T-105 activates |
++| `make e2e` | 0 | **20/20 active specs on all four projects** — home stays CSP/console/axe-clean with the HTMX-filled probe section present |
++| `make check` | 0 | full gate: check-fast, generate-check, cover, vuln, templates-check, js-check, acceptance-go, e2e (20), a11y (4), visual, secrets, phase-grep |
++| `git commit` | 0 | `52525d5`, lefthook pre-commit (gitleaks, gofmt) + commit-msg (conventional) green |
++
++Sandbox note (transparency, per T-101/T-104 precedent): direct `rm`,
++`git clean` and `git stash -u` are permission-denied here, and writes outside
++`owns` (including gitignored `bin/` and the approved external temp dir) are
++denied. The planned `bin/probe-smoke.go` scratch driver therefore became the
++committed `cmd/server/boot_test.go` (strictly better: reviewable, owned,
++repeatable). The Playwright webServer mode left untracked `test-run.db*`
++artifacts — the server now opens `DB_PATH` at boot, so every e2e webServer
++run creates them; the guard's dirty allowlist does not cover them, so they
++were removed via `make -f harness/handoffs/T-103-scratch.mk clean-artifacts`
++(scratch makefile in the guard-exempt handoffs dir, deliberately untracked,
++self-describing). Worktree final state: owned files committed, only
++`node_modules` (exempt) + the scratch mk (exempt) untracked.
++
++## Open issues
++
++1. **Gap (a) — needs planner action before T-105:** a small owner task on
++   `internal/web/web.go` (homeData + home() + index.html template-include,
++   sketch above) to satisfy the frozen no-JS home clause. Bundle with the
++   T-102 web.go chain-order fix (`withLogging`/`withRequestID` swap) — same
++   file, same owner.
++2. **Gap (b) — T-105 sanctioned edit:** `probeReCount` regex vs frozen span
++   markup, with justification as above (or planner re-freezes the string).
++3. **Every future e2e webServer run dirties worktrees with `test-run.db*`**
++   (now that boot opens the DB): the `.gitignore` owner should add
++   `test-run.db`, `test-run.db-shm`, `test-run.db-wal` (T-100's open issue
++   #2 predicted this; it became real with this task). Until then workers
++   need the scratch-mk trick or manual cleanup.
++4. AGENTS.md says `make e2e-task T=<id>`; the Makefile only accepts
++   `TASK=<id>` (`T=` silently matches nothing) — docs nit for a harness/docs
++   task (also noted by T-101).
++5. `Acceptance/` chain-order reminder: `withRequestID` still wraps inside
++   `withLogging`, so served `req_id` logs `"-"` (T-102's blocked defect) —
++   pre-existing, untouched here (web.go out of scope); visible in my test
++   log lines.
+diff --git a/internal/web/probe.go b/internal/web/probe.go
+new file mode 100644
+index 0000000..4fd3a98
+--- /dev/null
++++ b/internal/web/probe.go
+@@ -0,0 +1,170 @@
++// Probe feature: a global, SQLite-backed counter exposed as an HTMX fragment
++// at /probe and mounted on the home page inside <section id="probe">. It is
++// the M1 vertical slice through the whole stack: the store opened at boot,
++// double-submit CSRF, an HTMX partial and a no-JS form fallback (303 back to
++// the home page).
++//
++// SCAFFOLD: the store reaches these handlers through a package-level pointer
++// (SetProbeStore, called by main before web.New) because web.go — where a
++// store field on Server would live — is not owned by this file. Refactor
++// point: move the store onto Server (and render the home mount's live
++// fragment server-side with it) once web.go ownership allows; nothing else
++// here would change.
++package web
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"path/filepath"
++
++	"github.com/amscotti/groveland-lights/internal/store"
++)
++
++// probeStore is the process-wide store used by the probe handlers. It is nil
++// until SetProbeStore wires it at boot; while nil, every probe route answers
++// 500 (a boot-ordering bug, logged as such).
++var probeStore *store.DB
++
++// SetProbeStore wires the store the probe handlers read and increment
++// through. Call it once at boot, before web.New.
++func SetProbeStore(db *store.DB) { probeStore = db }
++
++// errProbeStoreUnset reports a probe request served before SetProbeStore.
++var errProbeStoreUnset = errors.New("probe: store not wired (SetProbeStore was not called)")
++
++func init() {
++	register(route{pattern: "GET /probe", handler: probeGet})
++	register(route{pattern: "POST /probe", handler: probePost})
++}
++
++// probeData renders partials/probe.html: the current counter value and the
++// CSRF token the increment form submits.
++type probeData struct {
++	Count     int64
++	CSRFToken string
++}
++
++// renderPartial executes a bare partial (no base.html wrapper) — the HTMX
++// fragment contract depends on it. It mirrors renderPage for the partials
++// map; like renderPage it buffers, so a failing template never writes a
++// half-rendered fragment to the response.
++func (t *templates) renderPartial(w io.Writer, name string, data any) error {
++	tpl, ok := t.partials[filepath.ToSlash(name)]
++	if !ok {
++		return fmt.Errorf("unknown partial %s", name)
++	}
++	var buf bytes.Buffer
++	if err := tpl.Execute(&buf, data); err != nil {
++		return err
++	}
++	_, err := w.Write(buf.Bytes())
++	return err
++}
++
++// probeCount reads the counter through the wired store, collapsing the unset
++// case into an error so handlers keep a single failure path.
++func probeCount(ctx context.Context) (int64, error) {
++	if probeStore == nil {
++		return 0, errProbeStoreUnset
++	}
++	return probeStore.ProbeCount(ctx)
++}
++
++// probeInc increments the counter through the wired store, collapsing the
++// unset case into an error so handlers keep a single failure path.
++func probeInc(ctx context.Context) (int64, error) {
++	if probeStore == nil {
++		return 0, errProbeStoreUnset
++	}
++	return probeStore.ProbeInc(ctx)
++}
++
++// probeGet renders the probe fragment: heading, current count and the
++// CSRF-protected increment form. HTMX fetches it (hx-trigger="load" on the
++// home mount, hx-post on the form) and swaps it into <section id="probe">.
++func probeGet(w http.ResponseWriter, r *http.Request) {
++	s := serverFrom(r.Context())
++	n, err := probeCount(r.Context())
++	if err != nil {
++		s.Log.Error("probe: count", "err", err)
++		http.Error(w, "internal error", http.StatusInternalServerError)
++		return
++	}
++	token := IssueCSRFToken(w, r)
++	if token == "" {
++		return // IssueCSRFToken could not mint a token and answered 500.
++	}
++	data := probeData{Count: n, CSRFToken: token}
++	if err := s.tpl.renderPartial(w, "partials/probe.html", data); err != nil {
++		s.Log.Error("probe: render", "err", err)
++		http.Error(w, "internal error", http.StatusInternalServerError)
++	}
++}
++
++// probeSubmission is a POST /probe body parsed once, at the boundary. After
++// parseProbePost returns, handlers consult only these typed fields.
++type probeSubmission struct {
++	CSRFToken string // submitted csrf_token form value
++	HTMX      bool   // HX-Request header present (HTMX flow) or absent (no-JS form submit)
++}
++
++// parseProbePost parses the request form exactly once and lifts it into a
++// typed struct; it is the only code in this feature that touches the form.
++func parseProbePost(r *http.Request) (probeSubmission, error) {
++	if err := r.ParseForm(); err != nil {
++		return probeSubmission{}, err
++	}
++	return probeSubmission{
++		CSRFToken: r.PostForm.Get(CSRFTokenName),
++		HTMX:      r.Header.Get("HX-Request") != "",
++	}, nil
++}
++
++// probePost verifies the CSRF pair, increments the counter and answers with
++// the re-rendered fragment (HTMX) or a 303 back to the home page (no-JS
++// submit). Rejected tokens leave the counter untouched.
++func probePost(w http.ResponseWriter, r *http.Request) {
++	s := serverFrom(r.Context())
++
++	form, err := parseProbePost(r)
++	if err != nil {
++		s.Log.Error("probe: parse", "err", err)
++		http.Error(w, "bad request", http.StatusBadRequest)
++		return
++	}
++
++	// Uniform rejection per the CSRF contract: missing, malformed and
++	// mismatched tokens are indistinguishable. No increment happens here.
++	if err := VerifyCSRF(r, form.CSRFToken); err != nil {
++		http.Error(w, "forbidden", http.StatusForbidden)
++		return
++	}
++
++	n, err := probeInc(r.Context())
++	if err != nil {
++		s.Log.Error("probe: inc", "err", err)
++		http.Error(w, "internal error", http.StatusInternalServerError)
++		return
++	}
++
++	if !form.HTMX {
++		// No-JS submit: the counter is already incremented; send the browser
++		// back to the home page, which shows the new count on its next render.
++		http.Redirect(w, r, "/", http.StatusSeeOther)
++		return
++	}
++
++	token := IssueCSRFToken(w, r)
++	if token == "" {
++		return // IssueCSRFToken could not mint a token and answered 500.
++	}
++	data := probeData{Count: n, CSRFToken: token}
++	if err := s.tpl.renderPartial(w, "partials/probe.html", data); err != nil {
++		s.Log.Error("probe: render", "err", err)
++		http.Error(w, "internal error", http.StatusInternalServerError)
++	}
++}
+diff --git a/internal/web/probe_test.go b/internal/web/probe_test.go
+new file mode 100644
+index 0000000..0289b44
+--- /dev/null
++++ b/internal/web/probe_test.go
+@@ -0,0 +1,317 @@
++package web
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"path/filepath"
++	"regexp"
++	"strconv"
++	"strings"
++	"testing"
++
++	"github.com/amscotti/groveland-lights/internal/config"
++	"github.com/amscotti/groveland-lights/internal/store"
++)
++
++// probeReCount pins the frozen fragment markup: the digits of the counter
++// sit alone inside #probe-count (`<p>Count: <span id="probe-count">N</span>
++// </p>`). The count is read from the span, not from a "Count: N" text node —
++// the span sits between the prefix and the digits in the HTML source.
++var probeReCount = regexp.MustCompile(`<span id="probe-count">(\d+)</span>`)
++
++// newProbeServer builds a Server whose probe handlers run against a real
++// store (store.Open on a temp-file SQLite DB, migrations included) wired
++// through the same SetProbeStore call main uses. Cleanup closes the store
++// and unsets the package-level wiring so rows stay independent.
++func newProbeServer(t *testing.T) *Server {
++	t.Helper()
++	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "probe.db"))
++	if err != nil {
++		t.Fatalf("store.Open: %v", err)
++	}
++	t.Cleanup(func() { _ = db.Close() })
++	SetProbeStore(db)
++	t.Cleanup(func() { SetProbeStore(nil) })
++	return newTestServer(t, config.EnvTest)
++}
++
++// probeMint GETs /probe through the full middleware chain once: it returns
++// the response body, the minted CSRF cookie (the jar's future value) and the
++// count shown. Every caller asserts on THIS response, so the minted token
++// and the rendered fragment cannot diverge.
++func probeMint(t *testing.T, s *Server) (string, *http.Cookie, int64) {
++	t.Helper()
++	rec := s.probeGet(t)
++	res := rec.Result()
++	defer func() { _ = res.Body.Close() }()
++
++	var cookie *http.Cookie
++	for _, c := range res.Cookies() {
++		if c.Name == CSRFTokenName {
++			cookie = c
++		}
++	}
++	if cookie == nil || cookie.Value == "" {
++		t.Fatalf("GET /probe minted no %s cookie; headers: %v", CSRFTokenName, rec.Header())
++	}
++	m := probeReCount.FindStringSubmatch(rec.Body.String())
++	if m == nil {
++		t.Fatalf("GET /probe fragment shows no count in #probe-count; body:\n%s", rec.Body.String())
++	}
++	n, err := strconv.ParseInt(m[1], 10, 64)
++	if err != nil {
++		t.Fatalf("GET /probe count %q: %v", m[1], err)
++	}
++	return rec.Body.String(), cookie, n
++}
++
++// probeGet performs GET /probe through the full chain and asserts 200.
++func (s *Server) probeGet(t *testing.T) *httptest.ResponseRecorder {
++	t.Helper()
++	rec := httptest.NewRecorder()
++	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/probe", nil))
++	if rec.Code != http.StatusOK {
++		t.Fatalf("GET /probe: status %d, want 200; body:\n%s", rec.Code, rec.Body.String())
++	}
++	return rec
++}
++
++// probePostForm POSTs to /probe through the full chain. form == nil sends an
++// empty body with no content type (the "missing token" shape); hx decides
++// whether the HTMX HX-Request header rides along (the no-JS path omits it).
++func probePostForm(t *testing.T, s *Server, cookie *http.Cookie, form url.Values, hx bool) *httptest.ResponseRecorder {
++	t.Helper()
++	var body io.Reader
++	if form != nil {
++		body = strings.NewReader(form.Encode())
++	}
++	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/probe", body)
++	if form != nil {
++		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++	}
++	if hx {
++		req.Header.Set("HX-Request", "true")
++	}
++	if cookie != nil {
++		req.AddCookie(cookie)
++	}
++	rec := httptest.NewRecorder()
++	s.Handler().ServeHTTP(rec, req)
++	return rec
++}
++
++// probeCountNow reads the counter straight from the wired store.
++func probeCountNow(t *testing.T) int64 {
++	t.Helper()
++	if probeStore == nil {
++		t.Fatal("probe store not wired")
++	}
++	n, err := probeStore.ProbeCount(context.Background())
++	if err != nil {
++		t.Fatalf("ProbeCount: %v", err)
++	}
++	return n
++}
++
++// probeTamper returns a token of the same shape with a wrong value (first
++// character flipped) — the tampered-submission row of the contract.
++func probeTamper(token string) string {
++	if token == "" {
++		return "tampered"
++	}
++	b := []byte(token)
++	if b[0] == 'A' {
++		b[0] = 'B'
++	} else {
++		b[0] = 'A'
++	}
++	return string(b)
++}
++
++func TestProbeGet(t *testing.T) {
++	t.Run("renders the contract fragment", func(t *testing.T) {
++		s := newProbeServer(t)
++		body, cookie, n := probeMint(t, s)
++
++		// Frozen fragment contract: h2 heading exactly "Probe"; the count
++		// line with the digits alone in #probe-count; the form with BOTH
++		// transports — the no-JS plain action/method and the HTMX attributes
++		// — the hidden csrf_token field carrying the minted token, and the
++		// submit button with its exact accessible name.
++		for _, want := range []string{
++			"<h2>Probe</h2>",
++			`<p>Count: <span id="probe-count">` + strconv.FormatInt(n, 10) + `</span></p>`,
++			`<form action="/probe" method="post"`,
++			`hx-post="/probe"`,
++			`hx-target="#probe"`,
++			`hx-swap="innerHTML"`,
++			`<input type="hidden" name="csrf_token" value="` + cookie.Value + `">`,
++			`<button type="submit">Increment counter</button>`,
++		} {
++			if !strings.Contains(body, want) {
++				t.Errorf("fragment missing %q; body:\n%s", want, body)
++			}
++		}
++		if m := probeReCount.FindStringSubmatch(body); m == nil {
++			t.Errorf("#probe-count does not hold the bare digits; body:\n%s", body)
++		}
++	})
++
++	t.Run(`fragment has no html/body and no id="map"`, func(t *testing.T) {
++		s := newProbeServer(t)
++		body := s.probeGet(t).Body.String()
++		// The fragment is swapped INTO the home page: a full document here
++		// would nest html/body tags, and id="map" would collide with the
++		// map container the HTMX contract forbids swapping.
++		for _, banned := range []string{"<html", "<body", `id="map"`} {
++			if strings.Contains(body, banned) {
++				t.Errorf("fragment contains %q; body:\n%s", banned, body)
++			}
++		}
++		if !strings.Contains(body, "<h2>Probe</h2>") {
++			t.Errorf("fragment is not the probe partial; body:\n%s", body)
++		}
++	})
++
++	t.Run("store unset answers 500", func(t *testing.T) {
++		s := newProbeServer(t)
++		SetProbeStore(nil)
++		rec := httptest.NewRecorder()
++		s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/probe", nil))
++		if rec.Code != http.StatusInternalServerError {
++			t.Fatalf("GET /probe with store unset: status %d, want 500", rec.Code)
++		}
++	})
++
++	t.Run("store failure answers 500", func(t *testing.T) {
++		s := newProbeServer(t)
++		if err := probeStore.Close(); err != nil {
++			t.Fatalf("close store: %v", err)
++		}
++		rec := httptest.NewRecorder()
++		s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/probe", nil))
++		if rec.Code != http.StatusInternalServerError {
++			t.Fatalf("GET /probe with closed store: status %d, want 500", rec.Code)
++		}
++	})
++}
++
++func TestProbePost(t *testing.T) {
++	t.Run("valid token increments", func(t *testing.T) {
++		s := newProbeServer(t)
++		_, cookie, n := probeMint(t, s)
++
++		form := url.Values{CSRFTokenName: {cookie.Value}}
++		rec := probePostForm(t, s, cookie, form, true)
++		if rec.Code != http.StatusOK {
++			t.Fatalf("POST /probe with valid token: status %d, want 200; body:\n%s", rec.Code, rec.Body.String())
++		}
++		m := probeReCount.FindStringSubmatch(rec.Body.String())
++		if m == nil {
++			t.Fatalf("POST /probe fragment has no \"Count: N\" text; body:\n%s", rec.Body.String())
++		}
++		got, err := strconv.ParseInt(m[1], 10, 64)
++		if err != nil || got != n+1 {
++			t.Fatalf("POST /probe fragment count = %v, want %d; body:\n%s", m[1], n+1, rec.Body.String())
++		}
++		if got := probeCountNow(t); got != n+1 {
++			t.Fatalf("store count after valid POST = %d, want %d", got, n+1)
++		}
++	})
++
++	t.Run("missing token 403 leaves count unchanged", func(t *testing.T) {
++		s := newProbeServer(t)
++		_, cookie, n := probeMint(t, s)
++
++		// Empty body: no csrf_token field at all (HTMX-shaped header, as the
++		// contract's rejected flow describes).
++		rec := probePostForm(t, s, cookie, nil, true)
++		if rec.Code != http.StatusForbidden {
++			t.Fatalf("POST /probe without csrf_token: status %d, want 403; body:\n%s", rec.Code, rec.Body.String())
++		}
++		if got := probeCountNow(t); got != n {
++			t.Fatalf("count changed after rejected POST: %d, want %d", got, n)
++		}
++	})
++
++	t.Run("tampered token 403", func(t *testing.T) {
++		s := newProbeServer(t)
++		_, cookie, n := probeMint(t, s)
++
++		form := url.Values{CSRFTokenName: {probeTamper(cookie.Value)}}
++		rec := probePostForm(t, s, cookie, form, true)
++		if rec.Code != http.StatusForbidden {
++			t.Fatalf("POST /probe with tampered csrf_token: status %d, want 403; body:\n%s", rec.Code, rec.Body.String())
++		}
++		if got := probeCountNow(t); got != n {
++			t.Fatalf("count changed after tampered POST: %d, want %d", got, n)
++		}
++	})
++
++	t.Run("non-HTMX post redirects 303 to /", func(t *testing.T) {
++		s := newProbeServer(t)
++		_, cookie, n := probeMint(t, s)
++
++		// The no-JS submit: valid token, no HX-Request header. The counter
++		// increments first, then the browser is sent home to see it.
++		form := url.Values{CSRFTokenName: {cookie.Value}}
++		rec := probePostForm(t, s, cookie, form, false)
++		if rec.Code != http.StatusSeeOther {
++			t.Fatalf("POST /probe without HX-Request: status %d, want 303; body:\n%s", rec.Code, rec.Body.String())
++		}
++		if loc := rec.Header().Get("Location"); loc != "/" {
++			t.Fatalf("POST /probe without HX-Request: Location = %q, want \"/\"", loc)
++		}
++		if got := probeCountNow(t); got != n+1 {
++			t.Fatalf("count after no-JS POST = %d, want %d", got, n+1)
++		}
++	})
++
++	t.Run("unparseable body 400", func(t *testing.T) {
++		s := newProbeServer(t)
++		_, cookie, n := probeMint(t, s)
++
++		// An invalid media type is the one POST shape ParseForm itself
++		// rejects (multipart bodies parse lazily and defer to
++		// ParseMultipartForm), so it is the 400 path of the boundary parser.
++		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/probe", strings.NewReader("csrf_token=x"))
++		req.Header.Set("Content-Type", "broken;;;===")
++		req.AddCookie(cookie)
++		rec := httptest.NewRecorder()
++		s.Handler().ServeHTTP(rec, req)
++		if rec.Code != http.StatusBadRequest {
++			t.Fatalf("POST /probe with unparseable body: status %d, want 400", rec.Code)
++		}
++		if got := probeCountNow(t); got != n {
++			t.Fatalf("count changed after unparseable POST: %d, want %d", got, n)
++		}
++	})
++}
++
++// TestProbeHomeMount pins the home page's probe mount: the empty shell
++// section with the HTMX load attributes and the plain link no-JS visitors
++// follow to reach the fragment's form.
++func TestProbeHomeMount(t *testing.T) {
++	s := newProbeServer(t)
++	rec := httptest.NewRecorder()
++	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
++	if rec.Code != http.StatusOK {
++		t.Fatalf("GET /: status %d, want 200", rec.Code)
++	}
++	body := rec.Body.String()
++	for _, want := range []string{
++		`<section id="probe"`,
++		`hx-get="/probe"`,
++		`hx-trigger="load"`,
++		`hx-target="#probe"`,
++		`hx-swap="innerHTML"`,
++		`<a href="/probe">Probe</a>`,
++	} {
++		if !strings.Contains(body, want) {
++			t.Errorf("GET / missing probe mount markup %q; body:\n%s", want, body)
++		}
++	}
++}
+diff --git a/web/templates/pages/index.html b/web/templates/pages/index.html
+index 023df0c..2f728f9 100644
+--- a/web/templates/pages/index.html
++++ b/web/templates/pages/index.html
+@@ -7,4 +7,7 @@
+   </p>
+   <p class="env-note" data-env="{{.EnvLabel}}">{{if eq .EnvLabel "prod"}}{{else}}<span class="muted">environment: {{.EnvLabel}}</span>{{end}}</p>
+ </section>
++<section id="probe" hx-get="/probe" hx-trigger="load" hx-target="#probe" hx-swap="innerHTML">
++  <a href="/probe">Probe</a>
++</section>
+ {{end}}
+diff --git a/web/templates/partials/probe.html b/web/templates/partials/probe.html
+new file mode 100644
+index 0000000..1fc1f3c
+--- /dev/null
++++ b/web/templates/partials/probe.html
+@@ -0,0 +1,6 @@
++<h2>Probe</h2>
++<p>Count: <span id="probe-count">{{.Count}}</span></p>
++<form action="/probe" method="post" hx-post="/probe" hx-target="#probe" hx-swap="innerHTML">
++  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
++  <button type="submit">Increment counter</button>
++</form>
