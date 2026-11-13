@@ -34,7 +34,7 @@ What changed in the retry is material, and it satisfies the prior review's
 alternative remedy (b):
 - the stored values are **TEXT**, matching the declared `TEXT NOT NULL` column
   (`migrations.go:70-75`; pinned by `typeof(sha256) = 'text'` in
-  `migrations_test.go:369`, `checkRecordedSumsAreText`);
+  `migrations_test.go:446`, `checkRecordedSumsAreText`);
 - there is **no decoder**: `applyMigrations` compares the recorded bytes against
   `sumRecordValue(i, m)` (`migrations.go:136-150`); the old length/heuristic
   acceptance path is gone;
