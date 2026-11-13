@@ -81,7 +81,7 @@
         "github.com/remyoudompheng/bigfft",
         "modernc.org/libc"
       ],
-      "status": "blocked",
+      "status": "done",
       "attempts": 4,
       "model": "glm",
       "budget": {
@@ -109,7 +109,7 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "blocked",
+      "status": "done",
       "attempts": 4,
       "model": "glm",
       "budget": {
@@ -165,7 +165,7 @@
       "claims": [],
       "ui": false,
       "allow_deps": [],
-      "status": "blocked",
+      "status": "done",
       "attempts": 4,
       "model": "glm",
       "budget": {
