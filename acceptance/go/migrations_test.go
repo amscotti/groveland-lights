@@ -6,7 +6,7 @@
 // INERT DRAFT: the `.go.txt` extension means the Go toolchain never compiles
 // this file. T-105 activates it verbatim, with a rename only:
 //
-//   git mv acceptance/drafts/migrations_go_test.go.txt acceptance/go/migrations_test.go
+//	git mv acceptance/drafts/migrations_go_test.go.txt acceptance/go/migrations_test.go
 //
 // NO content edits are allowed at activation, with exactly ONE sanctioned
 // exception: if TestA104RefusesTamperedChecksum fails because the FIRST

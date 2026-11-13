@@ -7,7 +7,7 @@
 // this file. T-105 activates it verbatim, with a rename only and NO content
 // edits:
 //
-//   git mv acceptance/drafts/probe_go_test.go.txt acceptance/go/probe_test.go
+//	git mv acceptance/drafts/probe_go_test.go.txt acceptance/go/probe_test.go
 //
 // Contract owners: T-102 (double-submit CSRF: hidden input named
 // `csrf_token`; 403 on missing or tampered token), T-103 (routes and
@@ -49,7 +49,12 @@ import (
 )
 
 var (
-	probeReCount = regexp.MustCompile(`Count:\s*(\d+)`)
+	// T-105 activation edit (the only one): the frozen contract pins the
+	// markup as `Count: <span id="probe-count">N</span>` (drafts README,
+	// T-103 packet), so the digits always live inside #probe-count. The
+	// draft's `Count:\s*(\d+)` could never match that markup; this pin is
+	// strictly tighter (it also proves N is held by #probe-count).
+	probeReCount = regexp.MustCompile(`Count:\s*<span id="probe-count">(\d+)</span>`)
 	probeReInput = regexp.MustCompile(`<input[^>]*name="csrf_token"[^>]*>`)
 	probeReValue = regexp.MustCompile(`value="([^"]*)"`)
 )
