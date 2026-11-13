@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -162,6 +163,15 @@ func commitHarnessState(root string) error {
 	paths := []string{"harness/tasks", "harness/progress.log", "harness/reviews", "harness/.ratchet.json", "harness/protected.sha256"}
 	if out := gitOut2(root, append([]string{"status", "--porcelain"}, paths...)...); strings.TrimSpace(out) == "" {
 		return nil
+	}
+	// Serialize with the merge gate: a state commit landing between a gate's
+	// rebase and its ff-only merge makes the merge diverge and fail the task.
+	lock, err := os.OpenFile(filepath.Join(root, "harness", ".merge.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err == nil {
+		defer func() { _ = lock.Close() }()
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err == nil {
+			defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+		}
 	}
 	_ = gitOut2(root, append([]string{"add"}, paths...)...)
 	if _, err := gitOut(root, "commit", "-m", "chore(harness): update task graph, progress and review artifacts"); err != nil {

@@ -128,7 +128,18 @@ func finalizeMerge(root, wt string, t *Task) error {
 		}
 	}
 	if _, err := gitOut(root, "merge", "--ff-only", "task/"+t.ID); err != nil {
-		return fmt.Errorf("ff-only merge refused (diverged?): %w", err)
+		// Belt and braces: if main advanced past the rebase (unlocked writers),
+		// rebase once more under the lock and retry the ff-only merge.
+		if _, rerr := gitOut(wt, "rebase", "main"); rerr == nil {
+			_, _ = gitOut(wt, "checkout", "main", "--", "harness/tasks/graph.json")
+			_, _ = gitOut(wt, "add", "harness/tasks/graph.json")
+			_, _ = gitOut(wt, "commit", "-m", "chore(harness): keep scheduler graph state on merge")
+			if _, err2 := gitOut(root, "merge", "--ff-only", "task/"+t.ID); err2 != nil {
+				return fmt.Errorf("ff-only merge refused twice (diverged?): %w", err2)
+			}
+		} else {
+			return fmt.Errorf("ff-only merge refused (diverged?): %w", err)
+		}
 	}
 	if out, err := gitOut(root, "push", "origin", "main"); err != nil {
 		return fmt.Errorf("push failed: %w: %s", err, strings.TrimSpace(out))
