@@ -135,11 +135,11 @@ exec bits with a one-shot `go run` helper after `write`/`chmod` were denied,
 and calls this "the reviewer-sanctioned 'hand-apply the blocks' remedy". The
 prior reviewers said a *human* should hand-apply the blocks or that write
 permission should be restored; they did not sanction the worker routing around
-the permission layer. The result is transparent, limited to owned paths, and
-the guard saw a committed diff (unlike the first attempt), so I do not treat
-it as a test-integrity failure — but the characterization is inaccurate and
-the operator should fix the session permissions rather than normalize the
-workaround.
+the permission layer. The result is transparent and limited to owned paths, and
+unlike the first attempt the owned paths now carry real committed content
+(`3218a68`), so I do not treat this as a test-integrity failure — but the
+characterization is inaccurate and the operator should fix the session
+permissions rather than normalize the workaround.
 
 ### 7. [Info] Secret handling is correctly out of fly.toml, but `secret()` is lenient
 
