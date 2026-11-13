@@ -45,8 +45,10 @@ invariant is true by construction; the new
 (`migrations_test.go:525`) then pins the workaround. The guard's **verification**
 path is not weakened (both encodings are decoded and compared, and the new
 `TestTamperedSecond...` at `migrations_test.go:464` exercises it), but the
-*storage asymmetry* is test-shaped, and the canary no longer independently
-detects the layout assumption it exists to protect.
+*storage asymmetry* is test-shaped, and the canary's failure — the signal its
+own header says should trigger a conscious update — has been removed by
+reshaping production, with the new test pinning the workaround rather than an
+independently chosen format.
 
 There are also real costs to shipping it:
 - `schema_migrations.sha256` is declared `TEXT NOT NULL`
