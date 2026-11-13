@@ -139,13 +139,14 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "running",
-      "attempts": 3,
+      "status": "blocked",
+      "attempts": 4,
       "model": "glm",
       "budget": {
         "steps": 200,
         "wall_min": 90
-      }
+      },
+      "findings": "guard exit 3"
     },
     {
       "id": "T-104",
