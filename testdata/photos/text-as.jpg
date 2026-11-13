@@ -1,0 +1,2 @@
+This is not a JPEG. It is plain text wearing a .jpg name, so the
+server must reject it on sniffing (A-207).

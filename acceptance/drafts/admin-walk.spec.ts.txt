@@ -1,0 +1,284 @@
+// M2 acceptance drafts (T-200): A-201..A-209 for the admin "walk the town"
+// flow, written as a frozen UI contract BEFORE any feature exists.
+//
+// INERT DRAFT: the `.spec.ts.txt` extension means no runner loads this file.
+// T-207 activates it verbatim, with a rename only and NO content edits:
+//
+//   git mv acceptance/drafts/admin-walk.spec.ts.txt acceptance/e2e/admin-walk.spec.ts
+//
+// It FAILS against current main by design (no /admin routes; every test
+// times out on its first admin-page assertion).
+//
+// The frozen UI contract (element names, exact button/label strings, routes,
+// response codes) lives in acceptance/drafts/README.md — workers build to
+// that table EXACTLY. Two ACTIVE utils are imported: ./util/admin.js
+// (loginAsAdmin) and ./util/images.js (hasExifGps, jpegSize).
+//
+// Visual notes (what a correct screenshot shows) are inline per test and in
+// full in the README; the mobile projects (pixel-9, iphone-16, iphone-se-320
+// at 320x640) are the primary targets: "Add light here" sits in the bottom
+// third, the accuracy text is readable, the photo preview is correctly
+// oriented, and every tap target is at least 44 px tall.
+
+import { test, expect, type Page } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
+import { loginAsAdmin } from './util/admin.js';
+import { hasExifGps, jpegSize } from './util/images.js';
+
+test.use({
+  geolocation: { latitude: 42.7617, longitude: -71.0303, accuracy: 12 },
+  permissions: ['geolocation'],
+});
+
+/** Walk the plan's §7 Phase-2 add-light flow with the given fields. */
+async function addLightFromForm(
+  page: Page,
+  opts: { assetNo?: string; label: string; photo?: string },
+): Promise<void> {
+  await page.goto('/admin/walk');
+  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  if (opts.assetNo) {
+    await page.getByLabel('Asset number').fill(opts.assetNo);
+  }
+  await page.getByLabel('Label').fill(opts.label);
+  if (opts.photo) {
+    await page.getByLabel('Photo').setInputFiles(opts.photo);
+  }
+  await page.getByRole('button', { name: 'Confirm pin' }).click();
+}
+
+test('@A-202 @A-203 add a light from current position', async ({ page, context }) => {
+  await loginAsAdmin(page);
+  await page.goto('/admin/walk');
+
+  // Live position and accuracy are shown (accuracy 12 m from the context).
+  await expect(page.locator('#walk-pos')).toHaveText(/\d+\.\d+, -?\d+\.\d+/);
+  await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy 12 m/);
+
+  // Open the add-light form, then "walk a few metres": the watchPosition
+  // update must refresh the accuracy text in place.
+  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await context.setGeolocation({ latitude: 42.76175, longitude: -71.03035, accuracy: 8 });
+  await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy 8 m/);
+
+  await page.getByLabel('Asset number').fill('GP-017');
+  await page.getByLabel('Label').fill('Ball field lamp');
+  await page.getByLabel('Kind').selectOption({ label: 'Park' });
+  await page.getByLabel('Photo').setInputFiles('testdata/photos/portrait-orient6-gps.jpg');
+  await page.getByRole('button', { name: 'Confirm pin' }).click();
+
+  await expect(page.getByRole('status')).toContainText('Saved');
+});
+
+test('@A-202 low accuracy gates saving behind an explicit save-anyway choice', async ({
+  page,
+  context,
+}) => {
+  await context.setGeolocation({ latitude: 42.7617, longitude: -71.0303, accuracy: 80 });
+  await loginAsAdmin(page);
+  await page.goto('/admin/walk');
+
+  await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy 80 m/);
+  const add = page.getByRole('button', { name: 'Add light here', exact: true });
+  await expect(add).toBeVisible();
+  // Over the 30 m threshold the primary action is disabled until the admin
+  // explicitly accepts the low-accuracy risk.
+  await expect(add).toBeDisabled();
+  await page.getByRole('button', { name: 'Save anyway (low accuracy)' }).click();
+  await expect(add).toBeEnabled();
+});
+
+test.describe('walk mode without geolocation permission', () => {
+  test.use({ permissions: [] });
+
+  test('@A-202 geolocation denied shows manual pin fields', async ({ page }) => {
+    await loginAsAdmin(page);
+    await page.goto('/admin/walk');
+
+    await expect(page.locator('#manual-lat')).toBeVisible();
+    await expect(page.locator('#manual-lon')).toBeVisible();
+    await expect(page.locator('#manual-lat')).toHaveAttribute('type', 'number');
+    await expect(page.locator('#manual-lon')).toHaveAttribute('type', 'number');
+  });
+});
+
+test('@A-203 dragged pin position is what gets saved', async ({ page }) => {
+  await loginAsAdmin(page);
+  await page.goto('/admin/walk');
+
+  const pin = page.locator('#pin');
+  await expect(pin).toBeVisible();
+  await expect(pin).toHaveAttribute('aria-label', 'position pin');
+  await expect(page.locator('#pin-pos')).toHaveText(/\d+\.\d+, -?\d+\.\d+/);
+  const before = (await page.locator('#pin-pos').innerText()).trim();
+
+  // Drag the pin ~80 px and read the new coordinates.
+  const box = (await pin.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 80, box.y + box.height / 2 + 80, {
+    steps: 8,
+  });
+  await page.mouse.up();
+
+  const after = (await page.locator('#pin-pos').innerText()).trim();
+  expect(after).not.toBe(before);
+  expect(after).toMatch(/^\d+\.\d+, -?\d+\.\d+$/);
+  const coords = after.match(/^(\d+\.\d+), (-?\d+\.\d+)$/)!;
+  const expected = `${Number(coords[1]).toFixed(6)}, ${Number(coords[2]).toFixed(6)}`;
+
+  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await page.getByLabel('Label').fill('Dragged pin lamp');
+  await page.getByRole('button', { name: 'Confirm pin' }).click();
+  await expect(page.getByRole('status')).toContainText('Saved');
+
+  // The admin detail shows exactly the confirmed coordinates, 6 dp.
+  await page.goto('/admin');
+  await page.getByRole('link', { name: /Dragged pin lamp/ }).click();
+  await expect(page).toHaveURL(/\/admin\/lights\/\d+$/);
+  await expect(page.locator('#light-pos')).toHaveText(expected);
+});
+
+test('@A-204 position outside TOWN_BBOX is rejected', async ({ page, context }) => {
+  await loginAsAdmin(page);
+  await page.goto('/admin/walk');
+  await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy 12 m/);
+
+  // 42.36,-71.06 is far outside 42.70,-71.09,42.82,-70.96.
+  await context.setGeolocation({ latitude: 42.36, longitude: -71.06, accuracy: 10 });
+  await expect(page.getByRole('alert')).toContainText('outside Groveland town bounds');
+});
+
+test('@A-205 duplicate asset numbers raise the merge panel', async ({ page }) => {
+  await loginAsAdmin(page);
+  await addLightFromForm(page, { assetNo: 'GP-017', label: 'Dup panel lamp' });
+  await expect(page.getByRole('status')).toContainText('Saved');
+
+  // A second light with the same asset number nearby hits the panel.
+  await page.goto('/admin/walk');
+  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await page.getByLabel('Asset number').fill('GP-017');
+  await page.getByLabel('Label').fill('Dup panel lamp twin');
+  await page.getByRole('button', { name: 'Confirm pin' }).click();
+
+  const panel = page.locator('#dup-panel');
+  await expect(panel).toBeVisible();
+  await expect(panel.getByRole('heading', { name: 'Possible duplicate' })).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Merge' })).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Save anyway' })).toBeVisible();
+});
+
+test('@A-206 served photo is re-encoded, oriented and metadata-free', async ({ page }) => {
+  await loginAsAdmin(page);
+  await page.goto('/admin');
+
+  // The light created by the @A-202 @A-203 test above carries the portrait
+  // Orientation=6 fixture photo.
+  const img = page.locator('img[alt^="GP-017"]').first();
+  await expect(img).toBeVisible();
+  const src = await img.getAttribute('src');
+  expect(src).toBeTruthy();
+  const res = await page.request.get(src!);
+  expect(res.status()).toBe(200);
+  const bytes = new Uint8Array(await res.body());
+  expect(hasExifGps(bytes)).toBe(false);
+  const { w, h } = jpegSize(bytes);
+  expect(Math.max(w, h)).toBeLessThanOrEqual(1600);
+  expect(w).toBeGreaterThan(h); // 600x800 + Orientation=6 => wider than tall
+
+  // The in-form preview renders the orientation already applied.
+  await page.goto('/admin/walk');
+  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await page.getByLabel('Label').fill('Orientation preview lamp');
+  await page.getByLabel('Photo').setInputFiles('testdata/photos/portrait-orient6-gps.jpg');
+  const preview = page.locator('#photo-preview');
+  await expect(preview).toBeVisible();
+  const box = (await preview.boundingBox())!;
+  expect(box.width).toBeGreaterThan(box.height);
+});
+
+test('@A-208 edit relabels and delete removes the light', async ({ page }) => {
+  await loginAsAdmin(page);
+  await addLightFromForm(page, { assetNo: 'GP-018', label: 'Edit me lamp' });
+  await expect(page.getByRole('status')).toContainText('Saved');
+
+  await page.goto('/admin');
+  await page.getByRole('link', { name: /Edit me lamp/ }).click();
+  await expect(page).toHaveURL(/\/admin\/lights\/\d+$/);
+
+  await page.getByLabel('Label').fill('Edited lamp');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  await expect(page.getByRole('status')).toContainText('Saved');
+  await expect(page.getByLabel('Label')).toHaveValue('Edited lamp');
+
+  await page.getByRole('button', { name: 'Delete light' }).click();
+  await page.goto('/admin');
+  await expect(page.getByRole('link', { name: /Edited lamp/ })).toHaveCount(0);
+  await expect(page.locator('img[alt*="Edited lamp"]')).toHaveCount(0);
+});
+
+test('@A-209 admin list paginates with HTMX', async ({ page }) => {
+  await loginAsAdmin(page);
+  await page.goto('/admin/walk');
+
+  // Seed 60 lights through the same HTTP contract the form uses (the UI flow
+  // is covered above; 60 UI dialogs would take minutes). 60 guarantees the
+  // 50-per-page boundary regardless of the few lights earlier tests left in
+  // this server's database.
+  const html = await page.content();
+  const csrf =
+    html.match(/<input[^>]*name="csrf_token"[^>]*>/)?.[0].match(/value="([^"]*)"/)?.[1] ?? '';
+  expect(csrf, 'csrf_token parsed from the walk page form').not.toBe('');
+  for (let i = 1; i <= 60; i++) {
+    const res = await page.request.post('/admin/lights', {
+      multipart: {
+        csrf_token: csrf,
+        label: `Scroll lamp ${String(i).padStart(2, '0')}`,
+        kind: 'park',
+        lat: String(42.76 + i * 0.0004),
+        lon: String(-71.045 + i * 0.0004),
+      },
+    });
+    expect(res.status(), `create Scroll lamp ${i}`).toBe(303);
+  }
+
+  await page.goto('/admin');
+  await expect(page.getByRole('heading', { name: 'Lights', exact: true })).toBeVisible();
+  await expect(page.locator('img[alt="Scroll lamp 60"]')).toBeVisible();
+  await expect(page.locator('img[alt="Scroll lamp 05"]')).toHaveCount(0);
+
+  // "Older" swaps in page 2 as an HTMX fragment — no full navigation.
+  let navigated = false;
+  page.on('framenavigated', (frame) => {
+    if (frame === page.mainFrame()) {
+      navigated = true;
+    }
+  });
+  await page.getByRole('link', { name: 'Older' }).click();
+  await expect(page.locator('img[alt="Scroll lamp 05"]')).toBeVisible();
+  await expect(page.locator('img[alt="Scroll lamp 60"]')).toHaveCount(0);
+  expect(navigated).toBe(false);
+});
+
+test('@A-201 unauthenticated /admin lands on the login page', async ({ page }) => {
+  await page.goto('/admin');
+  await expect(page).toHaveURL(/\/admin\/login$/);
+  await expect(page.getByRole('heading', { name: 'Admin login' })).toBeVisible();
+});
+
+test('@A-202 @a11y walk page and admin list have no axe violations', async ({ page }) => {
+  await loginAsAdmin(page);
+  await page.goto('/admin/walk');
+  await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy \d+ m/);
+  const walk = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
+    .analyze();
+  expect(walk.violations).toEqual([]);
+
+  await page.goto('/admin');
+  await expect(page.getByRole('heading', { name: 'Lights', exact: true })).toBeVisible();
+  const list = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
+    .analyze();
+  expect(list.violations).toEqual([]);
+});

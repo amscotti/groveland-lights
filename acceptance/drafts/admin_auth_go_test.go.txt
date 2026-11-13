@@ -1,0 +1,337 @@
+//go:build acceptance
+
+// @A-201 — admin login: one-time ADMIN_TOKEN exchange and guarded /admin/*
+// (frozen contract, written by T-200 before the feature tasks branch).
+//
+// INERT DRAFT: `.go.txt` is compiled by nothing. T-207 activates it by pure
+// rename with NO content edits (a gofmt pass is the only sanctioned step):
+//
+//	git mv acceptance/drafts/admin_auth_go_test.go.txt acceptance/go/admin_auth_test.go
+//
+// Contract owner: T-203 (auth/session). It FAILS against current main by
+// design (no /admin routes exist yet — everything under /admin answers 404).
+//
+// Frozen flow (byte-exact expectations for workers; see also
+// acceptance/drafts/README.md):
+//
+//	GET  /admin (no session)                 -> 302 Location: /admin/login
+//	GET  /admin/login                        -> 200 page: <h1>Admin login</h1>,
+//	                                             <label ..>Token</label> with
+//	                                             <input name="token">, and a
+//	                                             <button>Sign in</button>
+//	GET  /admin/login?token=<wrong>          -> 403
+//	GET  /admin/login?token=<ADMIN_TOKEN>    -> 302 Location: /admin AND a
+//	                                             Set-Cookie for gl_session
+//	                                             carrying HttpOnly and
+//	                                             SameSite=Lax
+//	GET  /admin/login?token=<ADMIN_TOKEN>    -> 403 (the token is one-time;
+//	    (replay)                                replaying it must not mint a
+//	                                             second session)
+//	GET  /admin (gl_session cookie)          -> 200
+//	GET  /admin + HX-Request: true, no cookie -> 401 with header
+//	                                             HX-Redirect: /admin/login
+package acceptance
+
+import (
+	"context"
+	"io"
+	"net"
+	"net/http"
+	"net/http/cookiejar"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// aaAdminToken mirrors .env.test (the spawned server gets the same value).
+const aaAdminToken = "dGVzdC1hZG1pbi10b2tlbi0zMi1ieXRl"
+
+var (
+	aaReHeading = regexp.MustCompile(`<h1[^>]*>\s*Admin login\s*</h1>`)
+	aaReLabel   = regexp.MustCompile(`<label[^>]*>\s*Token\s*</label>`)
+	aaReInput   = regexp.MustCompile(`<input[^>]*name="token"[^>]*>`)
+	aaReButton  = regexp.MustCompile(`<button[^>]*>\s*Sign in\s*</button>`)
+)
+
+// TestA201AdminLogin covers the whole frozen auth flow: the guard redirect,
+// the login form, wrong-token rejection, the one-time exchange (cookie flags
+// included), replay rejection, the authenticated page, and the HTMX variant
+// of the guard.
+func TestA201AdminLogin(t *testing.T) {
+	s := aaSpawnDir(t, "", "")
+	t.Cleanup(func() { aaKill(t, s) })
+	browser := aaClient(t) // "browser": cookie jar, never follows redirects
+	bare := aaClient(t)    // a second, cookie-less client for the HTMX probe
+
+	// Unauthenticated /admin is a full-page redirect to the login page.
+	status, header, body := aaDo(t, browser, http.MethodGet, s.baseURL+"/admin", nil, false)
+	if status != http.StatusFound {
+		t.Fatalf("GET /admin without session: status %d, want 302; body:\n%s", status, body)
+	}
+	if loc := header.Get("Location"); loc != "/admin/login" {
+		t.Fatalf("GET /admin without session: Location = %q, want %q", loc, "/admin/login")
+	}
+
+	// The login page renders the frozen form: heading, label+input, button.
+	status, _, body = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin/login", nil, false)
+	if status != http.StatusOK {
+		t.Fatalf("GET /admin/login: status %d, want 200; body:\n%s", status, body)
+	}
+	for _, re := range []*regexp.Regexp{aaReHeading, aaReLabel, aaReInput, aaReButton} {
+		if !re.MatchString(body) {
+			t.Errorf("GET /admin/login: markup missing the frozen %q element; body:\n%s", re.String(), body)
+		}
+	}
+
+	// A wrong token is rejected.
+	status, _, _ = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin/login?token=definitely-not-the-token", nil, false)
+	if status != http.StatusForbidden {
+		t.Fatalf("GET /admin/login?token=<wrong>: status %d, want 403", status)
+	}
+
+	// The valid token exchanges for an admin session exactly once.
+	status, header, _ = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin/login?token="+aaAdminToken, nil, false)
+	if status != http.StatusFound {
+		t.Fatalf("GET /admin/login?token=<valid>: status %d, want 302", status)
+	}
+	if loc := header.Get("Location"); loc != "/admin" {
+		t.Fatalf("GET /admin/login?token=<valid>: Location = %q, want %q", loc, "/admin")
+	}
+	var sessionCookie string
+	for _, c := range header.Values("Set-Cookie") {
+		if strings.HasPrefix(c, "gl_session=") {
+			sessionCookie = c
+		}
+	}
+	if sessionCookie == "" {
+		t.Fatalf("GET /admin/login?token=<valid>: no Set-Cookie for gl_session; got %q", header.Values("Set-Cookie"))
+	}
+	if !strings.Contains(strings.ToLower(sessionCookie), "httponly") {
+		t.Errorf("gl_session cookie lacks HttpOnly: %q", sessionCookie)
+	}
+	if !strings.Contains(strings.ToLower(sessionCookie), "samesite=lax") {
+		t.Errorf("gl_session cookie lacks SameSite=Lax: %q", sessionCookie)
+	}
+
+	// Replaying the same token is refused — it was consumed.
+	status, _, _ = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin/login?token="+aaAdminToken, nil, false)
+	if status != http.StatusForbidden {
+		t.Fatalf("GET /admin/login?token=<valid> (replay): status %d, want 403", status)
+	}
+
+	// The minted session cookie unlocks /admin.
+	status, _, body = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin", nil, false)
+	if status != http.StatusOK {
+		t.Fatalf("GET /admin with session cookie: status %d, want 200; body:\n%s", status, body)
+	}
+
+	// HTMX fragment requests without a session get 401 + HX-Redirect so the
+	// client library can bounce to the login page itself.
+	status, header, _ = aaDo(t, bare, http.MethodGet, s.baseURL+"/admin", nil, true)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("GET /admin (HX-Request, no session): status %d, want 401", status)
+	}
+	if loc := header.Get("HX-Redirect"); loc != "/admin/login" {
+		t.Fatalf("GET /admin (HX-Request, no session): HX-Redirect = %q, want %q", loc, "/admin/login")
+	}
+}
+
+// --- aa helpers (self-contained on purpose: activation is a pure rename,
+// so this file must not depend on helpers defined elsewhere in the package) ---
+
+// aaClient is a cookie-carrying client that never follows redirects, so 302s
+// and their Set-Cookie headers stay observable.
+func aaClient(t *testing.T) *http.Client {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookie jar: %v", err)
+	}
+	return &http.Client{
+		Jar:     jar,
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// aaDo performs one request, optionally with HX-Request: true, and returns
+// status, headers and the fully-read body.
+func aaDo(t *testing.T, c *http.Client, method, target string, body io.Reader, hx bool) (int, http.Header, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, target, body)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, target, err)
+	}
+	if hx {
+		req.Header.Set("HX-Request", "true")
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, target, err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("%s %s: read body: %v", method, target, err)
+	}
+	return resp.StatusCode, resp.Header, string(b)
+}
+
+type aaSyncBuf struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *aaSyncBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *aaSyncBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// aaServer is one spawned instance; dbPath/photoDir are remembered so a
+// second spawn can reuse the same directories.
+type aaServer struct {
+	cmd      *exec.Cmd
+	baseURL  string
+	dbPath   string
+	photoDir string
+	out      *aaSyncBuf
+	stopped  bool
+}
+
+// aaSpawnDir starts the server (APP_ENV=test) on its own free port with the
+// dummy .env.test secrets; empty dbPath/photoDir mean fresh paths under a
+// t.TempDir().
+func aaSpawnDir(t *testing.T, dbPath, photoDir string) *aaServer {
+	t.Helper()
+	bin := aaFindBin(t)
+	dir := t.TempDir()
+	if dbPath == "" {
+		dbPath = filepath.Join(dir, "app.db")
+	}
+	if photoDir == "" {
+		photoDir = filepath.Join(dir, "photos")
+	}
+	port := aaFreePort(t)
+	base := "http://127.0.0.1:" + strconv.Itoa(port)
+	out := &aaSyncBuf{}
+	cmd := exec.Command(bin)
+	cmd.Dir = dir
+	cmd.Env = []string{
+		"PORT=" + strconv.Itoa(port),
+		"APP_ENV=test",
+		"BASE_URL=" + base,
+		"DB_PATH=" + dbPath,
+		"PHOTO_DIR=" + photoDir,
+		"SESSION_KEY=dGVzdC1zZXNzaW9uLWtleS0zMi1ieXRlcy1hYQ==",
+		"IP_HASH_KEY=dGVzdC1pcGhhc2gta2V5LTMyLWJ5dGVzLWJi",
+		"ADMIN_TOKEN=" + aaAdminToken,
+		"TOWN_BBOX=42.70,-71.09,42.82,-70.96",
+		"TZ=America/New_York",
+		"PATH=" + os.Getenv("PATH"),
+	}
+	cmd.Stdout, cmd.Stderr = out, out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start %s: %v", bin, err)
+	}
+	s := &aaServer{cmd: cmd, baseURL: base, dbPath: dbPath, photoDir: photoDir, out: out}
+	aaWaitHealthy(t, s, 5*time.Second)
+	return s
+}
+
+// aaKill is the cleanup stop (SIGKILL + wait), idempotent.
+func aaKill(t *testing.T, s *aaServer) {
+	t.Helper()
+	if s.stopped {
+		return
+	}
+	s.stopped = true
+	_ = s.cmd.Process.Kill()
+	_ = s.cmd.Wait()
+}
+
+// aaFindBin resolves the server binary: $BIN, else bin/server walked up from
+// the test working directory to the repo root. A missing binary is a failure.
+func aaFindBin(t *testing.T) string {
+	t.Helper()
+	if p := os.Getenv("BIN"); p != "" {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			t.Fatalf("BIN=%q: %v", p, err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			t.Fatalf("BIN=%q: %v", p, err)
+		}
+		return abs
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for i := 0; i < 8; i++ {
+		cand := filepath.Join(dir, "bin", "server")
+		if st, err := os.Stat(cand); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+			return cand
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	t.Fatal("server binary not found: run `make build` or set BIN")
+	return ""
+}
+
+// aaFreePort picks a free TCP port by listening on 127.0.0.1:0 and closing.
+func aaFreePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen :0: %v", err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// aaWaitHealthy polls /healthz until 200 with a context deadline; a hung or
+// crashed server fails the test with its output instead of hanging.
+func aaWaitHealthy(t *testing.T, s *aaServer, timeout time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	client := &http.Client{Timeout: 1 * time.Second}
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+"/healthz", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		if resp, err := client.Do(req); err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			aaKill(t, s)
+			t.Fatalf("server not healthy within %s; output:\n%s", timeout, s.out.String())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}

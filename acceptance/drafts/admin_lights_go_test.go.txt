@@ -1,0 +1,945 @@
+//go:build acceptance
+
+// @A-204..@A-209 — admin inventory CRUD over HTTP: bbox rejection, photo
+// pipeline, no-stray-files, duplicates, edit/soft-delete, pagination (frozen
+// contract, written by T-200 before the feature tasks branch).
+//
+// INERT DRAFT: `.go.txt` is compiled by nothing. T-207 activates it by pure
+// rename with NO content edits (a gofmt pass is the only sanctioned step):
+//
+//	git mv acceptance/drafts/admin_lights_go_test.go.txt acceptance/go/admin_lights_test.go
+//
+// Contract owners: T-204 (bbox), T-202/T-206 (photo pipeline), T-201 (store
+// + duplicates + soft delete), T-205 (admin pages + HTMX pagination). It
+// FAILS against current main by design (no /admin routes exist yet).
+//
+// Frozen routes and request/response contract (workers build to this
+// EXACTLY; full table in acceptance/drafts/README.md):
+//
+//	POST /admin/lights            multipart: csrf_token, label, kind
+//	                              (park|building|street), lat, lon,
+//	                              asset_no?, photo?, dup_choice?
+//	                              -> 303 Location: /admin/lights/{id} (no-JS)
+//	                              -> 409 body contains "Possible duplicate"
+//	                                 (dup panel) when dup_choice is absent
+//	                              -> 422 body contains
+//	                                 "outside Groveland town bounds"
+//	                              -> 413 over the 15 MB upload cap
+//	                              -> 415 wrong type / HEIC (HEIC body says
+//	                                 "please choose JPEG") / >40 MP bomb
+//	GET  /admin/lights/{id}       detail page; 404 once soft-deleted; the
+//	                              photo appears as src="/photos/..."
+//	POST /admin/lights/{id}       edit (multipart: csrf_token + label...),
+//	                              303 back to the detail page
+//	POST /admin/lights/{id}/delete  soft delete (multipart: csrf_token), 303
+//	                              to /admin
+//	GET  /admin                   list page: heading "Lights", the 50 most
+//	                              recent lights (ORDER BY created_at DESC,
+//	                              id DESC), one <img alt="<label>"> per row
+//	                              (placeholder thumbnails allowed)
+//	GET  /admin/rows?page=N       HTMX rows fragment; without HX-Request it
+//	                              must 303 to /admin?page=N
+//	GET  /photos/...              served, re-encoded photos: image/jpeg,
+//	                              long edge <= 1600, no APP1 segment
+package acceptance
+
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net"
+	"net/http"
+	"net/http/cookiejar"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// alAdminToken mirrors .env.test (the spawned server gets the same value).
+const alAdminToken = "dGVzdC1hZG1pbi10b2tlbi0zMi1ieXRl"
+
+var (
+	alReCSRF    = regexp.MustCompile(`<input[^>]*name="csrf_token"[^>]*>`)
+	alReValue   = regexp.MustCompile(`value="([^"]*)"`)
+	alRePhotoSw = regexp.MustCompile(`src="(/photos/[^"]+)"`)
+)
+
+// alAltRe matches the per-row thumbnail alt attribute for one label.
+func alAltRe(label string) *regexp.Regexp {
+	return regexp.MustCompile(`alt="` + regexp.QuoteMeta(label) + `"`)
+}
+
+// alAltAssetRe matches per-row thumbnails of lights carrying an asset_no:
+// the frozen alt format is "<asset_no> <label>".
+func alAltAssetRe(assetNo string) *regexp.Regexp {
+	return regexp.MustCompile(`alt="` + regexp.QuoteMeta(assetNo) + ` `)
+}
+
+// TestA204OutsideBBox: a create whose coordinates fall outside TOWN_BBOX is
+// rejected with 422 and the frozen message.
+func TestA204OutsideBBox(t *testing.T) {
+	s := alSpawnDir(t, "", "")
+	t.Cleanup(func() { alKill(t, s) })
+	c, csrf := alLogin(t, s)
+
+	status, _, body := alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf,
+		"label":      "Out of town lamp",
+		"kind":       "park",
+		"lat":        "42.36",
+		"lon":        "-71.06",
+	}, "", nil)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("POST /admin/lights outside bbox: status %d, want 422; body:\n%s", status, body)
+	}
+	if !strings.Contains(body, "outside Groveland town bounds") {
+		t.Errorf("POST /admin/lights outside bbox: body lacks the frozen rejection message; body:\n%s", body)
+	}
+}
+
+// TestA205Duplicates: the same asset_no posted again (nearby) raises the
+// duplicate panel (409 + "Possible duplicate"); dup_choice=merge collapses
+// the pair into one row; unnumbered lights within ~5 m raise the same panel
+// and dup_choice=save keeps both.
+func TestA205Duplicates(t *testing.T) {
+	s := alSpawnDir(t, "", "")
+	t.Cleanup(func() { alKill(t, s) })
+	c, csrf := alLogin(t, s)
+
+	// Seed GP-017 (the plan's illustrative park fixture).
+	status, _, body := alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "asset_no": "GP-017", "label": "Ball field lamp",
+		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
+	}, "", nil)
+	if status != http.StatusSeeOther {
+		t.Fatalf("create GP-017: status %d, want 303; body:\n%s", status, body)
+	}
+
+	// Same asset_no nearby -> duplicate panel.
+	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "asset_no": "GP-017", "label": "Ball field lamp twin",
+		"kind": "park", "lat": "42.76175", "lon": "-71.03035",
+	}, "", nil)
+	if status != http.StatusConflict {
+		t.Fatalf("duplicate asset_no: status %d, want 409; body:\n%s", status, body)
+	}
+	if !strings.Contains(body, "Possible duplicate") {
+		t.Errorf("duplicate asset_no: body lacks the frozen panel heading; body:\n%s", body)
+	}
+
+	// Explicit merge -> success and still exactly one GP-017 row.
+	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "asset_no": "GP-017", "label": "Ball field lamp twin",
+		"kind": "park", "lat": "42.76175", "lon": "-71.03035", "dup_choice": "merge",
+	}, "", nil)
+	if status != http.StatusSeeOther {
+		t.Fatalf("merge duplicate: status %d, want 303; body:\n%s", status, body)
+	}
+	// Thumbnail alt = "<asset_no> <label>", so exactly one row's alt starts
+	// with "GP-017 " after the merge.
+	list := alGet(t, c, s.baseURL+"/admin")
+	if got := len(alAltAssetRe("GP-017").FindAllString(list, -1)); got != 1 {
+		t.Errorf("after merge the list shows %d rows for asset GP-017, want exactly 1;\n%s", got, list)
+	}
+
+	// Unnumbered fixture, then a second unnumbered one ~4.5 m away.
+	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "label": "Path light one",
+		"kind": "park", "lat": "42.7625", "lon": "-71.0295",
+	}, "", nil)
+	if status != http.StatusSeeOther {
+		t.Fatalf("create unnumbered A: status %d, want 303; body:\n%s", status, body)
+	}
+	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "label": "Path light two",
+		"kind": "park", "lat": "42.76254", "lon": "-71.0295",
+	}, "", nil)
+	if status != http.StatusConflict {
+		t.Fatalf("unnumbered within 8 m: status %d, want 409; body:\n%s", status, body)
+	}
+	if !strings.Contains(body, "Possible duplicate") {
+		t.Errorf("unnumbered within 8 m: body lacks the frozen panel heading; body:\n%s", body)
+	}
+
+	// Explicit save-anyway -> success, two distinct lights exist.
+	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "label": "Path light two",
+		"kind": "park", "lat": "42.76254", "lon": "-71.0295", "dup_choice": "save",
+	}, "", nil)
+	if status != http.StatusSeeOther {
+		t.Fatalf("save-anyway duplicate: status %d, want 303; body:\n%s", status, body)
+	}
+	list = alGet(t, c, s.baseURL+"/admin")
+	for _, label := range []string{"Path light one", "Path light two"} {
+		if got := len(alAltRe(label).FindAllString(list, -1)); got != 1 {
+			t.Errorf("after save-anyway the list shows %q %d times, want exactly 1 (one row per light)", label, got)
+		}
+	}
+}
+
+// TestA206PhotoPipeline: the flagship portrait fixture (600x800, EXIF
+// Orientation=6, GPS IFD) comes back re-encoded: JPEG, no APP1 segment at
+// all (so no EXIF GPS), long edge within 1600 px, and wider than tall
+// (orientation applied). HEIC, a text file and a pixel bomb are refused with
+// 415 (HEIC with the frozen wording); an over-cap upload gets 413.
+func TestA206PhotoPipeline(t *testing.T) {
+	s := alSpawnDir(t, "", "")
+	t.Cleanup(func() { alKill(t, s) })
+	c, csrf := alLogin(t, s)
+
+	portrait := alFixture(t, "portrait-orient6-gps.jpg")
+
+	status, header, body := alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "label": "Photo pipeline lamp",
+		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
+	}, "portrait-orient6-gps.jpg", portrait)
+	if status != http.StatusSeeOther {
+		t.Fatalf("create with photo: status %d, want 303; body:\n%s", status, body)
+	}
+	detailURL := header.Get("Location")
+	if !strings.HasPrefix(detailURL, "/admin/lights/") {
+		t.Fatalf("create with photo: Location = %q, want /admin/lights/{id}", detailURL)
+	}
+
+	// The detail page points at the stored photo via /photos/...
+	detail := alGet(t, c, s.baseURL+detailURL)
+	m := alRePhotoSw.FindStringSubmatch(detail)
+	if m == nil {
+		t.Fatalf("detail page has no photo src=\"/photos/...\"; body:\n%s", detail)
+	}
+	photoHeader, served := alGetPhoto(t, c, s.baseURL+m[1])
+	if ct := photoHeader.Get("Content-Type"); !strings.HasPrefix(ct, "image/jpeg") {
+		t.Fatalf("GET %s: Content-Type = %q, want image/jpeg", m[1], ct)
+	}
+	if app1, ok := alFindApp1(served); ok {
+		t.Errorf("served photo still carries an APP1 segment (%d bytes): metadata must be stripped", len(app1))
+	}
+	if alHasExifGps(served) {
+		t.Errorf("served photo still carries EXIF GPS data")
+	}
+	w, h, err := alJpegDims(served)
+	if err != nil {
+		t.Fatalf("served photo: %v", err)
+	}
+	if w > 1600 || h > 1600 {
+		t.Errorf("served photo is %dx%d; long edge must be <= 1600", w, h)
+	}
+	if w <= h {
+		t.Errorf("served photo is %dx%d; EXIF Orientation=6 must make it wider than tall (800x600)", w, h)
+	}
+
+	// HEIC sniffed and refused with the frozen wording.
+	heic := alFixture(t, "heic.bin")
+	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "label": "Heic lamp",
+		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
+	}, "heic.bin", heic)
+	if status != http.StatusUnsupportedMediaType {
+		t.Fatalf("HEIC upload: status %d, want 415; body:\n%s", status, body)
+	}
+	if !strings.Contains(body, "please choose JPEG") {
+		t.Errorf("HEIC upload: body lacks the frozen wording \"please choose JPEG\"; body:\n%s", body)
+	}
+
+	// A text file with a .jpg name is refused on sniffing.
+	textAs := alFixture(t, "text-as.jpg")
+	status, _, _ = alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "label": "Text lamp",
+		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
+	}, "text-as.jpg", textAs)
+	if status != http.StatusUnsupportedMediaType {
+		t.Fatalf("text-as.jpg upload: status %d, want 415", status)
+	}
+
+	// A PNG whose header claims 50000x50000 is refused.
+	bomb := alFixture(t, "pixelbomb.png")
+	status, _, _ = alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "label": "Bomb lamp",
+		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
+	}, "pixelbomb.png", bomb)
+	if status != http.StatusUnsupportedMediaType {
+		t.Fatalf("pixelbomb.png upload: status %d, want 415", status)
+	}
+
+	// A body past the 15 MB cap (valid JPEG + junk after EOI) gets 413.
+	oversize := alOversizeJPEG(t, "landscape.jpg", 16<<20)
+	status, _, _ = alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "label": "Oversize lamp",
+		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
+	}, "big.jpg", oversize)
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize upload: status %d, want 413", status)
+	}
+}
+
+// TestA207NoStrayFiles: every rejected upload must leave PHOTO_DIR untouched;
+// the happy path stores exactly one new .jpg.
+func TestA207NoStrayFiles(t *testing.T) {
+	s := alSpawnDir(t, "", "") // fresh PHOTO_DIR under its own t.TempDir()
+	t.Cleanup(func() { alKill(t, s) })
+	c, csrf := alLogin(t, s)
+
+	rejects := []struct {
+		name   string
+		file   string
+		status int
+	}{
+		{"heic", "heic.bin", http.StatusUnsupportedMediaType},
+		{"text-as-jpg", "text-as.jpg", http.StatusUnsupportedMediaType},
+		{"pixelbomb", "pixelbomb.png", http.StatusUnsupportedMediaType},
+		{"oversize", "", http.StatusRequestEntityTooLarge},
+	}
+	before := alCountFiles(t, s.photoDir)
+	for _, r := range rejects {
+		var data []byte
+		fileName := r.file
+		if r.name == "oversize" {
+			data = alOversizeJPEG(t, "landscape.jpg", 16<<20)
+			fileName = "big.jpg"
+		} else {
+			data = alFixture(t, r.file)
+		}
+		status, _, body := alCreate(t, c, s.baseURL, map[string]string{
+			"csrf_token": csrf, "label": "Stray " + r.name,
+			"kind": "park", "lat": "42.7617", "lon": "-71.0303",
+		}, fileName, data)
+		if status != r.status {
+			t.Fatalf("%s upload: status %d, want %d; body:\n%s", r.name, status, r.status, body)
+		}
+		if got := alCountFiles(t, s.photoDir); got != before {
+			t.Fatalf("%s upload left stray files: PHOTO_DIR held %d files before, %d after", r.name, before, got)
+		}
+	}
+
+	// Happy path: exactly one new file appears, and it is a .jpg.
+	happy := alFixture(t, "landscape.jpg")
+	status, _, body := alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "label": "Happy path lamp",
+		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
+	}, "landscape.jpg", happy)
+	if status != http.StatusSeeOther {
+		t.Fatalf("happy-path upload: status %d, want 303; body:\n%s", status, body)
+	}
+	names := alListFiles(t, s.photoDir)
+	if len(names) != before+1 {
+		t.Fatalf("happy-path upload: PHOTO_DIR held %d files before, %d after; want exactly one new file", before, len(names))
+	}
+	if !strings.HasSuffix(names[len(names)-1], ".jpg") {
+		t.Errorf("stored photo %q is not a .jpg", names[len(names)-1])
+	}
+}
+
+// TestA208EditSoftDelete: a label edit shows on the detail page; a delete
+// makes the detail 404 and removes the light from the list.
+func TestA208EditSoftDelete(t *testing.T) {
+	s := alSpawnDir(t, "", "")
+	t.Cleanup(func() { alKill(t, s) })
+	c, csrf := alLogin(t, s)
+
+	status, header, body := alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "asset_no": "GP-018", "label": "Old label",
+		"kind": "park", "lat": "42.7620", "lon": "-71.0290",
+	}, "", nil)
+	if status != http.StatusSeeOther {
+		t.Fatalf("create GP-018: status %d, want 303; body:\n%s", status, body)
+	}
+	detailURL := header.Get("Location")
+
+	// Edit: relabel; the detail page shows the new label.
+	status, _, body = alPostMultipart(t, c, s.baseURL+detailURL, map[string]string{
+		"csrf_token": csrf, "label": "New label",
+	}, "", "", nil, false)
+	if status != http.StatusSeeOther {
+		t.Fatalf("edit label: status %d, want 303; body:\n%s", status, body)
+	}
+	if detail := alGet(t, c, s.baseURL+detailURL); !strings.Contains(detail, "New label") {
+		t.Errorf("detail page after edit lacks \"New label\"; body:\n%s", detail)
+	}
+
+	// Soft delete: detail 404s, list no longer mentions the light.
+	status, _, body = alPostMultipart(t, c, s.baseURL+detailURL+"/delete", map[string]string{
+		"csrf_token": csrf,
+	}, "", "", nil, false)
+	if status != http.StatusSeeOther {
+		t.Fatalf("delete: status %d, want 303; body:\n%s", status, body)
+	}
+	if status, _, _ := alDo(t, c, http.MethodGet, s.baseURL+detailURL, nil, false); status != http.StatusNotFound {
+		t.Errorf("detail after delete: status %d, want 404", status)
+	}
+	if list := alGet(t, c, s.baseURL+"/admin"); strings.Contains(list, "New label") {
+		t.Errorf("list after delete still mentions the deleted light; body:\n%s", list)
+	}
+}
+
+// TestA209Pagination: 55 photo-less creates; /admin lists the 50 newest and
+// not the 5 oldest; /admin/rows?page=2 is the HTMX fragment (303 to
+// /admin?page=2 without the header, the remaining 5 with it).
+func TestA209Pagination(t *testing.T) {
+	s := alSpawnDir(t, "", "")
+	t.Cleanup(func() { alKill(t, s) })
+	c, csrf := alLogin(t, s)
+
+	for i := 1; i <= 55; i++ {
+		fields := map[string]string{
+			"csrf_token": csrf,
+			"label":      fmt.Sprintf("Pagination lamp %02d", i),
+			"kind":       "park",
+			"lat":        strconv.FormatFloat(42.76+float64(i)*0.0005, 'f', 7, 64),
+			"lon":        strconv.FormatFloat(-71.045+float64(i)*0.0005, 'f', 7, 64),
+		}
+		status, _, body := alCreate(t, c, s.baseURL, fields, "", nil)
+		if status != http.StatusSeeOther {
+			t.Fatalf("create Pagination lamp %02d: status %d, want 303; body:\n%s", i, status, body)
+		}
+	}
+
+	list := alGet(t, c, s.baseURL+"/admin")
+	if !strings.Contains(list, ">Lights<") {
+		t.Errorf("GET /admin: missing the \"Lights\" heading; body:\n%.400s", list)
+	}
+	for i := 6; i <= 55; i++ {
+		if want := fmt.Sprintf("Pagination lamp %02d", i); !strings.Contains(list, want) {
+			t.Errorf("GET /admin: newest-50 page lacks %q", want)
+		}
+	}
+	for i := 1; i <= 5; i++ {
+		if stale := fmt.Sprintf("Pagination lamp %02d", i); strings.Contains(list, stale) {
+			t.Errorf("GET /admin: page 1 still shows the oldest light %q", stale)
+		}
+	}
+
+	// Without HX-Request the rows endpoint redirects to the full page.
+	status, header, _ := alDo(t, c, http.MethodGet, s.baseURL+"/admin/rows?page=2", nil, false)
+	if status != http.StatusSeeOther {
+		t.Fatalf("GET /admin/rows?page=2 (no HX-Request): status %d, want 303", status)
+	}
+	if loc := header.Get("Location"); loc != "/admin?page=2" {
+		t.Fatalf("GET /admin/rows?page=2 (no HX-Request): Location = %q, want /admin?page=2", loc)
+	}
+
+	// With HX-Request it returns the fragment holding the remaining 5.
+	status, _, frag := alDo(t, c, http.MethodGet, s.baseURL+"/admin/rows?page=2", nil, true)
+	if status != http.StatusOK {
+		t.Fatalf("GET /admin/rows?page=2 (HX-Request): status %d, want 200", status)
+	}
+	for i := 1; i <= 5; i++ {
+		if want := fmt.Sprintf("Pagination lamp %02d", i); !strings.Contains(frag, want) {
+			t.Errorf("fragment page 2 lacks %q; fragment:\n%.400s", want, frag)
+		}
+	}
+	if strings.Contains(frag, "Pagination lamp 06") {
+		t.Errorf("fragment page 2 overlaps page 1 (contains \"Pagination lamp 06\")")
+	}
+}
+
+// --- al helpers (self-contained on purpose: activation is a pure rename,
+// so this file must not depend on helpers defined elsewhere in the package) ---
+
+// alLogin exchanges the one-time ADMIN_TOKEN for a session cookie and parses
+// the CSRF token from the walk page's add-light form.
+func alLogin(t *testing.T, s *alServer) (*http.Client, string) {
+	t.Helper()
+	c := alClient(t)
+	status, _, _ := alDo(t, c, http.MethodGet, s.baseURL+"/admin/login?token="+alAdminToken, nil, false)
+	if status != http.StatusFound {
+		t.Fatalf("admin login: status %d, want 302 (token exchange failed)", status)
+	}
+	return c, alCSRF(t, c, s.baseURL)
+}
+
+// alCSRF fetches the walk page and extracts the add-light form's csrf_token.
+func alCSRF(t *testing.T, c *http.Client, base string) string {
+	t.Helper()
+	status, _, body := alDo(t, c, http.MethodGet, base+"/admin/walk", nil, false)
+	if status != http.StatusOK {
+		t.Fatalf("GET /admin/walk: status %d, want 200; body:\n%s", status, body)
+	}
+	input := alReCSRF.FindString(body)
+	if input == "" {
+		t.Fatalf("GET /admin/walk: no hidden input named csrf_token; body:\n%s", body)
+	}
+	v := alReValue.FindStringSubmatch(input)
+	if v == nil {
+		t.Fatalf("GET /admin/walk: csrf_token input has no value; body:\n%s", body)
+	}
+	return v[1]
+}
+
+// alCreate POSTs the add-light form (multipart) without HX-Request.
+func alCreate(t *testing.T, c *http.Client, base string, fields map[string]string, photoName string, photoData []byte) (int, http.Header, string) {
+	t.Helper()
+	return alPostMultipart(t, c, base+"/admin/lights", fields, "photo", photoName, photoData, false)
+}
+
+// alPostMultipart builds one multipart/form-data request. fileField=""
+// means no file part.
+func alPostMultipart(t *testing.T, c *http.Client, target string, fields map[string]string, fileField, fileName string, fileData []byte, hx bool) (int, http.Header, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	for k, v := range fields {
+		if err := w.WriteField(k, v); err != nil {
+			t.Fatalf("multipart field %s: %v", k, err)
+		}
+	}
+	if fileField != "" {
+		fw, err := w.CreateFormFile(fileField, fileName)
+		if err != nil {
+			t.Fatalf("multipart file %s: %v", fileName, err)
+		}
+		if _, err := fw.Write(fileData); err != nil {
+			t.Fatalf("multipart write %s: %v", fileName, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("multipart close: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, target, &buf)
+	if err != nil {
+		t.Fatalf("POST %s: %v", target, err)
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	if hx {
+		req.Header.Set("HX-Request", "true")
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", target, err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("POST %s: read body: %v", target, err)
+	}
+	return resp.StatusCode, resp.Header, string(b)
+}
+
+// alDo performs one request, optionally with HX-Request: true.
+func alDo(t *testing.T, c *http.Client, method, target string, body io.Reader, hx bool) (int, http.Header, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, target, body)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, target, err)
+	}
+	if hx {
+		req.Header.Set("HX-Request", "true")
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, target, err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("%s %s: read body: %v", method, target, err)
+	}
+	return resp.StatusCode, resp.Header, string(b)
+}
+
+// alGet fetches a page and requires 200.
+func alGet(t *testing.T, c *http.Client, target string) string {
+	t.Helper()
+	status, _, body := alDo(t, c, http.MethodGet, target, nil, false)
+	if status != http.StatusOK {
+		t.Fatalf("GET %s: status %d, want 200; body:\n%s", target, status, body)
+	}
+	return body
+}
+
+// alGetPhoto fetches a binary URL and requires 200, returning headers and
+// the raw bytes.
+func alGetPhoto(t *testing.T, c *http.Client, target string) (http.Header, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatalf("GET %s: %v", target, err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", target, err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("GET %s: read body: %v", target, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: status %d, want 200", target, resp.StatusCode)
+	}
+	return resp.Header, b
+}
+
+// alFixture walks up from the working directory to the repo root and reads
+// testdata/photos/<name>.
+func alFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for i := 0; i < 8; i++ {
+		cand := filepath.Join(dir, "testdata", "photos", name)
+		if b, err := os.ReadFile(cand); err == nil {
+			return b
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	t.Fatalf("fixture testdata/photos/%s not found (run from the repo root)", name)
+	return nil
+}
+
+// alOversizeJPEG pads a valid fixture JPEG (after its EOI marker) past the
+// 15 MB upload cap; total is at least want bytes.
+func alOversizeJPEG(t *testing.T, fixture string, want int) []byte {
+	t.Helper()
+	base := alFixture(t, fixture)
+	if len(base) >= want {
+		t.Fatalf("fixture %s is already %d bytes; pick a larger target", fixture, len(base))
+	}
+	out := make([]byte, 0, want)
+	out = append(out, base...)
+	out = append(out, bytes.Repeat([]byte{0x55}, want-len(base))...)
+	return out
+}
+
+// alCountFiles counts regular files under dir (0 when it does not exist).
+func alCountFiles(t *testing.T, dir string) int {
+	t.Helper()
+	names := alListFiles(t, dir)
+	return len(names)
+}
+
+// alListFiles lists regular files under dir, sorted (0-entry slice when the
+// directory does not exist yet).
+func alListFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	var names []string
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if !d.IsDir() {
+			names = append(names, p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", dir, err)
+	}
+	return names
+}
+
+// alFindApp1 returns the first APP1 segment payload, if any.
+func alFindApp1(data []byte) ([]byte, bool) {
+	i, _, next, ok := alWalkToMarker(data, 2, 0xe1)
+	if !ok {
+		return nil, false
+	}
+	return data[i+4 : next], true
+}
+
+// alHasExifGps reports whether the JPEG bytes carry an EXIF APP1 segment
+// whose GPSInfo pointer (tag 0x8825) resolves to a non-empty IFD.
+func alHasExifGps(data []byte) bool {
+	i, _, next, ok := alWalkToMarker(data, 2, 0xe1)
+	if !ok {
+		return false
+	}
+	seg := data[i+4 : next]
+	if len(seg) < 6 || string(seg[:6]) != "Exif\x00\x00" {
+		return false
+	}
+	return alTiffHasGps(seg[6:])
+}
+
+// alTiffHasGps parses a TIFF header (either endianness) and reports whether
+// IFD0 holds a GPSInfo pointer to a non-empty IFD.
+func alTiffHasGps(tiff []byte) bool {
+	if len(tiff) < 8 {
+		return false
+	}
+	var le bool
+	switch {
+	case bytes.Equal(tiff[:2], []byte("II")):
+		le = true
+	case bytes.Equal(tiff[:2], []byte("MM")):
+		le = false
+	default:
+		return false
+	}
+	u16 := func(o int) int {
+		if le {
+			return int(binary.LittleEndian.Uint16(tiff[o : o+2]))
+		}
+		return int(binary.BigEndian.Uint16(tiff[o : o+2]))
+	}
+	u32 := func(o int) int {
+		if le {
+			return int(binary.LittleEndian.Uint32(tiff[o : o+4]))
+		}
+		return int(binary.BigEndian.Uint32(tiff[o : o+4]))
+	}
+	ifd0 := u32(4)
+	if ifd0+2 > len(tiff) {
+		return false
+	}
+	for e := 0; e < u16(ifd0); e++ {
+		base := ifd0 + 2 + e*12
+		if base+12 > len(tiff) {
+			return false
+		}
+		if u16(base) == 0x8825 {
+			gps := u32(base + 8)
+			return gps+2 <= len(tiff) && u16(gps) > 0
+		}
+	}
+	return false
+}
+
+// alJpegDims parses the frame dimensions from the first SOF marker
+// (baseline or progressive).
+func alJpegDims(data []byte) (int, int, error) {
+	i := 2
+	for i+4 <= len(data) {
+		if data[i] != 0xff {
+			return 0, 0, errors.New("jpeg dims: lost marker synchronisation")
+		}
+		marker := int(data[i+1])
+		switch {
+		case marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7):
+			i += 2
+			continue
+		case marker == 0xd9 || marker == 0xda:
+			return 0, 0, errors.New("jpeg dims: no SOF marker before the scan data")
+		}
+		segLen := int(binary.BigEndian.Uint16(data[i+2 : i+4]))
+		next := i + 2 + segLen
+		if segLen < 2 || next > len(data) {
+			return 0, 0, errors.New("jpeg dims: malformed segment length")
+		}
+		if marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc {
+			if next < i+9 {
+				return 0, 0, errors.New("jpeg dims: truncated SOF segment")
+			}
+			h := int(binary.BigEndian.Uint16(data[i+5 : i+7]))
+			w := int(binary.BigEndian.Uint16(data[i+7 : i+9]))
+			return w, h, nil
+		}
+		i = next
+	}
+	return 0, 0, errors.New("jpeg dims: no SOF marker found")
+}
+
+// alWalkToMarker scans JPEG segments from offset start until it finds the
+// requested marker; it returns the marker offset, the marker, the offset one
+// past the segment and whether the marker was found.
+func alWalkToMarker(data []byte, start int, want byte) (int, byte, int, bool) {
+	i := start
+	for i+4 <= len(data) {
+		if data[i] != 0xff {
+			return 0, 0, 0, false
+		}
+		marker := data[i+1]
+		if marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7) {
+			i += 2
+			continue
+		}
+		if marker == 0xd9 || marker == 0xda {
+			return 0, 0, 0, false // metadata only precedes the scan
+		}
+		segLen := int(binary.BigEndian.Uint16(data[i+2 : i+4]))
+		next := i + 2 + segLen
+		if segLen < 2 || next > len(data) {
+			return 0, 0, 0, false
+		}
+		if marker == want {
+			return i, marker, next, true
+		}
+		i = next
+	}
+	return 0, 0, 0, false
+}
+
+// alClient is a cookie-carrying client that never follows redirects (so the
+// 303s of the no-JS flows stay observable).
+func alClient(t *testing.T) *http.Client {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookie jar: %v", err)
+	}
+	return &http.Client{
+		Jar:     jar,
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+type alSyncBuf struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *alSyncBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *alSyncBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// alServer is one spawned instance.
+type alServer struct {
+	cmd      *exec.Cmd
+	baseURL  string
+	dbPath   string
+	photoDir string
+	out      *alSyncBuf
+	stopped  bool
+}
+
+// alSpawnDir starts the server (APP_ENV=test) on its own free port with the
+// dummy .env.test secrets; empty dbPath/photoDir mean fresh paths under a
+// t.TempDir().
+func alSpawnDir(t *testing.T, dbPath, photoDir string) *alServer {
+	t.Helper()
+	bin := alFindBin(t)
+	dir := t.TempDir()
+	if dbPath == "" {
+		dbPath = filepath.Join(dir, "app.db")
+	}
+	if photoDir == "" {
+		photoDir = filepath.Join(dir, "photos")
+	}
+	port := alFreePort(t)
+	base := "http://127.0.0.1:" + strconv.Itoa(port)
+	out := &alSyncBuf{}
+	cmd := exec.Command(bin)
+	cmd.Dir = dir
+	cmd.Env = []string{
+		"PORT=" + strconv.Itoa(port),
+		"APP_ENV=test",
+		"BASE_URL=" + base,
+		"DB_PATH=" + dbPath,
+		"PHOTO_DIR=" + photoDir,
+		"SESSION_KEY=dGVzdC1zZXNzaW9uLWtleS0zMi1ieXRlcy1hYQ==",
+		"IP_HASH_KEY=dGVzdC1pcGhhc2gta2V5LTMyLWJ5dGVzLWJi",
+		"ADMIN_TOKEN=" + alAdminToken,
+		"TOWN_BBOX=42.70,-71.09,42.82,-70.96",
+		"TZ=America/New_York",
+		"PATH=" + os.Getenv("PATH"),
+	}
+	cmd.Stdout, cmd.Stderr = out, out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start %s: %v", bin, err)
+	}
+	s := &alServer{cmd: cmd, baseURL: base, dbPath: dbPath, photoDir: photoDir, out: out}
+	alWaitHealthy(t, s, 5*time.Second)
+	return s
+}
+
+// alKill is the cleanup stop (SIGKILL + wait), idempotent.
+func alKill(t *testing.T, s *alServer) {
+	t.Helper()
+	if s.stopped {
+		return
+	}
+	s.stopped = true
+	_ = s.cmd.Process.Kill()
+	_ = s.cmd.Wait()
+}
+
+// alFindBin resolves the server binary: $BIN, else bin/server walked up from
+// the test working directory to the repo root.
+func alFindBin(t *testing.T) string {
+	t.Helper()
+	if p := os.Getenv("BIN"); p != "" {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			t.Fatalf("BIN=%q: %v", p, err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			t.Fatalf("BIN=%q: %v", p, err)
+		}
+		return abs
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for i := 0; i < 8; i++ {
+		cand := filepath.Join(dir, "bin", "server")
+		if st, err := os.Stat(cand); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+			return cand
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	t.Fatal("server binary not found: run `make build` or set BIN")
+	return ""
+}
+
+// alFreePort picks a free TCP port by listening on 127.0.0.1:0 and closing.
+func alFreePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen :0: %v", err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// alWaitHealthy polls /healthz until 200 with a context deadline; a hung or
+// crashed server fails the test with its output instead of hanging.
+func alWaitHealthy(t *testing.T, s *alServer, timeout time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	client := &http.Client{Timeout: 1 * time.Second}
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+"/healthz", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		if resp, err := client.Do(req); err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			alKill(t, s)
+			t.Fatalf("server not healthy within %s; output:\n%s", timeout, s.out.String())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
