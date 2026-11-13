@@ -69,9 +69,11 @@ func takeMergeLock(root string) (*os.File, error) {
 	return lf, nil
 }
 
-// requireCleanMain enforces the E4 precondition.
+// requireCleanMain enforces the E4 precondition. Scheduler-owned state files
+// (graph, progress, reviews, baselines) are expected to be in flux during a
+// run; the assertion exists to catch AGENT edits to main.
 func requireCleanMain(root string) error {
-	dirty := DirtyLines(gitOut2(root, "status", "--porcelain"))
+	dirty := dirtyNonScheduler(root)
 	if len(dirty) == 0 {
 		return nil
 	}
