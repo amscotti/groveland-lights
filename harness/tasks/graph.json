@@ -237,7 +237,7 @@
       "claims": [],
       "ui": false,
       "allow_deps": [],
-      "status": "review",
+      "status": "done",
       "attempts": 4,
       "model": "glm",
       "budget": {
