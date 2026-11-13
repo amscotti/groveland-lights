@@ -152,20 +152,37 @@ func conflictsBatch(owns []string, selected [][]string) bool {
 	return false
 }
 
-// ContractFirstReady enforces: a feature task may only be ready if every one of its
-// claims is covered by an acceptance task (type "acceptance") that is done or the
-// acceptance task it depends on is done. Simplification per plan §6.1.3: a feature
-// task becomes ready only after the acceptance task for its claims is done.
+// ContractFirstReady enforces: a feature task may only be ready if an
+// acceptance task is done among its deps — directly or transitively (feature
+// tasks commonly depend only on sibling features that themselves depend on the
+// acceptance task).
 func ContractFirstReady(t *Task, g *Graph) error {
 	if t.Type != "feature" {
 		return nil
 	}
+	if acceptanceDone(t.ID, g, map[string]bool{}) {
+		return nil
+	}
+	return fmt.Errorf("feature task %s has no done acceptance task among its deps (contract-first rule)", t.ID)
+}
+
+// acceptanceDone walks the dependency ancestry looking for a done acceptance task.
+func acceptanceDone(id string, g *Graph, seen map[string]bool) bool {
+	if seen[id] {
+		return false
+	}
+	seen[id] = true
+	t := g.task(id)
+	if t == nil {
+		return false
+	}
+	if t.Type == "acceptance" && t.Status == StatusDone {
+		return true
+	}
 	for _, d := range t.Deps {
-		dt := g.task(d)
-		if dt != nil && dt.Type == "acceptance" && dt.Status == StatusDone {
-			return nil
+		if acceptanceDone(d, g, seen) {
+			return true
 		}
 	}
-	// No acceptance dep found anywhere in its deps: violation.
-	return fmt.Errorf("feature task %s has no done acceptance task among its deps (contract-first rule)", t.ID)
+	return false
 }
