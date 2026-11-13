@@ -186,10 +186,10 @@ holdout: ## Run hidden holdout suites (absolute HOLDOUT_DIR from policy)
 .PHONY: validate
 validate: ## Run all @A-<n>xx specs for MILESTONE=Mn with artifacts kept
 	@if [ -z "$(MILESTONE)" ]; then echo "usage: make validate MILESTONE=M2"; exit 2; fi
-	n=$${MILESTONE#M}; mkdir -p harness/runs/$(TS)/validate; \
-	npx playwright test --grep "@A-$$n[0-9]" --pass-with-no-tests || exit 1; \
-	cp -r test-results/* harness/runs/$(TS)/validate/ 2>/dev/null || true; \
-	echo "validate: artifacts in harness/runs/$(TS)/validate"
+	n=$${MILESTONE#M}; out=harness/runs/$(TS)/validate; mkdir -p $$out; \
+	PLAYWRIGHT_JSON_OUTPUT_NAME=$$out/results.json npx playwright test --grep "@A-$$n[0-9]" --pass-with-no-tests --reporter=line,json || exit 1; \
+	cp -r test-results/* $$out/ 2>/dev/null || true; \
+	echo "validate: artifacts in $$out"
 
 .PHONY: smoke
 smoke: ## @smoke specs against BASE_URL (deployed)

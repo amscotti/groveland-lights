@@ -2,7 +2,7 @@
   "milestones": [
     {
       "id": "M1",
-      "title": "Skeleton deployed with persistent storage",
+      "title": "Skeleton deployed with persistent storage [judge: NOT DONE pending H4 Fly deploy]",
       "assertions": [
         "A-101",
         "A-102",
@@ -198,7 +198,7 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "rework",
+      "status": "done",
       "attempts": 4,
       "model": "glm",
       "budget": {
