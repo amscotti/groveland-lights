@@ -1,8 +1,15 @@
 {
   "milestones": [
     {
+      "id": "M0",
+      "title": "Harness bootstrap",
+      "assertions": [
+        "A-000"
+      ]
+    },
+    {
       "id": "M1",
-      "title": "Skeleton deployed with persistent storage [judge: NOT DONE pending H4 Fly deploy]",
+      "title": "Skeleton deployed with persistent storage",
       "assertions": [
         "A-101",
         "A-102",
@@ -12,10 +19,18 @@
       ]
     },
     {
-      "id": "M0",
-      "title": "Harness bootstrap",
+      "id": "M2",
+      "title": "Admin inventory walk-the-town",
       "assertions": [
-        "A-000"
+        "A-201",
+        "A-202",
+        "A-203",
+        "A-204",
+        "A-205",
+        "A-206",
+        "A-207",
+        "A-208",
+        "A-209"
       ]
     }
   ],
@@ -206,6 +221,291 @@
         "wall_min": 90
       },
       "findings": "rebase conflict unresolved"
+    },
+    {
+      "id": "T-106",
+      "milestone": "M2",
+      "type": "chore",
+      "role": "worker",
+      "title": "Untrack test-run.db{,-shm,-wal} from git; they are runtime artifacts and already gitignored",
+      "deps": [],
+      "owns": [
+        "test-run.db",
+        "test-run.db-shm",
+        "test-run.db-wal"
+      ],
+      "claims": [],
+      "ui": false,
+      "allow_deps": [],
+      "budget": {
+        "steps": 50,
+        "wall_min": 30
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-200",
+      "milestone": "M2",
+      "type": "acceptance",
+      "role": "test-author",
+      "title": "Write M2 acceptance specs as inert drafts: fixtures, schema oracle, frozen UI contract",
+      "deps": [],
+      "owns": [
+        "acceptance/**",
+        "harness/protected.sha256",
+        "testdata/photos/**",
+        "testdata/schema.expected.sql"
+      ],
+      "claims": [
+        "A-201",
+        "A-202",
+        "A-203",
+        "A-204",
+        "A-205",
+        "A-206",
+        "A-207",
+        "A-208",
+        "A-209"
+      ],
+      "ui": false,
+      "allow_deps": [],
+      "budget": {
+        "steps": 200,
+        "wall_min": 90
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-201",
+      "milestone": "M2",
+      "type": "feature",
+      "role": "worker",
+      "title": "Migration 0002 creates the product schema; sqlc-backed lights & photos store",
+      "deps": [
+        "T-200"
+      ],
+      "owns": [
+        "migrations/**",
+        "sqlc.yaml",
+        "internal/store/queries/**",
+        "internal/store/gen/**",
+        "internal/store/lights*.go",
+        "internal/store/photos*.go",
+        "internal/store/migrations*.go"
+      ],
+      "claims": [
+        "A-205",
+        "A-208"
+      ],
+      "ui": false,
+      "allow_deps": [],
+      "budget": {
+        "steps": 200,
+        "wall_min": 90
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-202",
+      "milestone": "M2",
+      "type": "feature",
+      "role": "worker",
+      "title": "internal/img: decode JPEG/PNG/WebP, apply EXIF orientation, resize to \u22641600 px, strip all metadata",
+      "deps": [
+        "T-200"
+      ],
+      "owns": [
+        "internal/img/**",
+        "go.mod",
+        "go.sum"
+      ],
+      "claims": [
+        "A-206",
+        "A-207"
+      ],
+      "ui": false,
+      "allow_deps": [
+        "golang.org/x/image"
+      ],
+      "budget": {
+        "steps": 200,
+        "wall_min": 90
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-203",
+      "milestone": "M2",
+      "type": "feature",
+      "role": "worker",
+      "title": "internal/web auth+session and internal/store session/user slices: A-201",
+      "deps": [
+        "T-200",
+        "T-201",
+        "T-208"
+      ],
+      "owns": [
+        "internal/web/auth*.go",
+        "internal/web/session*.go",
+        "internal/store/session*.go",
+        "internal/store/user*.go"
+      ],
+      "claims": [
+        "A-201"
+      ],
+      "ui": false,
+      "allow_deps": [],
+      "budget": {
+        "steps": 200,
+        "wall_min": 60
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-204",
+      "milestone": "M2",
+      "type": "feature",
+      "role": "worker",
+      "title": "internal/geo: DistanceM and duplicate-proximity classification for A-204/A-205",
+      "deps": [
+        "T-200"
+      ],
+      "owns": [
+        "internal/geo/**"
+      ],
+      "claims": [
+        "A-204",
+        "A-205"
+      ],
+      "ui": false,
+      "allow_deps": [],
+      "budget": {
+        "steps": 200,
+        "wall_min": 45
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-205",
+      "milestone": "M2",
+      "type": "feature",
+      "role": "ui-worker",
+      "title": "Admin pages: /admin/walk capture flow, create/edit/soft-delete, list + HTMX pagination",
+      "deps": [
+        "T-201",
+        "T-202",
+        "T-203",
+        "T-204",
+        "T-206",
+        "T-208"
+      ],
+      "owns": [
+        "internal/web/admin*.go",
+        "internal/web/web_test.go",
+        "web/templates/**",
+        "web/static/js/walk.js",
+        "web/static/js/globals.d.ts"
+      ],
+      "claims": [
+        "A-202",
+        "A-203",
+        "A-208",
+        "A-209"
+      ],
+      "ui": true,
+      "allow_deps": [],
+      "budget": {
+        "steps": 200,
+        "wall_min": 120
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-206",
+      "milestone": "M2",
+      "type": "feature",
+      "role": "worker",
+      "title": "internal/web/upload*.go: multipart photo intake (15 MB / 40 MP / HEIC 415) + /photos serving",
+      "deps": [
+        "T-200",
+        "T-201",
+        "T-202",
+        "T-208"
+      ],
+      "owns": [
+        "internal/web/upload*.go"
+      ],
+      "claims": [
+        "A-206",
+        "A-207"
+      ],
+      "ui": false,
+      "allow_deps": [],
+      "budget": {
+        "steps": 200,
+        "wall_min": 60
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-207",
+      "milestone": "M2",
+      "type": "acceptance",
+      "role": "test-author",
+      "title": "Activate the drafted A-201..A-209 specs verbatim; prove M2's contract",
+      "deps": [
+        "T-201",
+        "T-202",
+        "T-203",
+        "T-204",
+        "T-205",
+        "T-206"
+      ],
+      "owns": [
+        "acceptance/**",
+        "harness/protected.sha256"
+      ],
+      "claims": [
+        "A-201",
+        "A-202",
+        "A-203",
+        "A-204",
+        "A-205",
+        "A-206",
+        "A-207",
+        "A-208",
+        "A-209"
+      ],
+      "ui": false,
+      "allow_deps": [],
+      "budget": {
+        "steps": 200,
+        "wall_min": 90
+      },
+      "status": "ready"
+    },
+    {
+      "id": "T-208",
+      "milestone": "M2",
+      "type": "chore",
+      "role": "worker",
+      "title": "Refactor Server to carry *store.DB (drop SetProbeStore global); fix /probe fragment Content-Type (judge-M1 finding)",
+      "deps": [],
+      "owns": [
+        "cmd/server/**",
+        "internal/web/web.go",
+        "internal/web/context.go",
+        "internal/web/web_test.go",
+        "internal/web/probe*.go"
+      ],
+      "claims": [],
+      "ui": false,
+      "allow_deps": [],
+      "budget": {
+        "steps": 200,
+        "wall_min": 45
+      },
+      "status": "ready"
     }
   ]
 }

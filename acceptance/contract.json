@@ -35,6 +35,60 @@
       "when": "requests are served",
       "shall": "log JSON with method, route pattern, status, duration and request id — never the IP",
       "gate": true
+    },
+    {
+      "id": "A-201",
+      "when": "admin auth",
+      "shall": "valid ADMIN_TOKEN exchanges for an admin session; wrong/reused tokens 403; /admin/* guards redirect (302) or HX-Redirect 401",
+      "gate": true
+    },
+    {
+      "id": "A-202",
+      "when": "walk mode opens",
+      "shall": "geolocation with live accuracy shown; save gated at <=30m accuracy or explicit save-anyway",
+      "gate": true
+    },
+    {
+      "id": "A-203",
+      "when": "pin is dragged",
+      "shall": "saved lat/lon equals the confirmed pin",
+      "gate": true
+    },
+    {
+      "id": "A-204",
+      "when": "position outside TOWN_BBOX",
+      "shall": "reject with a clear message",
+      "gate": true
+    },
+    {
+      "id": "A-205",
+      "when": "duplicate fixture detected",
+      "shall": "same asset_no within 25m or unnumbered within 8m shows merge/save-anywhere panel",
+      "gate": true
+    },
+    {
+      "id": "A-206",
+      "when": "photo uploaded",
+      "shall": "jpeg/png/webp <=15MB re-encoded jpeg long-edge<=1600, EXIF orientation applied, all metadata stripped; HEIC 415",
+      "gate": true
+    },
+    {
+      "id": "A-207",
+      "when": "oversized or wrong-type or pixel-bomb upload",
+      "shall": "413/415 and no stray file",
+      "gate": true
+    },
+    {
+      "id": "A-208",
+      "when": "admin edits or soft-deletes a light",
+      "shall": "deleted lights vanish from lists and map",
+      "gate": true
+    },
+    {
+      "id": "A-209",
+      "when": "admin list viewed",
+      "shall": "50 most recent with thumbnails, HTMX pagination",
+      "gate": true
     }
   ]
 }
