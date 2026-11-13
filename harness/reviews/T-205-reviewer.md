@@ -127,8 +127,9 @@ lost-race branch (admin_create.go:221-231) converts a concurrent-create
 
 - Frozen ids/strings all present and asserted by tests: `#walk-pos`/`#pin-pos` at 6 dp
   (`posText`), `#walk-accuracy` (`accuracy N m`), `#pin` with `aria-label="position pin"`,
-  focusable (`tabindex="0"`) and keyboard-nudged ±1 m (`NUDGE_STEPS`, walk.js:28 — packet
-  "nudge by 1 m"), pad spanning ±25 m (`PAD_SPAN_M = 50`, clamp at ±25, walk.js:8-9,39),
+  focusable (`tabindex="0"`) and keyboard-nudged ±1 m (`NUDGE_STEPS`, walk.js:12 — packet
+  "nudge by 1 m"), pad spanning ±25 m (`PAD_SPAN_M = 50` at walk.js:8, clamp at ±25 via
+  `clampOff`, walk.js:23),
   `Add light here` / `Save anyway (low accuracy)` / `Confirm pin` / `Merge` / `Save anyway`
   / `Cancel`, labels `Asset number`/`Label`/`Kind`(Park|Building only — `KindStreet`
   refused with 422, admin_create.go:104-109, reconciliation 3)/`Photo`,
@@ -137,11 +138,11 @@ lost-race branch (admin_create.go:221-231) converts a concurrent-create
   orientation in intrinsic dimensions — satisfies README's landscape assertion),
   `#dup-slot` with `#dup-panel`, `#light-pos` 6 dp.
 - **Accuracy gate is real, not painted**: `add.disabled = !pt || needChoice ||
-  outsideBBox(pt)` (walk.js:95) sets the platform `disabled` attribute the e2e draft
+  outsideBBox(pt)` (walk.js:96-97) sets the platform `disabled` attribute the e2e draft
   asserts; `Save anyway (low accuracy)` both un-hides and clears `lowAccAccepted`,
   unlocking a genuine 80 m save. The gate covers exactly `> 30` (strictly), per the packet.
 - **Client bbox pre-flight** (reconciliation 4): `setAlert(outsideBBox(pt) ? BBOX_MESSAGE
-  : '')` on every position update (walk.js:90), mirroring the frozen server message
+  : '')` on every position update (walk.js:93), mirroring the frozen server message
   byte-for-byte into the `role="alert"` article next to the readout — the no-submit A-204
   behaviour the drafts freeze.
 - **htmx 4xx swapping**: the packet suggested a `<meta name="htmx-config">` on the walk
