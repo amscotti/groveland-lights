@@ -1,0 +1,87 @@
+diff --git a/harness/handoffs/T-106.md b/harness/handoffs/T-106.md
+new file mode 100644
+index 0000000..487b848
+--- /dev/null
++++ b/harness/handoffs/T-106.md
+@@ -0,0 +1,81 @@
++BLOCKED: already untracked on main
++
++# T-106 — Untrack the test-run.db* blobs committed by 7f07df2 (judge-M1 hygiene)
++
++The premise of this task is stale: the three blobs were already untracked before
++this worktree was cut. Commit `30be90d` ("chore: untrack e2e runtime artifacts
++(now gitignored)") removed `test-run.db`, `test-run.db-shm` and `test-run.db-wal`
++from the index and landed the `.gitignore` coverage; it is an ancestor of this
++worktree's HEAD `4d6f347` (history: `7f07df2` added the blobs → `30be90d`
++untracked them → `bc48c96` → `4d6f347`). Per the packet's Never clause
++("If the files are NOT tracked in your worktree (someone already fixed it),
++write `BLOCKED: already untracked on main` in the handoff and stop"), no
++deliverable commit was made: there is nothing to untrack, and running the
++packet's step-1 command confirms it — git refuses with exit 128 (see table).
++Nothing outside this handoff was edited; `.gitignore` was not touched (already
++correct, see below); no files were re-added.
++
++## Confirmation the three paths are untracked and ignored
++
++- **Untracked** — three independent proofs:
++  1. `git -C . rm --cached test-run.db test-run.db-shm test-run.db-wal` exits
++     128 with `fatal: pathspec 'test-run.db' did not match any files` — git
++     itself states no tracked file matches. Nothing was staged
++     (`git diff --cached --name-only` output is EMPTY).
++  2. `git log --oneline -- <path>` for each of the three paths shows exactly two
++     commits — `30be90d` (untrack) and `7f07df2` (the original accidental add) —
++     i.e. the path history ends at the untrack commit.
++  3. `git status --porcelain` contains no ` D`/`D ` entries for them (tracked
++     files absent from disk would show as deleted; they do not).
++- **Ignored** — `.gitignore:20` is the pattern `test-run.db*` (line 21 adds
++  `test-run-photos/`), which matches all three owned paths (and was itself part
++  of the `30be90d` fix; it was pre-registered as operator pre-step #1 in
++  `harness/state.md` per the T-105 handoff). No `test-run.db*` file exists on
++  disk in this worktree, so there is nothing left to ignore — the pattern is the
++  durable guard against re-minted runtime artifacts ever being tracked again.
++
++## Commands run (exit codes in brackets)
++
++| Command | Exit | Note |
++| --- | --- | --- |
++| `git status --porcelain` | 0 | Only `?? node_modules` — a pre-existing symlink (npm dir), guard-tolerated `DirtyLines` per the T-105 handoff; NOT touched by this task (outside my owns) |
++| `git log --oneline -3` | 0 | HEAD `4d6f347`; `30be90d` (the fix) is its ancestor |
++| `git log --oneline -- test-run.db` / `-- test-run.db-shm` / `-- test-run.db-wal` | 0 | Each: `30be90d` (untrack) then `7f07df2` (the accidental add) — nothing after |
++| `git -C . rm --cached test-run.db test-run.db-shm test-run.db-wal` | 128 | `fatal: pathspec 'test-run.db' did not match any files` — DEFINITIVE: the paths are not tracked; the index was left unchanged |
++| `git diff --cached --name-only` | 0 | EMPTY — nothing staged, as required in the BLOCKED state |
++| `git status --porcelain --ignored` | 0 | `?? node_modules` + `!! .env.test` only; no test-run.db* entries anywhere |
++| `git status --porcelain -uall` | 0 | Same single `?? node_modules` — confirms it is a symlink/file, not an untracked directory |
++| `make check-fast` | 0 | `go mod tidy -diff` clean, `go vet ./...`, `golangci-lint` `0 issues.`, `go test -race -count=1 -shuffle=on ./...` all `ok` (nothing changed in code) |
++| `make e2e-task TASK=T-106` | 0 | `no claims for T-106` — packet has `"claims": []`, so no Playwright specs exist; target exits 0 without running (and cannot mint `test-run.db*` dirt) |
++
++## Open issues
++
++1. **This task can be closed as already-done.** The M1 judge hygiene finding
++   against `7f07df2` is fully remediated on the integration branch by
++   `30be90d` (untrack + ignore). No further action needed; the deliverable
++   commit was intentionally not created (a commit with the prescribed message
++   would be empty).
++2. **`?? node_modules` is a symlink**, not the real npm directory —
++   `.gitignore`'s `node_modules/` only matches directories, which is why git
++   reports it. It is guard-tolerated (`DirtyLines`, per T-105's handoff), so
++   this is cosmetic only, but an operator may want to replace the symlink with
++   a real `npm install` or add a `node_modules` pattern. Outside this task's
++   owns; untouched.
++3. **AGENTS.md flag-name drift (carried from T-105):** AGENTS.md says
++   `make e2e-task T=<id>` but the Makefile's variable is `TASK=` — running
++   `make e2e-task T=T-106` would hit the usage error and exit 2. This task used
++   `TASK=T-106` (the working spelling).
++4. **Session shell allowlist note (for retry planning):** this session could
++   run `git status`/`git log`/`git rm --cached`/`git diff --cached`/`make`, but
++   `git ls-files`, `git ls-tree` and plain `grep` were denied — the untracked
++   proof above therefore rests on `git rm --cached`'s exit 128 plus path-scoped
++   `git log`, which is conclusive. If a future gate needs `ls-files`-style
++   evidence, allow that subcommand.
++
++## Never-clause compliance
++
++- Files NOT tracked in this worktree (someone already fixed it) → per the
++  packet: `BLOCKED: already untracked on main` (first line) and stop.
++- No edits outside the three owned paths plus this handoff (the owned paths
++  were not edited either — they are absent from disk and index).
++- `.gitignore` untouched; nothing re-added; no spec edited.
