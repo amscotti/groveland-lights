@@ -44,7 +44,7 @@ but the test never opens the add-light form and never checks that no form is
 present or that nothing was saved. The packet test 5 only requires the alert
 (`harness/tasks/T-200.md:244`), so this is a minor coverage gap, not a
 contract failure. The server-side 422 is independently asserted in
-`acceptance/drafts/admin_lights_go_test.go.txt:185-199`.
+`acceptance/drafts/admin_lights_go_test.go.txt:131-148`.
 
 ### 3. [Low — panel detail clauses unasserted] `@A-205` checks the panel chrome, not its content or the cancel escape
 
@@ -79,7 +79,7 @@ merge check.
 `#light-pos` contains `42.7617` and `-71.0303` only. The README freezes
 `#light-pos` as `lat, lon` at 6 decimals (`acceptance/drafts/README.md:83`),
 and `@A-203` does assert the full 6 dp string against `#pin-pos`
-(`acceptance/drafts/admin-walk.spec.ts.txt:351`), so the format is covered by
+(`acceptance/drafts/admin-walk.spec.ts.txt:363`), so the format is covered by
 the sibling test. Still, the `@A-208` check would pass a detail page that
 renders `142.7617` or a 2 dp position; use the same 6 dp string/assertion to
 keep the claim local and self-contained.
@@ -181,8 +181,8 @@ No test-integrity impact; noted only because the path is outside T-200's packet
   The cookie attributes are parsed into a map and compared exactly
   (`admin_auth_go_test.go.txt:138-157`), including `Path=/`, `Max-Age=86400`,
   `SameSite=lax` and the `HttpOnly` flag; the blank-token case re-runs the four
-  frozen markup regexes (`:110-114`); both `#walk-pos` waits assert the 6 dp
-  form (`admin-walk.spec.ts.txt:226, 441`); the delete flow waits for the
+  frozen markup regexes (`:110-113`); both `#walk-pos` waits assert the 6 dp
+  form (`admin-walk.spec.ts.txt:192, 226`); the delete flow waits for the
   frozen 303 target (`:572-575`); the edit fixture carries a photo and asserts
   the same `src` survives (`admin_lights_go_test.go.txt:459-464`); the merge
   alt is closing-quote anchored and checks the twin's label
