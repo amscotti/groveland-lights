@@ -118,7 +118,7 @@ tightened to “link”); this is a narrowed test against the frozen table.
   (`acceptance/drafts/admin_lights_go_test.go.txt:702-708`). Asset number, kind,
   coordinates and photo could all be cleared and the test would pass.
 - The duplicate visual note says “nothing is saved until one is chosen”
-  (`acceptance/drafts/README.md:105-129`), but `TestA205Duplicates` does not
+  (`acceptance/drafts/README.md:121-123`), but `TestA205Duplicates` does not
   inspect the list between the 409 and the merge
   (`admin_lights_go_test.go.txt:475-483`), and the e2e A-205 test never chooses
   `Merge`/`Save anyway`. A premature save that the later merge collapses would
@@ -142,11 +142,11 @@ frozen oracle should not ship flaky).
   the real `bin/server`; the e2e drafts drive a real browser.
 - The schema oracle matches the packet’s product schema and copies the probe
   `CREATE TABLE` verbatim from `migrations/0001_init.sql:2-5`
-  (`testdata/schema.expected.sql:1-59`).
+  (`testdata/schema.expected.sql:1-86`).
 - The fixture generator’s APP1/TIFF construction, CRC-correct pixel bomb,
   HEIC sniff box and deterministic writes check out statically; the fixture
   files are not in the manifest, but ownership (`testdata/**` is T-200’s) and
-  the frozen hashes in `acceptance/drafts/README.md:87-93` are the protection.
+  the frozen hashes in `acceptance/drafts/README.md:81-87` are the protection.
 - The alt-format rule (`acceptance/drafts/README.md:50`, `alt="<asset_no>
   <label>"` for numbered lights) is a necessary reconciliation of the table’s
   `img[alt=<label>]` with test 7’s `img[alt^="GP-017"]`. It is not a weakening
