@@ -1,215 +1,222 @@
-# T-200 review — M2 acceptance drafts, fixtures, schema oracle, frozen UI contract
+# T-200 review (attempt 2) — M2 acceptance drafts, fixtures, schema oracle, frozen UI contract
 
-Reviewer scope: the attached diff (also at `harness/reviews/T-200.diff`) against
-`harness/tasks/T-200.md`, `acceptance/contract.json`, the downstream packets
-(T-201..T-208), `docs/spec/architecture.md`, and the repo's actual test
-topology (`playwright.config.ts`, `scripts/acceptance-go.sh`,
-`scripts/holdout-run.sh`, `.gitignore`, `.env.test`, `migrations/0001_init.sql`).
-Note: shell execution was denied in this session, so dynamic re-runs were not
-possible; all findings are from static analysis of the diff plus the repo
-facts, which is sufficient because the blockers are logical, not environmental.
+Review basis: the attached diff (`harness/reviews/T-200.diff`), the packet
+`harness/tasks/T-200.md` (including both attempt-1 reviews), the downstream
+packets T-201/T-203/T-204/T-205/T-206/T-207, and the repo's actual test
+topology: `playwright.config.ts`, `Makefile`, `scripts/acceptance-go.sh`,
+`scripts/holdout-run.sh`, `.gitignore`, `migrations/0001_init.sql`,
+`internal/web/csrf.go`, `cmd/harness/{guard,ratchet,status}.go`,
+`harness/.ratchet.json`, `harness/protected.sha256`, `acceptance/go/*`,
+`acceptance/e2e/*`, `tsconfig.json`, `package.json`,
+`docs/spec/architecture.md`.
 
-## What is correct (verified)
+Verification limits: shell execution was denied in this session and the diff is
+not applied to this checkout (main has no `acceptance/drafts/`,
+`testdata/photos/*` is absent, `testdata/schema.expected.sql` absent), so
+dynamic re-runs and hash recomputation were not possible. Every finding below
+is a static check of the diffed bytes against repo facts I could read; the
+handoff's executed verifications (fixture hashes, red runs, suite greens) are
+cross-checked for internal consistency with those facts, not re-executed.
 
-- **Schema oracle** `testdata/schema.expected.sql` is byte-faithful to the
-  packet's frozen block (T-200.md:86-169): all 11 tables/indexes compared
-  line-by-line, probe statement copied verbatim from `migrations/0001_init.sql:2-5`
-  (comment/INSERT correctly excluded). 86 lines, no comments.
-- **Fixtures generator** `testdata/photos/gen/main.go`: stdlib only, all 7
-  fixtures per Deliverable 1, hand-built EXIF APP1 (TIFF layout verified
-  byte-by-byte: IFD0@8, 2 entries, GPS IFD@38 with one GPSLatitudeRef entry —
-  consistent with `alHasExifGps`/`hasExifGps`/`parseExifAPP1`), correct APP1
-  length field, CRC-correct 45-byte pixel bomb, 16-byte ftyp/heic sniff box,
-  15 MB commit cap enforced, self-verifying on every run. Deterministic design.
-- **Go drafts** follow `acceptance/go/probe_test.go` conventions (spawn, BIN
-  walk-up, free port, kill via t.Cleanup, waitHealthy with context deadline);
-  each test spawns its own server on a fresh `t.TempDir()` DB, so the Go suite
-  has no cross-test state contamination. `aa*`/`al*` prefixes collide with
-  nothing in `acceptance/go/` (probe*/mig*/m1*/syncBuf checked). All imports
-  used; JPEG APP1/SOF byte parsers are correct (segment length semantics,
-  SOF w/h offsets, both TIFF endiannesses). TestA205's geometry (~4.4 m
-  unnumbered pair, ~7 m numbered pair) matches the 8 m/25 m rules. TestA209's
-  55 seeds are inside TOWN_BBOX and >8 m apart. Login/CSRF/one-time-token flow
-  matches T-203's packet exactly.
-- **Active utils** (`acceptance/e2e/util/{admin,images}.ts`): typecheck under
-  the repo tsconfig (`acceptance/e2e/**/*.ts` is included), import style
-  `./util/*.js` matches `home_m1.spec.ts:16`, axe tags/import match the green
-  existing specs, no `console.log`, no tests of their own (per Deliverable 5).
-- **Ownership/guard**: only owned paths touched (`acceptance/**`,
-  `testdata/photos/**`, `testdata/schema.expected.sql`,
-  `harness/protected.sha256`, handoff). The manifest diff adds entries only;
-  all 9 pre-existing hashes unchanged and sorted. No `*.golden*`, Makefile, CI,
-  or existing-file edits. Scratch verification area is under gitignored
-  `testdata/rendered/*` (.gitignore:17) and not committed. Ratchet unchanged
-  (correct — drafts are inert). No `t.Skip`/`test.skip`/`.only`/`.fixme`/TODO/
-  FIXME. Dummy test secrets only (already in `.env.test`/`playwright.config.ts`).
+## Attempt-1 blockers: verified fixed
 
-## BLOCKER 1 — the e2e draft freezes contradictory behaviour for the same action (A-205 unsatisfiable)
+1. **One-time GLOBAL token vs ~40 logins (alt-1)** — fixed by the session
+   economy in `acceptance/e2e/util/admin.ts`. Verified against the real
+   topology: `playwright.config.ts:13-14` (`fullyParallel: false`,
+   `workers: 1`) means ONE worker process per Playwright invocation, so the
+   in-process memo + `inFlight` dedup (admin.ts:~154-204) correctly yields one
+   exchange per invocation; `make check` runs the second invocation
+   (`a11y`, Makefile:120,136) against the SAME `./test-run.db`
+   (playwright.config.ts:56), and the disk cache `test-run.db.session.json`
+   (admin.ts:~39) bridges it — the pattern `test-run.db*` is already in
+   `.gitignore:20`, so the cache lives and dies with its DB. The
+   validation-before-adoption GET (admin.ts:~210-224, `maxRedirects: 0`)
+   detects a dead session without consuming anything. The consumed-token +
+   expired-session terminal case fails loudly with the `rm -f test-run.db*`
+   operator fix, documented in `acceptance/drafts/README.md` ("Rerun safety")
+   and the handoff. The A-201 exchange/replay/cookie-flag semantics themselves
+   are asserted by the Go draft against fresh per-test servers
+   (`aaSpawnDir`, fresh `t.TempDir()` DB per test), which is the right place.
+2. **Shared accumulating DB (rev Blocker 2 / alt 2)** — fixed: per-run +
+   per-project asset numbers keeping the packet prefixes
+   (`GP-017-<run>-<proj>`, ≤32 chars, still `^[A-Za-z0-9-]{1,32}$`, still
+   matched by `img[alt^="GP-017"]`); per-run jittered coordinates (spec
+   `jittered()`, lat 42.7200..42.7499 / lon −71.0800..−71.0501 — inside
+   TOWN_BBOX `42.70,-71.09,42.82,-70.96` with ~2 km margin) for every
+   unnumbered create and the pagination seed column (seeds spaced 0.0005° ≈
+   55 m ≫ the 8 m radius); per-test pre/post cleanup via soft delete with
+   label-substring sweeps (`deleteAllByLabel`) that converge across pages.
+   The distinct-bucket minimum separation on the jitter grid is ≈8.2 m (lon
+   axis at lat 42.73) > 8 m, so distinct jitter points cannot trigger the
+   unnumbered radius except on a full hash collision (P ≈ 1/90 000 per pair),
+   which the handoff discloses and which fails loudly (dup panel), never
+   silently. With `workers: 1` and CI `retries: 1`, a retry re-runs in the
+   same process with the same `RUN` and the pre-clean makes it deterministic.
+3. **Redirect-following hiding the 303 (alt 3)** — fixed: `maxRedirects: 0`
+   pinned on every `page.request.post` (seeds, deletes) and in the login
+   helper's probes.
+4. **A-206 not self-contained (alt 4)** — fixed: the test creates its own
+   photo-bearing light through the UI before asserting bytes/preview.
+5. **A-205 unsatisfiable first-create (rev Blocker 1)** — fixed: each test
+   creates only its own uniquely-numbered light; the panel is triggered by
+   re-submitting that asset.
+6. **`Older` link-only (alt 5)** — fixed: `getByRole('link').or(getByRole('button'))`.
+7. **Unasserted clauses (alt 6)** — fixed: keeps-values on label-only edit
+   asserted in both Go (`TestA208EditSoftDelete`: asset no + coords survive)
+   and e2e; "nothing saved until chosen" asserted after each 409 in both.
+8. **Post-drag race (alt 7)** — fixed: `expect.poll` on `#pin-pos`.
+9. **HIGH 1-3 contract conflicts** — reconciled to the worker packets and
+   frozen in `acceptance/drafts/README.md` "Contract reconciliations":
+   create success 303 `/admin` + HX `Saved` fragment = `harness/tasks/T-205.md:69`;
+   numbered panel `Merge`+cancel / unnumbered-only `Save anyway` / numbered+save
+   → 422 = `T-205.md:65-68` (now also asserted by the Go draft); kind
+   `park|building` form = `T-205.md:58`. Detail URLs discovered from list rows,
+   never Location — consistent with the packet's own wording
+   ("from the response/list page"). Duplicate radii match `T-204.md:36-39,75`
+   ("same asset_no anywhere"), HEIC wording matches `T-206.md:68-70`
+   ("please choose JPEG" is a substring of the frozen message).
+10. **MEDIUM 1 (pin-pos precision)** — frozen at exactly 6 dp with the
+    explicit clause "#pin-pos text equals #light-pos for the same position";
+    `T-205.md:55` freezes `#light-pos` at 6 dp, so the equality check is
+    unambiguous.
+11. **MINORs** — `jpegSize` truncated-SOF guard added (mirrors `alJpegDims`'s
+    `next < i+9`); gen `panic`→error returns; handoff manifest count now
+    precise; would-fail section now includes the satisfiability analysis.
 
-`acceptance/drafts/admin-walk.spec.ts.txt`:
+## Verified correct (new in attempt 2)
 
-- Test 1 (`@A-202 @A-203`, line 50) creates asset `GP-017` "Ball field lamp"
-  and expects `Saved` (line 64, 70). The light is never deleted.
-- Test `@A-205` (line 152) then creates asset `GP-017` "Dup panel lamp" via
-  `addLightFromForm` (line 154) and expects `role=status` `Saved` (line 155),
-  before creating the twin that triggers the panel (lines 157-168).
+- **Schema oracle** `testdata/schema.expected.sql`: probe verbatim from
+  `migrations/0001_init.sql:2-5` (comment/INSERT excluded); the product block
+  matches the packet's frozen SQL (`T-200.md:86-169`) line-for-line — all 11
+  tables + 5 indexes, `lights_asset_no` partial unique exactly as T-201's
+  packet requires, `kind`/`status`/`status_source` CHECKs identical.
+- **Drafts are inert**: `.go.txt`/`.spec.ts.txt` are picked up by no runner
+  (`go vet ./...` and Playwright's testMatch ignore them); the manifest
+  ratchet baseline `harness/.ratchet.json` = `{"go":51,"pw":32}` — unchanged,
+  correct for inert drafts.
+- **Manifest**: `harness/protected.sha256` grows 9 → 15 entries; all 9
+  pre-existing hashes untouched; new entries are exactly the 6 new files under
+  `acceptance/**` — precisely what `GenerateManifest` produces
+  (`cmd/harness/ratchet.go:76-78` walks `acceptance/**`), sorted, and the edit
+  is sanctioned for a type=acceptance task (`cmd/harness/guard.go:127,
+  243-245`). `.ratchet.json` changes are likewise allowed (`guard.go:140-144`).
+- **Activation procedure** in `acceptance/drafts/README.md` matches
+  `T-207.md:29-34,49-52` move-for-move, including preserving the contract
+  table into `acceptance/README.md` and deleting the drafts dir.
+- **Go drafts**: `package acceptance` + build tag match
+  `scripts/acceptance-go.sh:36`; helper prefixes `aa*`/`al*` collide with
+  nothing in `acceptance/go/` (existing: `probe*`, `mig*`, `m1*`, `syncBuf`,
+  `envOr`); spawn env mirrors the public dummy env; clients use
+  `ErrUseLastResponse` so every 302/303 stays observable; each test gets a
+  fresh server+DB (no cross-test state). `alDetailURL` relies only on the
+  frozen row-link contract.
+- **CSRF reuse**: `internal/web/csrf.go` is stateless double-submit (cookie +
+  matching field, no server state, `csrf.go:44-78`), so reusing one parsed
+  token for the 55 seed posts and all cleanup deletes is valid, and
+  `csrfToken(page)` via `page.request` lands the cookie in the shared context
+  jar.
+- **ACTIVE utils**: `acceptance/e2e/util/{admin,images}.ts` are inside
+  `tsconfig.json:15` include → covered by `make js-check`; import style
+  `./util/admin.js` matches `home_m1.spec.ts:16`; `@axe-core/playwright`
+  already in `package.json:9` (no new dep; `allow_deps: []` respected); axe
+  tags match the packet's test 11; no tests of their own (per Deliverable 5).
+- **Login economy vs the holdout**: `scripts/holdout-run.sh:9,16` gives each
+  holdout invocation a fresh temp DB and one server, matching the handoff's
+  claim that a module-level memo suffices there (no disk cache needed).
+- **Rules**: no `t.Skip`/`test.skip`/`test.only`/`.fixme`; no TODO/FIXME/
+  `panic`/`console.log` in the new files; no "Phase N" strings anywhere in the
+  diff (and phase-grep only covers cmd/server, internal, web, migrations);
+  fixture generator is stdlib-only and self-verifying with a 15 MB commit cap;
+  `testdata/photos/gen/main.go` writes the exact fixture set of Deliverable 1
+  (hand-built APP1/TIFF layout is internally consistent — IFD0@8, GPS IFD@38,
+  56-byte TIFF, correct segment length — and re-parsed by `parseExifAPP1`).
+- **Ownership**: only owned paths touched (`acceptance/**`,
+  `harness/protected.sha256`, `testdata/photos/**`,
+  `testdata/schema.expected.sql`, the handoff). No Makefile/CI/app-code/
+  golden-file edits. Scratch staging stays under gitignored
+  `testdata/rendered/*` (`.gitignore:17`).
 
-Same asset_no is a **numbered duplicate regardless of distance** — frozen by
-this same diff (`acceptance/drafts/README.md` HTTP table, line 60: "duplicate →
-409"; see also `harness/tasks/T-204.md:75` "same asset_no anywhere is numbered
-duplicate", the partial unique index in `testdata/schema.expected.sql:48`, and
-`acceptance/contract.json:66`). Both tests run in one file against one server
-(`playwright.config.ts:14` workers=1). Therefore test `@A-205`'s first create
-must be refused with the 409 dup panel ("nothing is saved until one is chosen" —
-README visual note A-205), `Saved` never appears, and the test fails **on every
-project, against a fully contract-compliant implementation**. Conversely, an
-implementation that lets it save fails the Go draft `TestA205Duplicates`
-(`acceptance/drafts/admin_lights_go_test.go.txt:903` expects 409 for the same
-asset_no). The two draft files (and test 1 within the e2e file itself) freeze
-mutually exclusive behaviour for the same request. This is exactly the
-"unsatisfiable oracle" case, knowable at authoring time from the packet's own
-test list (T-200.md:232-236 vs :245-246) plus contract.json; the packet's Never
-clause ("If a contract above seems wrong, `BLOCKED: <reason>` and stop")
-applied. At T-207 this is a guaranteed BLOCKED (T-207.md:36-40), poisoning the
-terminal M2 task.
+## Findings (all minor; none blocking)
 
-Note the packet's test 6 wording ("create `GP-017`, then add same asset_no
-nearby") is satisfiable read as "reuse test 1's GP-017"; the draft's added
-first-create-with-`Saved` step is what makes it unsatisfiable even on project 1.
-
-## BLOCKER 2 — the e2e draft ignores the shared, never-reset server DB across tests and projects
-
-`playwright.config.ts:49-68` starts ONE webServer (`DB_PATH=./test-run.db`,
-`reuseExistingServer: false`) for the entire run; all four projects
-(desktop-chromium, pixel-9, iphone-16, iphone-se-320) execute every test
-against that one accumulating database (T-200.md:213 "All tests on all four
-projects"; T-207.md:35 "Expected: all green, all four Playwright projects").
-Given the frozen duplicate rules, the drafted data cannot pass:
-
-- Test 1 (GP-017) fails on projects 2-4: the asset already exists from project
-  1 → dup panel → no `Saved` (lines 50-70).
-- Test `@A-209` (line 220) seeds 60 **unnumbered** "Scroll lamp NN" at fixed
-  coordinates (lines 232-243). On projects 2-4 each seed lands 0 m from the
-  previous project's identical seed → unnumbered-within-8 m → 409, but the test
-  demands 303 (line 242). Deterministic failure.
-- Test `@A-203` (drag, line 105) creates an unnumbered light near the previous
-  project's dragged position (drag distance in metres is viewport-dependent) →
-  panel instead of `Saved` on repeats.
-- Test 7's `img[alt^="GP-017"]` (line 177) also depends on which GP-017 rows
-  exist/sort first — brittle given tests 1 and 6 both mint GP-017.
-
-The draft even acknowledges the shared DB (lines 224-227: "regardless of the
-few lights earlier tests left in this server's database") but only solved the
-pagination-boundary half of the problem, not the duplicate-contract half.
-`test-run.db` also persists across `make e2e` invocations on disk. The fix is
-cheap and entirely in T-200's owns: per-run/per-project unique asset numbers and
-seed coordinates (e.g. suffix `testInfo.project.name` + timestamp), or
-soft-delete cleanup at test end (test `@A-208` already shows deletion frees the
-asset). The same defect is mirrored in the holdout e2e variants (GP-042 +
-51-light boundary on the single `scripts/holdout-run.sh` server), which I could
-not read (external_directory) but which the handoff describes with the same
-shape.
-
-## HIGH 1 — frozen create-success redirect contradicts T-205's packet
-
-The drafts freeze `POST /admin/lights` success → `303 Location:
-/admin/lights/{id}` (`acceptance/drafts/README.md:60`;
-`admin_lights_go_test.go.txt:22` header and the `detailURL :=
-header.Get("Location")` assertions in TestA206/TestA208 at diff lines
-998/1145). But `harness/tasks/T-205.md:69` freezes "Success → role=status
-`Saved` (fragment for HX; **303 `/admin` without HX**)". One of the two must
-lose; workers are told the drafts are the oracle (T-205.md:127-128) while T-205's
-reviewer will check the packet. This guarantees an activation-time dispute or a
-wrong build. T-200 should either align to `/admin` or escalate to the planner
-now, and record it in the handoff's open issues (currently absent).
-
-## HIGH 2 — numbered-duplicate panel buttons contradict T-205's packet
-
-`admin-walk.spec.ts.txt:168` requires a visible `Save anyway` button in the
-dup panel for the **numbered** (same asset_no) case, and README line 34 lists
-`Merge`, `Save anyway` unconditionally. `harness/tasks/T-205.md:65-68` freezes
-the opposite: numbered case shows `Merge` + a cancel link, `Save anyway` is
-unnumbered-only, and `dup_choice=save` on a numbered duplicate → 422 (also
-implied by `harness/state.md:45-47`). A worker following its packet fails the
-e2e test; a worker following the draft violates the packet and the Go draft's
-own semantics. Needs the same reconciliation before the drafts freeze.
-
-## HIGH 3 — kind enum drift
-
-`README.md:60` and `admin_lights_go_test.go.txt:19-21` freeze
-`kind(park|building|street)` for the create form; `harness/tasks/T-205.md:58`
-freezes `kind (park|building)` (schema allows all three). No test posts
-`street`, so it is satisfiable either way, but the oracle should not contradict
-the worker packet it governs — pick one and note it.
-
-## MEDIUM 1 — `#pin-pos` precision under-specified for the 6 dp equality check
-
-`admin-walk.spec.ts.txt:124-139`: the test recomputes `expected` from the
-`#pin-pos` text via `Number(x).toFixed(6)` and requires `#light-pos` to equal
-it exactly. README line 33 freezes `#pin-pos` only as "same numeric format"
-(the loose `\d+\.\d+, -?\d+\.\d+` regex), so a compliant worker rendering
-`#pin-pos` at < 6 dp with lossy rounding breaks the equality while still
-matching the frozen format. Freeze `#pin-pos` at ≥ 6 dp (or make both elements
-render the identical 6 dp string) to keep the oracle unambiguous.
-
-## MINOR
-
-- `acceptance/e2e/util/images.ts` `jpegSize` reads `bytes[i+5..i+8]` without
-  the truncated-SOF guard the Go twin has (`alJpegDims` checks `next < i+9`);
-  a malformed short SOF yields `{w: NaN, h: NaN}` instead of a loud throw. The
-  Go version is the better contract; mirror it.
-- `testdata/photos/gen/main.go` uses `panic(...)` on encode errors
-  (`encodeJPEG`, `tinyPNG`) where the file's own `fail()` convention would be
-  consistent. Not rule-9 panics (real messages, unreachable paths), style only.
-- Handoff says "5 new entries (3 drafts + README + 2 utils)" — the manifest
-  adds 6 entries (that list itself enumerates six). Trivial, but handoffs are
-  evidence.
-- Handoff's "would-fail reasoning" covers only current-main 404s. The packet
-  asked T-200 to reason about failure; the analysis that mattered —
-  satisfiability against a *compliant* build under the real Playwright
-  topology — is what's missing, and that gap is precisely how Blockers 1-2
-  shipped.
+1. **MINOR — whitespace-intolerant heading check in the Go draft.**
+   `acceptance/drafts/admin_lights_go_test.go.txt`, `TestA209Pagination`:
+   `strings.Contains(list, ">Lights<")` (diff line 1561). This matches any
+   element whose text node is exactly `Lights` on one line, but a compliant
+   template rendering `<h1>\n  Lights\n</h1>` fails it while the e2e twin
+   (`getByRole('heading', { name: 'Lights', exact: true })`) passes. The auth
+   draft's regexes tolerate `\s*` (`aaReHeading`); this one doesn't. If it
+   bites at activation it is a T-207 rule-3 mechanical fix (assertion
+   unchanged); noting it now so it isn't mistaken for a feature gap.
+2. **MINOR — visual-note wording tension: "map canvas" vs T-205's pin pad.**
+   `acceptance/drafts/README.md` A-202 note says "the middle is the map
+   canvas" / A-203 "centred on the map", while `T-205.md:93-97` specifies a
+   "pin pad ... over a pad with a metre scale" (not MapLibre). The frozen
+   selectors (`#pin`, `#pin-pos`, `aria-label="position pin"`) are consistent
+   in both; only the prose for the visual reviewer differs. Suggest the
+   planner/visual-reviewer read "map canvas" as the pad; no code impact.
+3. **MINOR — origin binding of the session cache.** `admin.ts:~37,86`: a
+   cached session whose `origin` differs from the current `ORIGIN` (e.g.
+   `TEST_PORT`/`BASE_URL` changed between invocations against the same DB) is
+   discarded without validation and a fresh exchange is attempted, which 403s
+   if the token was consumed. Contrived for the gate (both `make check`
+   invocations use the default port); recovery is the documented
+   `rm -f test-run.db*`. Note only.
+4. **Accepted residual non-determinism (disclosed).** The jitter hash can
+   theoretically collide for two unnumbered-create keys in one run
+   (~1/90 000 per pair), surfacing as an unexpected duplicate panel — a loud,
+   rerun-recoverable failure, not a silent pass. The handoff states this; fine
+   for an acceptance oracle.
+5. **Note — session cookie cached on disk.** `test-run.db.session.json` holds
+   a live admin session cookie. It is test-only (dummy secrets, local server),
+   written 0600, and covered by the `test-run.db*` gitignore — acceptable test
+   infrastructure, listed here for completeness.
 
 ## Security / architecture / test-quality pass
 
-- Security: no app code, no `template.HTML`, no SQL, no path handling in this
-  diff. Upload limits are well-covered (413 over 15 MB with a runtime-built
-  body, 415 HEIC/text/pixel-bomb, no-stray-files, APP1/GPS strip, long-edge
-  cap). The only literals are the dummy `.env.test` secrets already public in
-  the repo (`probe_test.go:297`, `playwright.config.ts:60`). The drafts
-  correctly require `csrf_token` on every admin POST. A `/photos/` traversal
-  probe would have been nice (T-206 covers it in unit tests; not required by
-  the packet) — not blocking.
-- Architecture: ownership map respected (test-only paths, all in `owns`);
-  drafts never swap `#map` (admin pagination targets `#rows`; the walk page
-  uses a pin pad, not the map instance); the auth drafts pin HttpOnly +
-  SameSite=Lax on `gl_session` and one-time tokens, matching T-203. No
-  "Phase N" strings inside phase-grep scope (the e2e header comment says
-  "Phase-2" but lives in `acceptance/`, outside the grep scope per D7).
-- Coverage: every claim A-201..A-209 has at least one Go and one e2e draft
-  test; assertions are black-box (HTTP status/body/headers/bytes, real
-  browser), matching the repo's oracle-first style. The tests do exercise the
-  behaviour — the problem is that three of them exercise it into a corner no
-  compliant build can escape.
+- **Security**: no app code in the diff, so no new XSS/SQL/path-traversal
+  surface. The only literals are the dummy `.env.test` secrets already public
+  in `scripts/acceptance-go.sh:20-22`, `scripts/holdout-run.sh:17-19` and
+  `playwright.config.ts:58-60` (base64 of `test-*-32-byte` strings) — no real
+  secret in output or logs; the drafts never print the token. Upload limits
+  are probed hard: 413 with a runtime-built 16 MB body (nothing >15 MB
+  committed), 415 for HEIC/text/pixel-bomb, no-stray-files before/after every
+  reject, APP1/GPS strip + long-edge ≤1600 + orientation-applied assertions
+  on served bytes. All admin POSTs carry `csrf_token`, compatible with the
+  existing double-submit implementation. A `/photos/` traversal probe is absent
+  but T-206's unit tests own it (packet scope, as in attempt 1).
+- **Architecture**: ownership map respected — every touched path is in the
+  packet's `owns` (guard concedes `acceptance/**` + `harness/protected.sha256`
+  + `harness/.ratchet.json` to acceptance tasks); no `internal/`/`cmd/`/
+  `web/`/`migrations/` edits. HTMX/#map rule: the drafts never reference
+  `#map`; pagination swaps `#rows`; the walk page's interactions are the pin
+  pad and form targets. Parse-don't-validate/typed IDs are feature-code rules
+  and are correctly deferred to T-205's packet. Migrations untouched;
+  `status.Derive` untouched.
+- **Test quality**: the deliverable is the oracle itself, inert by explicit
+  packet design (the merge gate would otherwise force red specs to merge
+  red); inertness is real (extensions + unchanged ratchet), activation is a
+  pure rename, and git history preserves the oracle-first property. Every
+  claim A-201..A-209 has both a Go black-box draft (real spawned binary, real
+  HTTP, byte-level photo inspection) and a browser draft on all four
+  projects; assertions are exact-status/exact-string where the contract
+  freezes them and role/accessible-name where it doesn't. The attempt-2
+  rewrite genuinely exercises the previously unasserted clauses instead of
+  deleting them.
 
-## Required before merge
+## Verdict rationale
 
-1. Make the e2e draft rerun-safe and self-consistent: unique asset numbers /
-   seed coordinates per test AND per project (or cleanup via soft delete);
-   remove or repair the `@A-205` first-create-with-`Saved` step (Blockers 1-2).
-2. Reconcile the three frozen-contract conflicts with the worker packets —
-   create-success redirect target, numbered-dup panel buttons, kind enum —
-   either by amending the drafts (still pre-freeze) or by escalating
-   `BLOCKED: <contract conflict T-200 vs T-205>` for the planner, and record
-   the decision in the handoff (HIGH 1-3).
-3. Mirror the fixes in the holdout drafts (same shapes per the handoff).
-4. Sharpen `#pin-pos` precision (MEDIUM 1) and the handoff's manifest count /
-   would-fail analysis (MINOR).
+Attempt 1 was blocked because the frozen e2e oracle provably could not go
+green against a contract-compliant M2 build. Attempt 2 rewrites the oracle so
+that it can: the login economy is sound under the actual topology (verified:
+`workers: 1`, one webServer DB per run, `make check`'s second invocation
+bridged by a gitignored cache), the data plan is rerun-safe under the frozen
+duplicate rules (verified against `T-204.md` radii and the partial unique
+index in the schema oracle), every 303 is observable, every test is
+self-contained for `make e2e-task`, and the three contract conflicts are
+reconciled to the worker packets verbatim with the reconciliation frozen in
+the README for T-205. The schema oracle matches the packet byte-for-byte and
+0001's probe verbatim. Ownership, manifest, and ratchet changes are exactly
+the sanctioned outputs. Remaining findings are minor and none of them makes
+the oracle unsatisfiable or weakens a frozen assertion.
 
-The Go drafts, schema oracle, fixtures, utils, and manifest work are ready;
-the e2e oracle is not. Because these bytes are about to be frozen
-(protected manifest) and six downstream tasks build against them, an oracle
-that provably cannot go green on all four projects must be fixed now, not at
-T-207 activation.
-
-VERDICT: BLOCK
+VERDICT: PASS
