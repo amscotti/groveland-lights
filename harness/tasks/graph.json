@@ -424,14 +424,14 @@
       ],
       "ui": true,
       "allow_deps": [],
-      "status": "review",
-      "attempts": 3,
+      "status": "blocked",
+      "attempts": 4,
       "model": "deepseek",
       "budget": {
         "steps": 200,
         "wall_min": 120
       },
-      "findings": "feature task T-205 has no done acceptance task among its deps (contract-first rule)"
+      "findings": "review BLOCK"
     },
     {
       "id": "T-206",

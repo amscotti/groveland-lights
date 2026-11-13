@@ -1,243 +1,260 @@
-# T-205 review — Admin UI: walk-the-town flow, light CRUD, list + HTMX pagination
+# T-205 reviewer — Admin UI: walk-the-town flow, light CRUD, list + HTMX pagination
 
-Review basis: the attached diff (`harness/handoffs/T-205.md` + `internal/web/admin.go`
-+ `internal/web/admin_create.go` + `internal/web/admin_test.go` + `internal/web/web_test.go`
-+ `web/static/js/walk.js` + `web/static/js/globals.d.ts` + 7 templates), checked out and
-read in this worktree against: the packet `harness/tasks/T-205.md`, the frozen oracle
-(`acceptance/drafts/README.md`, `acceptance/drafts/admin-walk.spec.ts.txt`,
-`acceptance/drafts/admin_lights_go_test.go.txt`), `acceptance/contract.json`,
-`harness/tasks/graph.json` (owns/claims), the merged sources the diff builds on
-(`internal/web/{web,csrf,auth,session,upload,probe,templates}.go`,
-`internal/store/lights.go`, `internal/geo/{geo,duplicate}.go`,
-`internal/config/config.go`, `web/templates/base.html`,
-`web/static/vendor/htmx-2.0.11.min.js`), and the on-disk evidence under `test-results/`.
+Basis: the attached diff, packet `harness/tasks/T-205.md`, the frozen oracle drafts
+(`acceptance/drafts/admin-walk.spec.ts.txt`, `admin_lights_go_test.go.txt`,
+`admin_auth_go_test.go.txt`, `acceptance/drafts/README.md` — verified untouched by
+this diff), the merged sources the new code compiles against
+(`internal/web/{web,csrf,session,auth,probe,upload,templates}.go`,
+`internal/store/{store,lights,photos}.go`, `internal/geo/*`, `internal/config`,
+`migrations/0002_lights.sql`, `cmd/server/main.go`, `web/templates/base.html`,
+the vendored `htmx-2.0.11.min.js`), and `docs/spec/architecture.md`.
 
-Verification limits: shell execution was denied this session, so the handoff's command
-exit codes are trust-marked (cross-checked for internal consistency against the tree).
-Everything load-bearing was verified statically; the committed files were read directly
-and match the diff byte-for-byte in every spot checked. The visual evidence itself was
-inspected structurally (16 `visual-*` result dirs + `test-results/.last-run.json`
-`"status": "passed"` — the handoff's claimed paths exist, unlike the previous attempt).
+Method note: shell execution was denied this session, so the handoff's exit-code
+table was not re-run. Every file in the diff was read from the worktree and
+matches the diff byte-for-byte where spot-checked; every load-bearing claim
+(template strings, store/geo/upload API signatures, htmx config key, DSN pragmas,
+schema columns) was verified statically against the merged sources.
 
-## Claimed assertions — all four satisfied against the frozen oracle
+## Packet conformance
 
-- **A-202 (walk page, accuracy gate)**: `#walk-pos`/`#pin-pos` render 6 dp via
-  `toFixed(6)` (`web/static/js/walk.js:20`); `#walk-accuracy` "accuracy N m"
-  (`walk.js:90`); gate at >30 m uses the platform `disabled` attribute with the
-  `Save anyway (low accuracy)` unlock (`walk.js:96-98,195`) and a real 80 m save is
-  wired (scratch suite `visual-low-accuracy-gate-and-real-save-at-80-m-*`, passed);
-  denied geolocation shows `#manual-lat`/`#manual-lon` number inputs
-  (`walk.js:104-113`, `admin-walk.html:22-28`). The mid-watch `setGeolocation`
-  transient-error hijack that an earlier scratch iteration hit (see
-  `web/test-results/walk--scratch-A-202-*/error-context.md`, "manual position" at
-  accuracy 8) is fixed by the `state.baseLat === null` guard (`walk.js:126-130`).
-- **A-203 (pin)**: `#pin` `role=button` `tabindex=0` `aria-label="position pin"`
-  (`admin-walk.html:16`); pointer drag ±25 m clamped (`walk.js:139-155`) + arrow-key
-  1 m nudges (`walk.js:156-162`); server renders the same 6 dp string
-  (`posString`, `internal/web/admin.go:290-292`), so `#light-pos` equals `#pin-pos`.
-- **A-208 (detail/edit/delete)**: `#light-pos` 6 dp, photo `src="/photos/..."`,
-  labelled edit form, `Save changes` in a separate form from `Delete light`
-  (`admin-detail.html:4-21`); nil fields keep stored values
-  (`parseLightEdit`/`validatedEdit*`, `admin.go:363-379,453-479` — an empty-string
-  post is a pointer-to-empty, so label→422 and asset_no→clears, correctly); edit
-  303→detail, delete 303→/admin, 404 after soft delete (all tested through the full
-  middleware chain on a real temp DB).
-- **A-209 (list + HTMX pagination)**: heading `Lights`, 50/page + 1-row lookahead
-  (`recentRows`, `admin.go:126-146`), fragment root `id="rows"`
-  (`partials/admin-rows.html:1`), `hx-get`/`hx-target="#rows"`/`hx-swap="outerHTML"`
-  on `Older`/`Newer`, 303 to `/admin?page=N` without `HX-Request` (`admin.go:177-180`),
-  50/51 boundary table-tested (`admin_test.go:708-760`).
+- Routes registered exactly as the packet's Deliverable 1 table
+  (admin.go:22-28, admin_create.go:23-25), all wrapped in `AdminOnly`, all from
+  `init()` in the task's own files. `web.go/csrf.go/probe.go/auth.go/session.go/upload.go`
+  are untouched (diff confirms); `base.html`, `pages/index.html`,
+  `partials/probe.html` untouched as required (packet :79-80).
+- Frozen check order honored: `LimitBody` first (admin_create.go:177), single
+  multipart parse in the boundary parser (admin_create.go:71), `VerifyCSRF`
+  (:184), bbox `Contains` → 422 + the exact string (admin_create.go:180-184),
+  photo via `s.Photo(r)` reusing the boundary parse per upload.go:94-108's
+  documented "caller parsed first" ordering (413/415 through `PhotoProblem`),
+  then duplicates via `LightByAssetNo` + `NearbyLights(NumberedRadiusM)` +
+  `geo.ClassifyDuplicate` (admin_create.go:252-285). Numbered+save → 422,
+  unnumbered gets Save anyway, `dup_choice=""` → 409 panel, merge → apply onto
+  ExistingID with no new row, success → role=status `Saved` (HX) / 303 `/admin`.
+  All match packet :56-69 and the README contract table (:91).
+- This **resolves T-206's F1 forward risk**: the photo pipeline now runs only
+  AFTER `VerifyCSRF` (admin_create.go:184-195) — the CSRF-safe "Order B" the
+  T-206 review mandated. A body over the cap surfaces at the caller's parse as
+  `*http.MaxBytesError` and is mapped to 413 (admin_create.go:73-84), exactly
+  the case upload.go:105-108 documents.
+- List pagination: `RecentLights(ctx, 50, (page-1)*50)` + one extra row to
+  detect Older (admin.go:145-165); `/admin/rows` fragment-only for HX-Request,
+  else 303 `/admin?page=N` (admin.go:196-199) — the frozen :97 row. `#rows` is
+  the fragment root (partials/admin-rows.html:1), asserted by
+  `reRowsRoot` (admin_test.go:169).
+- Detail `#light-pos` at 6 dp (`posString`, admin.go:309-311); 404 on
+  ErrNotFound and on non-numeric/`<1` ids (admin.go:283-290, 319-332); edit
+  keeps unspecified fields (validatedEditLabel/Asset nil-passthrough,
+  admin.go:473-498) with the ErrDuplicateAssetNo → 409 re-render
+  (admin.go:460-463); delete → 303 `/admin` (admin.go:553).
+- Parse-don't-validate / typed IDs (rule 6): `walkSubmission`, `lightEdit`,
+  `lightDelete`, `listQuery`, `lightIDParam`/`store.LightID`,
+  `store.PhotoID`; zero `r.FormValue`/`ParseForm` reads after the boundary
+  parsers (grep-verified across admin*.go).
+- Deliverable 3 (walk.js ≤200 lines, `// @ts-check`, JSDoc, no console.log):
+  exactly 200 lines; the only "console" hit is a comment. Behaviour matches the
+  frozen list: 6-dp readouts, >30 m gate with the platform `disabled`
+  attribute (walk.js:96-97), ±25 m drag + 1 m arrow nudges (walk.js:134-163),
+  manual fallback on denied/unavailable (walk.js:115-131), photo preview via
+  object URL (CSP `img-src ... blob:`), and the client-side bbox pre-flight
+  with the exact frozen message (walk.js:9, 93) that README reconciliation 4
+  requires.
+- The htmx 4xx-swap requirement (packet :99-101) is implemented in JS
+  (walk.js:185-187) rather than the suggested `<meta name="htmx-config">`.
+  Verified against the vendored source: htmx 2.0.11 ships
+  `responseHandling:[{code:"204",swap:false},{code:"[23]..",swap:true},
+  {code:"[45]..",swap:false,error:true}]`; the override flips `[45]..` to
+  swap-without-error so the 422 alert / 409 panel land in `#dup-slot`.
+  base.html loads htmx `defer`; module evaluation precedes htmx's
+  DOMContentLoaded init, so the config is in time. Equivalent outcome to the
+  packet's mechanism — acceptable deviation, noted as F6.
+- Deliverable 2: `pages/admin-login.html` keeps the frozen strings
+  (`Admin login`/`Token`/`Sign in`) byte-for-byte inside the pipeline page;
+  `installLoginPage` (admin.go:37-47) captures the rendered page at `init()`
+  and installs it as auth.go's `loginPageTmpl` without editing auth.go.
+  Verified against the frozen `auth_test.go:29-32` regexes (they tolerate the
+  added attributes) and the README :78 markup row — nothing breaks.
+  `TestRenderAll` now has a per-page fixture map (web_test.go:122-168), as
+  packet :80-81 demands.
+- Ownership of changed files: `admin.go`, `admin_create.go`, `admin_merge.go`,
+  `admin_test.go` (all `admin*.go`), `web_test.go`, `web/templates/**`,
+  `web/static/js/walk.js`, `globals.d.ts`, plus the sanctioned handoff — all
+  inside `owns`. The scratch visual harness is gone (glob-verified); the
+  handoff's `make e2e-task TASK=T-205` invocation matches the Makefile's
+  `TASK ?=` variable (:8, :113).
 
-Cross-cutting frozen clauses verified: create check order parse → CSRF → bbox → photo
-→ duplicates (`admin_create.go:170-211`, with `LimitBody` first and the single multipart
-parse reused by `s.Photo(r)` per `upload.go:94-108`); 422 frozen bbox message client
-(pre-flight mirroring `config.BBox.Contains`'s inclusive edges, `walk.js:60-64`) and
-server; 413/415 through `PhotoProblem` incl. the HEIC wording; numbered dup = `Merge` +
-`Cancel` link only, numbered+save → 422, unnumbered = `Merge` + `Save anyway`,
-nothing saved while the panel is up, merge applies the twin label with no new row;
-thumbnail alt `"<asset_no> <label>"` / `"<label>"` (`thumbAlt`, `admin.go:73-78`);
-HX create → role=status `Saved` fragment, non-HX → 303 `/admin` (`respondWalkOK`).
-The htmx override is the correct mechanism for the frozen "422/409 swap the form
-target": the vendored 2.0.11 default is
-`responseHandling:[{code:"204",swap:false},{code:"[23]..",swap:true},{code:"[45]..",swap:false,error:true}]`
-(`web/static/vendor/htmx-2.0.11.min.js:1`) and `walk.js:183-188` replaces it before
-htmx boots (deferred htmx in `base.html:10` executes before the body-end module).
+## Security
 
-## Security — no issues found
+- **CSRF**: every POST verifies the double-submit pair before any state change
+  (admin_create.go:184, admin.go:432, admin.go:540); the create parse happens
+  before CSRF but persists nothing (the T-206 Order-B fix). Failed tokens are a
+  uniform 403. Re-renders mint/reuse the token correctly (`IssueCSRFToken`
+  reuses the request's valid cookie, so the echoed form stays submittable).
+- **XSS**: no `template.HTML` anywhere in the diff (grep + forbidigo active).
+  All user-derived values (labels, asset numbers, messages, alt text) go
+  through contextual escaping. The one deliberate door is
+  `rowView.ImgSrc template.URL` (admin.go:72, 102-106) with `//nolint` reasons;
+  both reachable values are server-minted — the constant data-URI placeholder
+  and `/photos/` + `PhotoByID().Path`, which only the upload pipeline writes
+  (`PHOTO_DIR/YYYY/MM/<16-hex>.jpg`, upload.go:222-242). CSP admits `img-src
+  'self' data: blob:` for both thumbnail sources and the JS preview. No
+  injection vector found.
+- **SQL**: everything goes through the sqlc store API except the one statement
+  in admin_merge.go:52-57, which is a constant string with `?1..?3`
+  placeholders (no injection; see F1 for the architectural concern).
+- **Path traversal**: no new file-path handling; served photo URLs are built
+  only from store rows and resolved by upload.go's clamped resolver.
+- **Upload limits**: create bodies capped at 15 MB by `LimitBody` before any
+  parse (admin_create.go:177); edit/delete bodies capped at 1 MB
+  (admin.go:398-409); the oversize→413 mapping is tested
+  (admin_test.go:583-590). Multipart memory budget (32 MB) matches
+  upload.go's documented reasoning.
+- **Secrets in output**: pages render label/asset/position/status/photo URL
+  only; the login input is `type=password`; handlers log errors only (the
+  shared logging middleware already excludes coordinates/credentials).
 
-- **CSRF**: verified on all three POST routes before any state change
-  (`admin_create.go:176-179`, `admin.go:413-416`, `admin.go:521-524`); missing and
-  mismatched tokens are both 403 and both table-tested.
-- **XSS**: no `template.HTML` anywhere in the diff. Every template value is
-  auto-escaped; `Status` is schema-CHECK-constrained; `alertView.Role` is a server
-  constant. `rowView.ImgSrc` is the only `template.URL` and is provably server-minted:
-  the constant data-URI placeholder or `"/photos/" + p.Path` where `p.Path` comes from
-  the upload pipeline's server-generated names (`upload.go:222-241`) — no user input
-  reaches it. Both `//nolint` uses carry reasons on the same line (rule 9).
-- **SQL**: none in this package — all queries via `internal/store` (architecture map).
-- **Path traversal**: photo serving is `upload.go`'s clamped resolver (untouched,
-  T-206-reviewed); no new filesystem paths in this diff.
-- **Upload limits**: `LimitBody(r)` first (15 MB cap) before the single multipart
-  parse; the >15 MB body surfaces as `*http.MaxBytesError` → 413 (tested at
-  `admin_test.go:460-467` with a real ~16 MB body); edit/delete bodies additionally
-  capped at 1 MB (`parseFormValues`, `admin.go:379-395`); multipart memory 32 MB only
-  ever holds ≤15 MB bodies.
-- **Secrets**: no credential, token or coordinate values in any log line; handler
-  errors log `err` from store calls only.
+## Architecture
 
-## Architecture — conforms
+- **HTMX/#map rule (architecture.md:29-33)**: the admin pages contain no map;
+  every `hx-target` is `#rows` (outerHTML) or `#dup-slot` (innerHTML) — both
+  far outside any `#map` ancestor; none of the three new partials contains
+  `id="map"`. The map is initialised exactly once, untouched.
+- **Registration convention** (`<feature>.go` + `init()` + `register`),
+  feature-per-file split (list/detail in admin.go, create in admin_create.go)
+  follows web.go:1-3 and the ownership map's `internal/web` entry.
+- **Status derivation** goes nowhere near `status.Derive` — admin pages only
+  read the stored column. Rule 8 respected.
+- **The one violation is admin_merge.go** — see F1.
+- Rules 3/5/9: go.mod unchanged (modernc.org/sqlite was already the store's
+  driver; no new module dependency); no "Phase N"/TODO/FIXME/panic strings in
+  the new code; `//nolint` usages each carry an on-line reason.
 
-- Ownership: every changed file lands inside `owns` ∪ handoff
-  (`graph.json:412-418`); `web.go`/`csrf.go`/`auth.go`/`session.go`/`upload.go`/
-  `probe.go`/`base.html`/`index.html`/`probe.html` untouched; routes registered from
-  `init()` in the task's own files (`admin.go:21-28`, `admin_create.go:22-24`), no
-  pattern collisions with `auth.go`'s `/admin/login`.
-- HTMX/#map rule: no `#map` in any admin template; `hx-target`s are `#rows` and
-  `#dup-slot`, both outside any map ancestry (there is no map on these pages).
-- Parse-don't-validate: `walkSubmission`/`lightEdit`/`lightDelete`/`listQuery`/
-  `lightIDParam` lifted once at the boundary; grep confirms no `r.FormValue` after
-  parsing in `admin*.go`. Typed `store.LightID` throughout (`parseLightID`,
-  `admin.go:261-271`).
-- Hygiene: no TODO/FIXME/`panic(`/`console.log`/"Phase N" in added lines; no deps
-  added (`allow_deps: []`); migrations untouched; status derivation untouched (list
-  shows stored status verbatim). `TestRenderAll`'s `t.Skip` is pre-existing context,
-  not an added line (diff confirms).
-- The new `TestRenderAll` fixture map turns "every page has data" into an enforced
-  invariant (`web_test.go:169-174`) — a genuine improvement over `homeData`-everywhere.
+## Tests — do they exercise the behaviour?
 
-## Tests — real behaviour, a few loose assertions
+Yes, and the reviewer-alt BLOCK items are genuinely fixed, not papered over:
 
-`admin_test.go` drives every route through `s.Handler()` (full middleware) against a
-real temp-file SQLite store with a minted admin session and matching double-submit
-pair: guard matrix (302/401+`HX-Redirect`), walk page frozen strings, empty list,
-`#rows` root regex `\A\s*<[a-zA-Z][^>]*\bid="rows"` + 303 without HX, create happy
-path (303 + HX `Saved` fragment), 9 validation cases, bbox 422 (fragment AND full
-page, fragment asserted not to be a full document), photo pipeline incl. HEIC wording
-and a real >15 MB 413, numbered/unnumbered duplicates incl. nothing-saved and
-merge-applies-label, detail 404s, edit (label-only keeps asset+position; duplicate
-asset 409), delete (303/404/list-gone/re-delete 404/no-CSRF 403), pagination 50/51
-boundary with fragment content split. No mocks, no fixture-value special-casing in
-production code, no skips added. The `e2e-task` no-op matches the packet ("inert
-drafts — T-207 activates them") and the durable mobile-project Playwright coverage is
-sanctioned to arrive with T-207; this task's mobile evidence is the deleted-per-packet
-scratch battery whose artifacts I verified on disk (16/16 dirs + `.last-run.json`
-passed).
+- `TestAdminDuplicateMergePhoto` (admin_test.go:691-717) seeds a
+  landscape-photo light, merges a *different* upload, and asserts 303, exactly
+  one `<tr>`, the detail's `/photos/...` src CHANGED, and both files still
+  serve 200 — a real end-to-end proof of `attachPhoto` (it fails if the UPDATE
+  is dropped, which is precisely the previously-missing behaviour).
+- `TestAdminDuplicatePanelContent` (:662-689) extracts the exact `#dup-panel`
+  element (`dupPanelOf`) in BOTH the full-page and HX responses and asserts the
+  EXISTING light's `<strong>` label, `asset number GP-017`, distance, Merge +
+  Cancel, no `Save anyway`, and no echo of the submitted twin label — the
+  extraction makes the old "matched the wrong element" vacuity impossible.
+- `TestAdminPaginationBoundary` (:938-992) counts `<tr>`s and asserts the full
+  50-label set, then page 1 = 51..2 (no 1) and page 2 = exactly {1}, for both
+  the full page and the rows fragment, plus the 50-lights/no-Older boundary.
+- `TestAdminWalkPage` (:307-340) parses the hidden input's value and compares
+  it to the `csrf_token` cookie for equality, not just presence.
+- `TestAdminCreateOutsideBBox` (:496-540) asserts the re-render keeps label,
+  asset, kind, lat, lon, accuracy, bbox and a non-empty token (the `[^"]+`
+  capture makes "non-empty" enforced), and that the HX rejection is a fragment.
+- `TestAdminEdit` (:844-892) captures the photo URL before a label-only edit
+  and asserts both `-71.029000` and photo survival afterwards; the duplicate
+  asset 409 and no-CSRF 403 paths are covered.
+- `TestAdminLoginPageIsTheStyledPipelinePage` (:283-305) drives `GET
+  /admin/login` through the handler and asserts the pico stylesheet,
+  `id="admin-login"`, the three frozen strings and a complete document.
+- All tests run through `s.Handler()` (full middleware chain) against a real
+  temp-file store with a minted session and matching CSRF pair
+  (`newAdminServer`, :47-82) — the same wiring as production (main.go:40-52).
+  No `t.Skip`/`test.only` anywhere in the new files.
 
 ## Findings
 
-1. **[High — planner-bound, disclosed] Merge applies the label but not the photo.**
-   The packet freezes `dup_choice=merge → "apply photo/label onto ExistingID"`
-   (`harness/tasks/T-205.md:67`) and the contract table repeats "label/photo"
-   (`acceptance/drafts/README.md:68`). `mergeDuplicate` calls only
-   `EditLight(ctx, existing.ID, sub.Label, existing.AssetNo)`
-   (`internal/web/admin_create.go:310`); `EditLight` has no photo parameter
-   (`internal/store/lights.go:256`) and `internal/store` is outside this task's owns —
-   I confirmed there is no in-owns path to set `photo_id` (create-then-soft-delete
-   would violate the frozen "no new row" and change the id). The photo uploaded with a
-   merge submission is persisted at `admin_create.go:185` (frozen order: photo
-   validation precedes duplicate classification) and then orphaned. The frozen oracle
-   asserts only the label (both draft suites merge without a photo part), so the gate
-   passes. This is a genuine product gap that ONLY the planner can resolve (an
-   `EditLightPhoto`-style store task, or ratify the re-scope); the handoff discloses
-   it as open issue 2. Not reward hacking — the omitted work is architecturally
-   impossible here and the omission is documented — but the handoff's "Status:
-   COMPLETE" overstates the deliverable; per AGENTS.md the clean state was
-   `BLOCKED:` for an owns extension.
-2. **[High — planner-bound, disclosed] `pages/admin-login.html` is dead code; the
-   live login page is still T-203's unstyled inline template.** The packet asks for
-   the template to "replace T-203's minimal page" (`harness/tasks/T-205.md:76-77`)
-   while the same packet forbids editing `auth.go` (`:42`), whose
-   `renderLoginPage` (`internal/web/auth.go:170-179`) serves the live page — and
-   ServeMux panics on a duplicate exact pattern, so no override route is possible.
-   Packet-internal contradiction, resolved the only way owns allows (template
-   created, frozen strings kept, `TestRenderAll` renders it, live page untouched and
-   still satisfying A-201's frozen markup). A-201 is T-203's claim, not T-205's, and
-   its assertions pass; the A-201 *visual* note (44 px tap target) remains unmet —
-   correctly routed (handoff open issue 1, with the exact 3-line fix for whoever owns
-   `auth.go`).
-3. **[Medium] Full-page re-renders lose the typed asset number.** `walkPageDataOf`
-   builds `walkValues` without `AssetNo` (`internal/web/admin_create.go:377-390`)
-   while the template renders `value="{{.Values.AssetNo}}"`
-   (`web/templates/pages/admin-walk.html:56`) — after a 409/422/415 no-JS re-render
-   the admin's asset number is gone (label/kind/lat/lon survive). One-line fix plus a
-   test; the HX path (the real product path) is unaffected.
-4. **[Medium] `walkReject` on the parse-failure path renders an unusable form.**
-   With `sub == nil` (`internal/web/admin_create.go:364-367`) the page carries no
-   CSRF token (`value=""` at `admin-walk.html:36`) and no bbox (`data-bbox=""`,
-   which also kills `walk.js`'s client pre-flight, `walk.js:53-58`). Reachable via
-   malformed multipart / the 413-before-parse path for non-HX clients. Mint a token
-   + bbox as `walkPageDataOf` does, or answer a plain status page.
-5. **[Medium-low] Numbered duplicate-panel content assertions are weak.**
-   `admin_test.go:486` checks the 409 body contains `"Ball field lamp"` and
-   `"GP-017"` — but the submitted label "Ball field lamp twin" is re-rendered into
-   the form input (`admin-walk.html:54`) and matches as a substring, and "GP-017"
-   likewise appears in the asset input (`:56`). A panel that omitted the existing
-   light entirely would still pass. The exact-alt merge assertions
-   (`admin_test.go:517-521`) are well-anchored; strengthen the panel case to assert
-   text unique to the panel (e.g. `asset number GP-017` / `m away` inside
-   `#dup-panel`, or the exact `partials/admin-dup.html` fragment for the HX path).
-6. **[Low] `TestAdminWalkPage` claims more than it checks.** The comment says the
-   rendered csrf input "matches the cookie" (`admin_test.go:236-237`) but the code
-   only proves a cookie exists and the input has *a* value (`:226-241`) — no
-   comparison. Parse both and compare; the frozen drafts depend on the double-submit
-   pair matching.
-7. **[Low] The no-JS pager lands on page 1.** `method="get"` +
-   `formaction="/admin/rows?page=N"` with zero form controls
-   (`partials/admin-rows.html:15-18`, mirrored in `pages/admin-list.html:21-24`): a
-   native GET submission replaces the action URL's query with the (empty) form data,
-   so the no-JS fallback hits `/admin/rows` (page 1) and the 303 goes to
-   `/admin?page=1`. The frozen A-209 path is the htmx one (which passes the query
-   verbatim and works, asserted no-navigation in the scratch suite); a hidden `page`
-   input or plain links would fix the fallback. Not contract-asserted anywhere.
-8. **[Low] `mergeDuplicate`'s vanished-existing fallback drops the uploaded photo and
-   500s on a duplicate race** (`internal/web/admin_create.go:290-308`: `CreateLight`
-   without `PhotoID`, and an `ErrDuplicateAssetNo` there falls through to 500).
-   Edge case (the duplicate was deleted between check and merge).
-9. **[Low] `classifyDuplicate` fails open** on a `NearbyLights` DB error
-   (`internal/web/admin_create.go:264-268`: logs and proceeds to create). Single-admin
-   scale; a DB failure will surface on the create anyway.
-10. **[Info] Forced template duplication carries a drift risk.** The rows fragment
-    exists twice (`pages/admin-list.html:7-26` define vs `partials/admin-rows.html`)
-    and the dup panel likewise (`admin-walk.html:40-52` vs `partials/admin-dup.html`)
-    because `templates.go:48-53` parses pages without partials and `templates.go` is
-    outside owns. Both copies verified in sync at review time; the `<!-- sync -->`
-    comments are the mitigation. A future task could let pages include partials.
-11. **[Info] Stale scratch-failure artifacts under `web/test-results/`** (gitignored,
-    so guard-clean): `walk--scratch-A-202-*/error-context.md` etc. document an
-    earlier harness iteration's failure (the manual-position hijack since fixed at
-    `walk.js:126-130`). Not mentioned in the handoff; harmless, but the handoff's
-    screenshot inventory should have noted that only the root `test-results/`
-    battery is the final evidence.
-12. **[Info — correction to reviewer-alt] Finding 3 in
-    `harness/reviews/T-205-reviewer-alt.md` overstates.** The claim "a regression
-    that renders two rows per page instead of fifty would stay green" is false:
-    `admin_test.go:726-728` requires BOTH `Boundary lamp 01` and `Boundary lamp 50`
-    on page 1, which a 2-rows-per-page pagination fails. The middle-48 labels are
-    indeed not individually asserted (worth tightening to match the frozen draft's
-    full loop), but the 50/51 boundary itself is pinned by the extremes plus the
-    page-1/page-2/fragment content split.
-13. **[Info] Edit test narrower than A-208's letter**: longitude and stored-photo
-    survival after a label-only edit are not asserted locally
-    (`admin_test.go:613-641` asserts label/asset/latitude only); the frozen Go draft
-    covers both at T-207 activation. Cheap to add.
+1. **[high — architecture violation, must be tracked to resolution]
+   `internal/web/admin_merge.go` opens its own SQLite connection and runs a
+   raw UPDATE** (admin_merge.go:36-57). `docs/spec/architecture.md:18` reserves
+   "SQLite access … all queries" for `internal/store`; this imports the driver
+   into `internal/web`, hand-writes schema knowledge (`photo_id`, `updated_at`,
+   `deleted_at IS NULL`) outside the sqlc surface a migration could compile-
+   check, and adds a second writer connection. Context that keeps this out of
+   BLOCK territory: the packet (:67) and README (:68) freeze "merge applies
+   label AND photo", the merged store API has no photo-update method
+   (EditLight is label/asset only, lights.go:256), `internal/store` is outside
+   this task's `owns`, and the previous review BLOCKed the drop-the-photo
+   alternative — the packet left no compliant path except `BLOCKED`. The
+   implementation is the narrowest available: DSN byte-identical to
+   `store.dsn` (WAL/busy_timeout/foreign_keys, store.go:28-33), parameterized,
+   `deleted_at IS NULL` guarded, 0 rows → `store.ErrNotFound`, FK-safe (the
+   photos row was committed by `CreatePhoto` before the merge), covered by a
+   real-DB test, and disclosed as the handoff's open issue 3 with the follow-up
+   named. **Required follow-up for the planner: add
+   `store.EditLightPhoto(ctx, id, photoID)` (store task) and delete
+   admin_merge.go.** Residual risk meanwhile: a partial merge window — if
+   `EditLight` commits and `attachPhoto` then fails (admin_create.go:311-322),
+   the survivor carries the twin label but the old photo and the admin sees a
+   500; a retry heals. Also note `checkDSNPath` is not re-applied (store.Open
+   already refused ambiguous paths at boot, so `Cfg.DBPath` is pre-validated).
+2. **[medium — real bug, no-JS fallback] The pagination pager loses the page
+   number without JS** (partials/admin-rows.html:14-18 and the synced copy in
+   pages/admin-list.html). The `Newer`/`Older` buttons sit in a
+   `<form method="get">` whose only page carrier is the `formaction` URL's
+   query string (`formaction="/admin/rows?page=2"`). Per the HTML
+   form-submission algorithm ("Mutate action URL"), a GET submission REPLACES
+   the action URL's query with the serialized entry list — here empty — so the
+   no-JS submit goes to `/admin/rows` with no `page`, the handler correctly
+   303s to `/admin?page=1`, and Older/Newer always land on page 1. The HTMX
+   path (the only one the drafts exercise) is unaffected, which is exactly why
+   nothing caught it. Fix: add `<input type="hidden" name="page"
+   value="{{.OlderPage}}">` (per button is not possible in one form — either
+   one pager form per button or `formaction="/admin/rows"` + hidden input set
+   per submit is needed; simplest is two one-button forms each carrying its
+   own hidden `page`).
+3. **[low — UX/robustness] Full-page 409/422 re-renders hide their own
+   feedback**: `#add-form` is unconditionally `hidden`
+   (pages/admin-walk.html:33), so the server-side duplicate panel / alert that
+   `respondDuplicate`/`walkReject` carefully render for non-HX clients
+   (admin_create.go:353-358, 374-386) live inside a hidden section. A
+   no-htmx browser must click "Add light here" again to see the rejection; a
+   fully no-JS client can never open the walk form at all. The frozen drafts
+   only assert body-contains on these paths, so nothing fails — but the
+   re-render machinery's whole purpose is degraded. Suggest dropping `hidden`
+   when `.Alert` or `.Dup` is set.
+4. **[low — robustness] `classifyDuplicate` swallows `NearbyLights` errors**
+   (admin_create.go:264-268): a store failure on the nearby query logs and
+   returns "no duplicate", so the create proceeds — silently skipping
+   unnumbered duplicate detection instead of failing the request. Numbered
+   duplicates remain protected by the unique-index race fallback
+   (admin_create.go:221-232, a nice catch). A 500 would be more honest.
+5. **[info] Walk-page panel/alert markup is duplicated** between
+   pages/admin-walk.html:40-52 and partials/admin-{alert,dup}.html ("sync"
+   comments both sides). Drift between the full-page and HX surfaces would
+   only be caught because TestAdminDuplicatePanelContent asserts both — which
+   it does; acceptable, but a `{{template}}` include would remove the risk
+   (the walk page's copy is intentionally a different data shape
+   `.Dup.*` vs `.`).
+6. **[info] `installLoginPage` re-parses rendered HTML as a template**
+   (admin.go:46): safe because admin-login.html renders no user data and the
+   output contains no `{{`; `renderLoginPage`'s nil-data Execute is inert on
+   the action-free result. Frozen auth tests and the A-201 draft markup row
+   still pass (regexes verified).
+7. **[info] Packet-mechanism deviation**: htmx 4xx swap configured from
+   walk.js:185-187 instead of the suggested `<meta name="htmx-config">`
+   (packet :99-101). Key and default verified against the vendored
+   htmx-2.0.11; equivalent and correctly timed (defer script + module
+   evaluation order).
+8. **[info] `TestRenderAll`'s `t.Skip` is pre-existing** (web_test.go:116-118,
+   env-gated snapshot writer), not introduced or weakened by this diff.
+9. **[info] walk.js sits exactly at the 200-line ceiling** (packet :84 "≤200"),
+   disclosed in the handoff; `Newer` button and the pager's no-JS behaviour
+   have no test (see F2 — the untested path is the broken one).
 
-## Verdict rationale
+## Verdict
 
-Against the four assertions T-205 claims (A-202/A-203/A-208/A-209) the implementation
-is correct and honestly tested: I traced every frozen clause in the drafts to its
-implementing line and found no divergence; security and architecture are clean; the
-evidence on disk is real and green. The two unmet packet clauses (merge-photo,
-login-page wiring) are both impossible within `owns` — I verified the store API and
-the ServeMux constraints directly — and both are disclosed in the handoff with
-concrete remediations for the planner; neither is exercised by any frozen, gated
-assertion. That matches this repo's review precedent (T-203's dual-encoding
-deviation: sound within owns, disclosed, "not a block — the planner should resolve
-it"). I do not accept reviewer-alt's "reward hacking" framing: the omitted work is
-structurally out of scope, not dodged, and nothing was special-cased to a test.
-However, the rework that reviewer-alt's BLOCK already triggers should take the cheap
-in-owns fixes above (findings 3-7, 13) and re-state the two planner-bound gaps as
-explicit `BLOCKED:`-style escalations rather than "COMPLETE with open issues" — and
-the planner must act on findings 1 and 2 before M2 closes, or the merge-photo half of
-A-205's written contract will ship silently unimplemented.
+The frozen HTTP/UI contract is implemented faithfully (routes, statuses,
+strings, fragment roots, 303s, alt format, merge-applies-label+photo, 50/51
+pagination boundary), security posture is sound (CSRF order fixed per T-206's
+forward risk, bounded uploads, escaped output, parameterized SQL), and the test
+suite now exercises every previously-vacuous assertion for real. The two
+substantive problems — the store-ownership breach in admin_merge.go (forced by
+a packet gap, minimally and honestly implemented, but a breach) and the no-JS
+pagination bug — are tracked findings requiring fast follow-up, not reasons to
+bounce the task: the first cannot be fixed inside this task's owns at all, and
+the second breaks no frozen assertion. The planner should schedule
+`store.EditLightPhoto` + admin_merge.go's removal, and the pager hidden-input
+fix.
 
 VERDICT: PASS
