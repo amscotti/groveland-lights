@@ -51,6 +51,10 @@ for arg in "$@"; do
 done
 [ -n "$BASE_URL" ] || { usage; exit 2; }
 BASE_URL="${BASE_URL%/}"
+# A base URL never wants a query or fragment; drop them so they cannot leak
+# into the TLS host extraction or the curl targets below.
+BASE_URL="${BASE_URL%%\?*}"
+BASE_URL="${BASE_URL%%#*}"
 
 case "$BASE_URL" in
     https://*|http://*) ;;
@@ -105,12 +109,16 @@ case "$BASE_URL" in
         ;;
 esac
 
-# 3. GET / -> 200 and CSP header present. The server sets the header on every
-# response and Go canonicalizes names, so a case-sensitive match is correct.
+# 3. GET / -> 200 and CSP header present (the server sets it on every
+# response). The match is case-INSENSITIVE on purpose: curl -D dumps header
+# names exactly as they crossed the wire, and behind the Fly edge that is
+# usually HTTP/2, where field names are lowercase (RFC 9113 8.1). A
+# case-sensitive grep would false-fail a healthy site on any HTTP/2-capable
+# curl while passing on HTTP/1.1-only clients.
 status=$(curl -sS --max-time 10 -o "$BODY" -D "$HDR" -w "%{http_code}" "$BASE_URL/") \
     || die "GET /: curl transport failure"
 [ "$status" = "200" ] || die "GET /: expected 200, got $status"
-grep -q "^Content-Security-Policy:" "$HDR" \
+grep -qi "^content-security-policy:" "$HDR" \
     || die "GET /: Content-Security-Policy header missing"
 ok "index -> 200 + Content-Security-Policy"
 
@@ -146,7 +154,12 @@ extract_csrf() {
     tag=$(printf "%s\n" "$flat" \
         | grep -o "<input[^>]*name=\"csrf_token\"[^>]*>" \
         | head -n 1) || return 1
-    printf "%s" "$tag" | sed "s/^.*value=\"\([^\"]*\)\".*$/\1/p"
+    # `sed -n` is load-bearing: sed auto-prints every pattern space at end
+    # of cycle, so without -n the p flag would print the captured token a
+    # SECOND time — the value would arrive doubled (T\nT), the POST would
+    # embed a newline, and VerifyCSRF would 403 forever. (extract_count
+    # deliberately has no p flag; here p without -n is the bug.)
+    printf "%s" "$tag" | sed -n "s/^.*value=\"\([^\"]*\)\".*$/\1/p"
 }
 
 frag=$(probe_get) || die "GET /probe: transport or HTTP failure"
@@ -154,6 +167,11 @@ n0=$(extract_count "$frag") || die "GET /probe: could not parse probe count"
 csrf=$(extract_csrf "$frag") || die "GET /probe: could not parse csrf_token"
 case "$n0" in ""|*[!0-9]*) die "GET /probe: count is not a number: [$n0]" ;; esac
 [ -n "$csrf" ] || die "GET /probe: empty csrf_token"
+# A token with embedded whitespace means extraction mangled it (e.g. a
+# doubled print from sed); refuse it before building the POST body.
+case "$csrf" in
+    *[[:space:]]*) die "GET /probe: csrf_token has embedded whitespace: [$csrf]" ;;
+esac
 n0=$((10#$n0))
 
 pstatus=$(curl -sS --max-time 10 -o /dev/null -w "%{http_code}" \
