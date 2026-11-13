@@ -390,14 +390,17 @@ func runReview(root, wt, id, role string, pol Policy) string {
 	_ = os.MkdirAll(filepath.Dir(transcript), 0o750)
 
 	diffPath := filepath.Join(root, "harness", "reviews", id+".diff")
-	extraFiles := []string{diffPath}
+	attach := diffPath
+	msg := fmt.Sprintf("Review task %s. Diff attached; write findings and verdict to %s.", id, "harness/reviews/"+id+"-"+role+".md")
 	if role == "visual-reviewer" {
-		// Attach the key screenshots if any exist under test-results.
-		extraFiles = screenshots(wt)
+		if shots := screenshots(wt); len(shots) > 0 {
+			attach = shots[0]
+		}
+		// The vision agent reads images itself; point it at the run artifacts.
+		msg = fmt.Sprintf("Review task %s. Screenshots are under %s (read the .png files; if the directory is empty, review the attached diff for layout/CSS correctness instead). Write findings and verdict to %s.",
+			id, filepath.Join(wt, "test-results"), "harness/reviews/"+id+"-"+role+".md")
 	}
-	msg := fmt.Sprintf("Review task %s. Diff or screenshots attached. Write your findings and verdict to %s.",
-		id, "harness/reviews/"+id+"-"+role+".md")
-	if err := runAgent(root, root, role, pol.Roles[role], id, extraFiles[0], msg, transcript, 30); err != nil {
+	if err := runAgent(root, root, role, pol.Roles[role], id, attach, msg, transcript, 30); err != nil {
 		return "ERROR: " + err.Error()
 	}
 	// Verdict: prefer the review file, fall back to the transcript.
