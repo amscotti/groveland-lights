@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -167,4 +168,22 @@ func probePost(w http.ResponseWriter, r *http.Request) {
 		s.Log.Error("probe: render", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
+}
+
+// probeFragment renders the probe partial server-side for the home page mount
+// so JavaScript-disabled clients see the live counter and the no-JS form
+// (contract A-103). JS clients get the same markup refreshed by htmx.
+func probeFragment(w http.ResponseWriter, r *http.Request) (template.HTML, error) { //nolint:forbidigo // §8.4 audited door: the ONLY template.HTML return type, for server-rendered fragments
+	s := serverFrom(r.Context())
+	n, err := probeCount(r.Context())
+	if err != nil {
+		return "", err
+	}
+	token := IssueCSRFToken(w, r)
+	var buf bytes.Buffer
+	if err := s.tpl.renderPartial(&buf, "partials/probe.html", probeData{Count: n, CSRFToken: token}); err != nil {
+		return "", err
+	}
+	//nolint:gosec // §8.4 audited: buf holds only our own template output; all user data is escaped upstream by html/template
+	return template.HTML(buf.String()), nil //nolint:forbidigo // §8.4 audited door: sole conversion, same rationale as above
 }

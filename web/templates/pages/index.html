@@ -8,6 +8,7 @@
   <p class="env-note" data-env="{{.EnvLabel}}">{{if eq .EnvLabel "prod"}}{{else}}<span class="muted">environment: {{.EnvLabel}}</span>{{end}}</p>
 </section>
 <section id="probe" hx-get="/probe" hx-trigger="load" hx-target="#probe" hx-swap="innerHTML">
-  <a href="/probe">Probe</a>
+{{.ProbeHTML}}
+<noscript><a href="/probe">Probe</a></noscript>
 </section>
 {{end}}

@@ -4,6 +4,7 @@
 package web
 
 import (
+	"html/template"
 	"log/slog"
 	"net/http"
 
@@ -149,6 +150,10 @@ type homeData struct {
 	Title    string
 	TestEnv  bool
 	EnvLabel string
+	// ProbeHTML is the server-rendered probe fragment so no-JS clients see the
+	// counter and form (A-103). Built by probeFragment through the audited
+	// template.HTML door (§8.4); htmx replaces it on load for JS clients.
+	ProbeHTML template.HTML //nolint:forbidigo // §8.4 audited field: sole server-fragment injection point
 }
 
 func init() {
@@ -158,6 +163,9 @@ func init() {
 func home(w http.ResponseWriter, r *http.Request) {
 	s := serverFrom(r.Context())
 	data := homeData{Title: "Groveland Lights", TestEnv: s.Cfg.IsTest(), EnvLabel: string(s.Cfg.AppEnv)}
+	if frag, err := probeFragment(w, r); err == nil {
+		data.ProbeHTML = frag
+	}
 	if err := s.tpl.renderPage(w, "index.html", data); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
