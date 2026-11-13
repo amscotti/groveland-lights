@@ -1,134 +1,132 @@
 diff --git a/harness/handoffs/T-102.md b/harness/handoffs/T-102.md
 new file mode 100644
-index 0000000..6036a78
+index 0000000..1066ec5
 --- /dev/null
 +++ b/harness/handoffs/T-102.md
 @@ -0,0 +1,168 @@
-+BLOCKED: web.go request-ID chain order needs an owner fix
++BLOCKED: web.go request-ID chain order needs an owner fix (A-105 request-id clause)
 +
 +# T-102 — CSRF plumbing + middleware guards (M1)
 +
-+The block is narrow and precise: **every packet deliverable is implemented,
-+tested, committed and green**. What is blocked is one clause of A-105 — the
-+"request id" field of the served log — because satisfying it requires
-+re-arranging the middleware chain inside `internal/web/web.go`, which this
-+task's `owns` forbid me to edit (packet: "web.go is NOT in your owns — do not
-+edit it. If you believe it needs a change, write BLOCKED instead"). This is
-+that write.
++Everything this task owns is implemented, tested and green. The block is one
++clause of A-105 — the "request id" field of the served request log — because
++covering it requires reordering the middleware chain inside
++`internal/web/web.go`, which this task's `owns` forbid ("web.go is NOT in
++your owns — do not edit it. If you believe it needs a change, write BLOCKED
++instead"). This is that write.
 +
-+## The defect, reproduced this session
++## The defect (pre-existing, from T-100's web.go)
 +
-+`web.go` `Handler()` composes the chain id-assigner-inner, logger-outer:
++`Handler()` composes id-assigner-inner, logger-outer:
 +
 +- `web.go:62` `h = s.withRequestID(h)` (inner)
 +- `web.go:63` `h = s.withLogging(h)` (outer)
 +
-+`withRequestID` enriches the context by rebinding its **local** request
-+(`web.go:117` `r = r.WithContext(...)`), so the outer `withLogging` still holds
-+the pre-enrichment request when it logs (`web.go:141`
-+`requestIDOf(r.Context())`), and `context.go:28-33` returns the `"-"` no-id
-+sentinel. The response header `X-Request-Id` carries the real id, so every
-+served request line disagrees with its own header. Observed this session, in
-+the keeper test (run `go test ./internal/web/ -run TestWithLoggingRequestFields -v`):
++`withRequestID` enriches only its local request (`web.go:117`), so the outer
++`withLogging` still holds the pre-enrichment request when it logs
++(`web.go:141`), and `requestIDOf` (`context.go:28-33`) returns the `"-"`
++no-id sentinel. The response `X-Request-Id` header carries the real 16-hex
++id, so every served request line disagrees with its own header. The real
++binary does the same (`cmd/server/main.go:43` installs `srv.Handler()`
++unchanged), so prod logs every request with `req_id:"-"`. The protected
++acceptance test does not catch it: `acceptance/go/m1_guards_test.go:275-277`
++checks only that the `req_id` key is present and non-empty, which `"-"`
++satisfies.
 +
-+```
-+middleware_logging_test.go:128: served-chain req_id = "-"
-+```
++## Coverage statement (the point of this attempt)
 +
-+The same is true of the real binary: `cmd/server/main.go:43` installs
-+`srv.Handler()` unchanged, so prod logs every request with `req_id: "-"`.
-+A-105's contract line (`acceptance/contract.json:34-37`) requires a request id
-+in the log; `-` is the explicit no-id sentinel, not one.
++**No test in `internal/web` asserts the served chain's logged `req_id`.**
++Until web.go is fixed, A-105's request-id clause is unguarded below the
++acceptance suite, and nothing in this package claims otherwise:
 +
-+## Why the tree is green while the defect stands
++- `TestWithLoggingRequestFields` (runs the production `s.Handler()` chain)
++  asserts method, `pattern=` key presence + value, logged status
++  cross-checked against the actual `rec.Code` (and `rec.Code` against the
++  case's expected code), `dur_ms >= 0`, and that the response carries a real
++  16-hex `X-Request-Id` — the id-assigner half of the clause, which is
++  coverable and covered. It makes no assertion about the logged `req_id`;
++  the deliberate non-coverage is documented in a comment at the assertion
++  site.
++- `jsonRequestLine` / `TestProdLoggingIsJSON` check the JSON form of the
++  same coverable fields; the `req_id` check (previously key-presence /
++  non-empty, which the served `"-"` satisfies) is removed, with a comment
++  pointing here.
++- `TestWithLoggingLogsContextRequestID` (renamed from
++  `TestWithLoggingLogsRealRequestID`) is what it says: a **unit** test of
++  `withLogging`'s own contract — composed inside `withRequestID` (the
++  arrangement it was built for), the logged `req_id` equals the response
++  `X-Request-Id` and matches `^[0-9a-f]{16}$`, never `"-"`. Its doc comment
++  states explicitly that it is NOT production coverage and that whoever
++  swaps the two lines in web.go should move its assertion onto
++  `s.Handler()` so it guards the real chain.
 +
-+The scheduler hard-fails on `make check-fast` before reviews run
-+(`cmd/harness/sched.go:250-253`), and the merge gate runs `make check`
-+(`gate.go:103`), so a deliberately failing unit test would prevent this task
-+from ever merging — taking the CSRF API that T-103 depends on down with it.
-+The review verdict itself sanctions the alternative: "BLOCKED … with a failing
-+test **or an explicit non-coverage note**". This handoff is that note, and the
-+non-coverage is also documented in code:
++Why no failing assertion was left in place: the scheduler hard-fails on
++`make check-fast` before reviews run and the merge gate runs `make check`;
++a deliberately red test would keep this package — which T-103 compiles
++against — from ever merging. The review's sanctioned alternative ("removing/
++renaming the weak assertions so they are not represented as coverage") is
++what is implemented: the assertions that previously rubber-stamped `"-"` as
++acceptable are gone, not weakened further.
 +
-+- `TestWithLoggingRequestFields` / `jsonRequestLine` assert the strongest
-+  condition that can honestly pass through the served chain today
-+  (`req_id` present), with an on-purpose comment explaining the gap and a
-+  `-v` log line that prints the observed sentinel value, so the defect stays
-+  visible and any run of the suite documents it.
-+- **`TestWithLoggingLogsRealRequestID` (new this attempt) is the real guard
-+  the review demanded**: it composes `withRequestID` outside `withLogging`
-+  over a real mux and asserts the logged `req_id` **equals the response
-+  `X-Request-Id`** and is a real 16-hex id (regex `^[0-9a-f]{16}$`), i.e.
-+  never `-`. It passes, proving both middleware units already satisfy the
-+  A-105 request-id contract; only the production arrangement in `web.go`
-+  does not. If either unit regresses (logger stops logging the context id,
-+  assigner stops setting header or context), this test goes red.
-+
-+## The owner fix (one line, in `web.go` `Handler()` only)
-+
-+Swap the two compositions so the id exists before the logger runs:
++## The owner fix (one line, web.go Handler() only)
 +
 +```go
-+h = s.withLogging(h)      // was line 63
-+h = s.withRequestID(h)    // was line 62
++h = s.withLogging(h)      // swap with the line below
++h = s.withRequestID(h)
 +```
 +
-+(An equivalent alternative is having `withLogging` read
-+`rec.Header().Get("X-Request-Id")` after `next.ServeHTTP`.) After the swap:
-+`TestWithLoggingLogsRealRequestID` keeps guarding the units, the `-v` line in
-+`TestWithLoggingRequestFields` starts printing a real id, and the served chain
-+satisfies A-105's request-id clause end to end. Nothing in T-102's files needs
-+to change. Optionally (owner's call — the acceptance suite is protected, not
-+mine): strengthen `acceptance/go/m1_guards_test.go:275-277` from
-+key-presence to the real-id shape; today it passes on `-` too.
++After the swap, move the assertion from `TestWithLoggingLogsContextRequestID`
++onto `s.Handler()` (logged `req_id` == response `X-Request-Id`, 16-hex,
++never `-`). Optionally also strengthen the protected
++`acceptance/go/m1_guards_test.go:275-277` from key-presence to the real-id
++shape — that file belongs to acceptance/'s owner, not this task.
 +
-+## What is delivered (all green, committed on `task/T-102`)
++## What is delivered (committed on task/T-102)
 +
 +- `internal/web/csrf.go` — frozen double-submit API (unchanged this attempt;
-+  see "Frozen API" below for what T-103 compiles against).
-+- `internal/web/csrf_test.go` — `TestCSRFTokenNameFrozen` (new: pins the
-+  contract literal), `TestCSRFVerify` (now genuinely table-driven: 10 rows,
-+  case names as assertions, want `nil` vs `ErrCSRF`), `TestCSRFIssue`
-+  (reuse/entropy/reissue), `TestCSRFCookieFlags` (prod/test table).
-+- `internal/web/middleware_logging_test.go` — `TestWithLoggingRequestFields`
-+  (tightened: exact response code per case, logged status cross-checked
-+  against `rec.Code`, `pattern=` key presence asserted even when the value is
-+  empty), `TestWithLoggingLogsRealRequestID` (new, see above),
-+  `TestWithLoggingOmitsClientIP` (RemoteAddr + injected forwarded-for never
-+  appear), `TestProdLoggingIsJSON` (logger built the way
-+  `cmd/server/main.go` builds it in prod; every line decodes as JSON; logged
-+  status cross-checked against the actual per-request response; no IP leak),
-+  `TestMiddlewareGuards` (recover: panic->500 + logged, clean pass-through;
-+  request id: header matches context, ids differ per request).
++  both reviews found the implementation genuine). See "Frozen API" below.
++- `internal/web/csrf_test.go` — `TestCSRFTokenNameFrozen` (pins the
++  contract-frozen `csrf_token` literal), `TestCSRFVerify` (10-row table:
++  missing cookie, empty/spaces/short/non-base64url/padded/over-long/tampered
++  submissions, malformed cookie even when matched, valid round-trip — all
++  rejections uniformly `ErrCSRF`), `TestCSRFIssue` (now table-driven with
++  one row per flow: idempotent reuse with no redundant Set-Cookie, 32-byte
++  entropy floor, malformed-cookie reissue; the idempotency row now closes
++  the response body before counting cookies), `TestCSRFCookieFlags`
++  (prod/test table: Path=/, HttpOnly, SameSite=Lax, Secure iff prod).
++- `internal/web/middleware_logging_test.go` — the tests described under
++  "Coverage statement" above, plus `TestWithLoggingOmitsClientIP`
++  (RemoteAddr and injected X-Forwarded-For never appear) and
++  `TestMiddlewareGuards` (withRecover: panic→500+logged, clean
++  pass-through; withRequestID: header==context, ids differ per request).
 +
-+## Review-finding disposition (reviewer-alt, this attempt)
++## Review-finding disposition (reviewer-alt, round 2)
 +
 +| Finding | Disposition |
 +| --- | --- |
-+| BLOCKING: req_id assertions written to pass on the known-bad sentinel | Real-id guard added (`TestWithLoggingLogsRealRequestID`: logged id == response header, 16-hex, never `-`); served-chain assertions annotated as knowingly non-covering with a visible `-v` probe; this handoff leads with the blocked line as the review itself prescribed for a needed `web.go` change. |
-+| 1: logged status not cross-checked vs response | Both text and JSON tests now assert logged status == actual `rec.Code`, and `rec.Code` == the case's expected code. |
-+| 2: text-mode pattern key indistinguishable from omitted | `strings.Contains(line, "pattern=")` asserted for matched and unmatched routes alike. |
-+| 3: frozen `csrf_token` literal never asserted | `TestCSRFTokenNameFrozen` pins `CSRFTokenName == "csrf_token"`. |
-+| 4: idempotency expectation changed after a failing run | Kept (reuse sends no redundant Set-Cookie — cleaner contract, pinned). Packet only requires reuse; noted as a judgment call, non-blocking. |
-+| 5: scratch probe made non-failing and deleted via a `go run` workaround | Not repeated. No scratch files this attempt; the observation lives permanently in a keeper test's `-v` output and in this handoff. |
-+| 6: Verify tests not table-driven | `TestCSRFVerify` is now a table (10 rows). `TestCSRFIssue` stays as named subtests on purpose (each case needs its own multi-step flow); noted in its doc comment. |
++| BLOCKING: served-chain req_id assertions pass on `-` | Removed entirely (value check, key-presence check and the `-v` t.Logf probe). Served-chain tests assert nothing about the logged req_id and say so in comments; the only request-id assertions that remain are the real 16-hex header check on the served chain and the unit-level real-id check in `TestWithLoggingLogsContextRequestID`. |
++| BLOCKING: composition test represented as the production guard | Renamed `TestWithLoggingLogsContextRequestID` and rescoped as a unit test of `withLogging`; its doc explicitly says NOT production coverage and hands the Handler()-level assertion to the web.go owner. The handoff no longer calls it "the real guard". |
++| 1: prod-JSON doc overstates "full field set" | Reworded to "every field coverable through the served chain", naming the exclusion. |
++| 2: TestCSRFIssue not table-driven | Converted to a table (`[]struct{name; run func(*testing.T)}`), one row per named case. |
++| 3: recorder Result() body not closed | Idempotency row closes the response body via defer before counting cookies. |
++| 4: t.Logf only visible under -v | The t.Logf is deleted along with the assertion it accompanied. |
 +
-+## Verification (attempt 4, this session — all from a clean tree)
++Round-1 findings (status cross-check vs `rec.Code`, `pattern=` key
++presence, frozen `csrf_token` literal, no scratch probes, no files outside
++owns) were addressed in the previous attempt and remain addressed.
++
++## Verification (this attempt, final tree)
 +
 +| Command | Exit | Result |
 +| --- | --- | --- |
-+| `make check-fast` | 0 | fmt-check, vet, lint 0 issues, `go test -race -count=1 -shuffle=on ./...` ok |
-+| `go test ./internal/web/... -race -count=1` | 0 | ok 1.3s |
++| `make e2e-task TASK=T-102` (baseline, pre-edit) | 0 | @A-102 4/4 projects; @A-105 has no Playwright spec (`--pass-with-no-tests`) — no red→green flip, as the packet states |
++| `make test-acceptance-go` (baseline) | 0 | `TestA105ProdLogsJSONNoIP`, `TestA101HealthzFast` green |
++| `make check-fast` | 0 | fmt-check, vet, golangci-lint "0 issues", `go test -race -count=1 -shuffle=on ./...` ok |
++| `go test ./internal/web/... -race -count=1` | 0 | ok 1.456s |
 +| `make cover` | 0 | internal/web 86.7%, internal/config 81.1% (floor 70) |
-+| `make test-acceptance-go` | 0 | acceptance/go ok — `TestA105ProdLogsJSONNoIP`, `TestA101HealthzFast` green |
-+| `make e2e-task TASK=T-102` | 0 | @A-102 4/4 projects (desktop-chromium, pixel-9, iphone-16, iphone-se-320); @A-105 has no Playwright match (`--pass-with-no-tests`) |
-+| `go test ./internal/web/ -run TestWithLoggingLogsRealRequestID -count=1` | 0 | new real-id guard passes |
-+| `git status --porcelain` | 0 | only the allowlisted `node_modules` symlink |
-+
-+Commits on `task/T-102`: `a21ac26` (feature + tests), `4cf14b1`, `c10c8a5`,
-+`dd80d07` (handoff history), `f4b149f` (this attempt's review fixes).
-+No `test-run.db` / `test-run-photos/` were created; nothing untracked beyond
-+`node_modules`; nothing ignored was committed.
++| `make e2e-task TASK=T-102` (final) | 0 | 4 passed (desktop-chromium, pixel-9, iphone-16, iphone-se-320) |
++| `make test-acceptance-go` (final) | 0 | acceptance/go ok |
++| `git status --porcelain` | 0 | only this task's two test files modified; no `test-run.db`/`test-run-photos/` created; sole untracked entry is the pre-existing `node_modules` (guard-allowlisted, not committed) |
 +
 +## Frozen API as implemented (T-103 compiles against this — unchanged)
 +
@@ -155,8 +153,9 @@ index 0000000..6036a78
 +  handler). On the unreachable entropy failure it answers 500 and returns "".
 +- **VerifyCSRF**: nil only if cookie and submission both exist, are
 +  well-formed, and are equal under crypto/subtle constant-time compare.
-+  Everything else — missing cookie, empty, garbage, short, padded, over-long,
-+  mismatched — is `ErrCSRF`, uniformly (answer 403, don't distinguish causes).
++  Everything else — missing cookie, empty, garbage, short, padded,
++  over-long, mismatched — is `ErrCSRF`, uniformly (answer 403, don't
++  distinguish causes).
 +- **Usage sketch for /probe**: render: `tok := IssueCSRFToken(w, r)` then
 +  `<input type="hidden" name="csrf_token" value="{{.CSRFToken}}">`; POST:
 +  parse the form into a typed struct at the boundary, then
@@ -165,13 +164,14 @@ index 0000000..6036a78
 +## Open issues
 +
 +1. The blocked item itself (see top): one-line `web.go` chain-order fix by
-+   whoever owns `web.go`; optional matching strengthening of the protected
-+   A-105 acceptance assertion by whoever owns `acceptance/`.
-+2. Prior attempts' notes that remain true: handoff prose is scanned by the
-+   guard like code (attempt 1's exit-6 was a self-referential false positive —
-+   never quote the scan list); `secure`-cookie nolint carries an inline reason;
-+   no forbidden markers, no static-JS console logging, no new dependencies
-+   (stdlib only), no phase-number strings.
++   whoever owns `web.go`; moving the real-id assertion onto `s.Handler()`;
++   optional matching strengthening of the protected A-105 acceptance
++   assertion by whoever owns `acceptance/`.
++2. Until then, A-105's request-id clause is enforced only as far as the
++   protected acceptance suite enforces it (key presence), and this package's
++   unit suite deliberately makes no claim on it.
++3. Untracked `node_modules` (Playwright install) predates this attempt, is
++   allowlisted by the guard, and is not committed.
 diff --git a/internal/web/csrf.go b/internal/web/csrf.go
 new file mode 100644
 index 0000000..f8b883e
@@ -278,10 +278,10 @@ index 0000000..f8b883e
 +}
 diff --git a/internal/web/csrf_test.go b/internal/web/csrf_test.go
 new file mode 100644
-index 0000000..e1f8af2
+index 0000000..3a4fbb0
 --- /dev/null
 +++ b/internal/web/csrf_test.go
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,225 @@
 +package web
 +
 +import (
@@ -408,61 +408,69 @@ index 0000000..e1f8af2
 +	}
 +}
 +
-+// TestCSRFIssue covers IssueCSRFToken: reuse, entropy, malformed-cookie
-+// reissue. Case names are the assertions. These cases stay as named subtests
-+// (rather than rows of one table) because each needs its own multi-step
-+// assertion flow; TestCSRFVerify and TestCSRFCookieFlags carry the
-+// table-driven cases.
++// TestCSRFIssue covers IssueCSRFToken table-driven: reuse, entropy,
++// malformed-cookie reissue. Case names are the assertions; each row is a
++// self-contained flow, so the table carries funcs rather than plain values
++// (the flows issue, re-request and inspect cookies in different orders).
 +func TestCSRFIssue(t *testing.T) {
-+	s := newTestServer(t, config.EnvTest)
-+
-+	t.Run("issue is idempotent per cookie", func(t *testing.T) {
-+		rec1, first := csrfIssue(t, s)
-+		if first == "" {
-+			t.Fatal("first issue returned an empty token")
-+		}
-+		if c := csrfCookieOf(t, rec1); c.Value != first {
-+			t.Fatalf("cookie value %q != issued token %q", c.Value, first)
-+		}
-+		// A second request carrying the first cookie must reuse the value,
-+		// not mint a fresh one, and needs no redundant Set-Cookie.
-+		rec2, second := issueOn(t, s, []*http.Cookie{{Name: CSRFTokenName, Value: first}})
-+		if second != first {
-+			t.Fatalf("second issue = %q, want reused %q", second, first)
-+		}
-+		if n := len(rec2.Result().Cookies()); n != 0 {
-+			t.Errorf("reuse path set %d cookie(s), want 0", n)
-+		}
-+	})
-+
-+	t.Run("issued token meets entropy floor", func(t *testing.T) {
-+		_, a := csrfIssue(t, s)
-+		_, b := csrfIssue(t, s)
-+		raw, err := base64.RawURLEncoding.DecodeString(a)
-+		if err != nil {
-+			t.Fatalf("issued token not base64url: %v", err)
-+		}
-+		if len(raw) < csrfTokenBytes {
-+			t.Fatalf("issued token carries %d bytes, want >= %d", len(raw), csrfTokenBytes)
-+		}
-+		if a == b {
-+			t.Fatal("two issues produced identical tokens")
-+		}
-+	})
-+
-+	t.Run("malformed cookie is reissued", func(t *testing.T) {
-+		bad := "garbage-not-base64!!"
-+		rec, got := issueOn(t, s, []*http.Cookie{{Name: CSRFTokenName, Value: bad}})
-+		if got == bad {
-+			t.Fatal("malformed cookie value reused as the token")
-+		}
-+		if !validCSRFToken(got) {
-+			t.Fatalf("reissued token %q is not well-formed", got)
-+		}
-+		if c := csrfCookieOf(t, rec); c.Value != got {
-+			t.Fatalf("Set-Cookie value %q != reissued token %q", c.Value, got)
-+		}
-+	})
++	tests := []struct {
++		name string
++		run  func(t *testing.T)
++	}{
++		{"issue is idempotent per cookie", func(t *testing.T) {
++			s := newTestServer(t, config.EnvTest)
++			rec1, first := csrfIssue(t, s)
++			if first == "" {
++				t.Fatal("first issue returned an empty token")
++			}
++			if c := csrfCookieOf(t, rec1); c.Value != first {
++				t.Fatalf("cookie value %q != issued token %q", c.Value, first)
++			}
++			// A second request carrying the first cookie must reuse the value,
++			// not mint a fresh one, and needs no redundant Set-Cookie.
++			rec2, second := issueOn(t, s, []*http.Cookie{{Name: CSRFTokenName, Value: first}})
++			if second != first {
++				t.Fatalf("second issue = %q, want reused %q", second, first)
++			}
++			resp := rec2.Result()
++			defer func() { _ = resp.Body.Close() }()
++			if n := len(resp.Cookies()); n != 0 {
++				t.Errorf("reuse path set %d cookie(s), want 0", n)
++			}
++		}},
++		{"issued token meets entropy floor", func(t *testing.T) {
++			s := newTestServer(t, config.EnvTest)
++			_, a := csrfIssue(t, s)
++			_, b := csrfIssue(t, s)
++			raw, err := base64.RawURLEncoding.DecodeString(a)
++			if err != nil {
++				t.Fatalf("issued token not base64url: %v", err)
++			}
++			if len(raw) < csrfTokenBytes {
++				t.Fatalf("issued token carries %d bytes, want >= %d", len(raw), csrfTokenBytes)
++			}
++			if a == b {
++				t.Fatal("two issues produced identical tokens")
++			}
++		}},
++		{"malformed cookie is reissued", func(t *testing.T) {
++			s := newTestServer(t, config.EnvTest)
++			bad := "garbage-not-base64!!"
++			rec, got := issueOn(t, s, []*http.Cookie{{Name: CSRFTokenName, Value: bad}})
++			if got == bad {
++				t.Fatal("malformed cookie value reused as the token")
++			}
++			if !validCSRFToken(got) {
++				t.Fatalf("reissued token %q is not well-formed", got)
++			}
++			if c := csrfCookieOf(t, rec); c.Value != got {
++				t.Fatalf("Set-Cookie value %q != reissued token %q", c.Value, got)
++			}
++		}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, tc.run)
++	}
 +}
 +
 +// TestCSRFCookieFlags: Path=/, HttpOnly and SameSite=Lax always; Secure
@@ -501,10 +509,10 @@ index 0000000..e1f8af2
 +}
 diff --git a/internal/web/middleware_logging_test.go b/internal/web/middleware_logging_test.go
 new file mode 100644
-index 0000000..c774dcd
+index 0000000..5bfade3
 --- /dev/null
 +++ b/internal/web/middleware_logging_test.go
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,407 @@
 +package web
 +
 +import (
@@ -573,9 +581,11 @@ index 0000000..c774dcd
 +	return lines
 +}
 +
-+// TestWithLoggingRequestFields feeds requests through the middleware chain
-+// over a real mux and asserts every request line carries method, route
-+// pattern, status and a duration >= 0 (A-105 contract at unit level).
++// TestWithLoggingRequestFields feeds requests through the production
++// Handler() chain and asserts every request line carries method, route
++// pattern, status and a duration >= 0 (A-105 contract at unit level). The
++// request-id clause of A-105 is deliberately NOT covered here: see the
++// non-coverage note in the body and harness/handoffs/T-102.md (BLOCKED).
 +func TestWithLoggingRequestFields(t *testing.T) {
 +	tests := []struct {
 +		name        string
@@ -624,17 +634,21 @@ index 0000000..c774dcd
 +			if dur < 0 {
 +				t.Errorf("dur_ms = %d, want >= 0", dur)
 +			}
-+			// Known gap, documented here on purpose: through Handler() the
-+			// logged request id is currently the "-" no-id sentinel, because
-+			// web.go composes withRequestID inside withLogging, so the logger
-+			// still holds the pre-enrichment request. "Non-empty" is the
-+			// strongest assertion that can honestly pass at this level; the
-+			// full contract — the logged id IS the request's id — is pinned by
-+			// TestWithLoggingLogsRealRequestID below, and the observed value
-+			// is printed under -v to keep the current behavior visible.
-+			t.Logf("served-chain req_id = %q", f["req_id"])
-+			if f["req_id"] == "" {
-+				t.Error("req_id missing from request line")
++			// Deliberate non-coverage: the logged req_id value. Handler() in
++			// web.go composes withLogging OUTSIDE withRequestID, so the logger
++			// still holds the pre-enrichment request and every served line
++			// logs the "-" no-id sentinel (requestIDOf), while the response
++			// header carries the real id. An assertion that passes today
++			// would rubber-stamp the sentinel as a request id; the failing
++			// assertion belongs with the fix, which is a one-line reorder in
++			// web.go — outside this task's owns, escalated as BLOCKED in
++			// harness/handoffs/T-102.md. No test in this package asserts the
++			// served chain's logged req_id. What IS covered on the served
++			// chain is the id-assigner half of the clause: the response
++			// carries a real 16-hex X-Request-Id for withLogging to have
++			// logged.
++			if id := rec.Header().Get("X-Request-Id"); !reRealRequestID.MatchString(id) {
++				t.Errorf("response X-Request-Id = %q, want a real 16-hex request id", id)
 +			}
 +		})
 +	}
@@ -645,17 +659,22 @@ index 0000000..c774dcd
 +// requestIDOf returns when no id is in the request context.
 +var reRealRequestID = regexp.MustCompile(`^[0-9a-f]{16}$`)
 +
-+// TestWithLoggingLogsRealRequestID pins the A-105 request-id clause at unit
-+// level: withRequestID assigns the id to the response header AND the request
-+// context, and withLogging logs the id from the request context. Composed
-+// with the id-assigner outside the logger — the arrangement in which the
-+// logger can even see the id — the logged req_id must be the request's real
-+// id (equal to the response X-Request-Id), never the "-" sentinel. This pins
-+// the two middleware units' own contract, i.e. what a conforming production
-+// chain must compose; the current Handler() arrangement (id-assigner inner,
-+// logger outer) cannot satisfy this and is documented on
-+// TestWithLoggingRequestFields.
-+func TestWithLoggingLogsRealRequestID(t *testing.T) {
++// TestWithLoggingLogsContextRequestID is a unit test of withLogging's OWN
++// contract: when the request being logged carries an id in its context —
++// which happens exactly when the logger is composed inside withRequestID —
++// the logged req_id is that request's real id (equal to the response
++// X-Request-Id header), never the "-" sentinel. Here withRequestID wraps
++// withLogging only to put a real id in the context; that is the arrangement
++// withLogging was built for, and this test pins what each middleware unit
++// contributes to A-105's request-id clause.
++//
++// NOT production coverage: Handler() in web.go composes the pair the other
++// way around (logger outside id-assigner), so served requests log "-" and no
++// test in this package asserts the served chain's logged req_id — that gap
++// is escalated as BLOCKED in harness/handoffs/T-102.md. Whoever swaps the
++// two composition lines in web.go should move this assertion onto
++// s.Handler() so it guards the real chain.
++func TestWithLoggingLogsContextRequestID(t *testing.T) {
 +	var buf bytes.Buffer
 +	s := bufferedServer(t, config.EnvTest, &buf)
 +	mux := http.NewServeMux()
@@ -717,8 +736,10 @@ index 0000000..c774dcd
 +
 +// jsonRequestLine validates one prod log line as JSON and returns whether it
 +// is a request record (plus its pattern and logged status). Mirrors the A-105
-+// acceptance contract: request lines carry method, pattern key, numeric
-+// status, numeric dur_ms >= 0 and a req_id.
++// acceptance contract for the fields coverable through the served chain:
++// method, pattern key, numeric status, numeric dur_ms >= 0. The logged
++// req_id value is deliberately not checked — see the non-coverage note in
++// TestWithLoggingRequestFields and harness/handoffs/T-102.md (BLOCKED).
 +func jsonRequestLine(t *testing.T, line string) (ok bool, pattern, status string) {
 +	t.Helper()
 +	dec := json.NewDecoder(strings.NewReader(line))
@@ -748,20 +769,21 @@ index 0000000..c774dcd
 +	} else if d, err := dur.Int64(); err != nil || d < 0 {
 +		t.Errorf("dur_ms = %v, want a number >= 0", dur)
 +	}
-+	// See TestWithLoggingRequestFields: through Handler() the logged request
-+	// id is currently the no-id sentinel, so key-presence is the strongest
-+	// assertion that can honestly pass at this level; the real-id contract is
-+	// pinned by TestWithLoggingLogsRealRequestID.
-+	if id, _ := obj["req_id"].(string); id == "" {
-+		t.Errorf("request line without req_id: %s", line)
-+	}
++	// req_id is deliberately not asserted here: through the served chain the
++	// logged value is the "-" no-id sentinel, and neither a value check nor
++	// a mere key-presence check would be an honest assertion of A-105's
++	// request-id clause (see the non-coverage note in
++	// TestWithLoggingRequestFields and the BLOCKED handoff).
 +	return true, pattern, status
 +}
 +
 +// TestProdLoggingIsJSON constructs the logger the way cmd/server/main.go does
 +// in prod (slog.NewJSONHandler) and asserts: every stdout line is JSON,
-+// request lines carry the full field set, each logged status is the status
-+// actually sent, and the injected client IP never appears.
++// request lines carry every field coverable through the served chain
++// (method, pattern key, numeric status, numeric dur_ms; the logged req_id
++// value is deliberately not asserted — see the BLOCKED note in
++// TestWithLoggingRequestFields), each logged status is the status actually
++// sent, and the injected client IP never appears.
 +func TestProdLoggingIsJSON(t *testing.T) {
 +	const clientIP = "203.0.113.77"
 +	var buf bytes.Buffer
