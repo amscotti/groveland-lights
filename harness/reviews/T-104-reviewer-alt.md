@@ -111,7 +111,15 @@ the script is not a no-op.
 `shellcheck`, `docker`, `curl` were denied). The handoff lists this honestly
 (`harness/handoffs/T-104.md:86-95`) and the packet owns no test path and caps
 worker verification at `make check-fast` + reading
-(`harness/tasks/T-104.md:23-36`). The syntax and the contract regexes
+(`harness/tasks/T-104.md:23-36`). The handoff's "How verified" table
+(`harness/handoffs/T-104.md:73-74`) still lists `make check-fast` and
+`make e2e-task TASK=T-104` as green results; both are vacuous for this diff
+(`claims: []`; no Go changed), and the packet itself calls check-fast
+"green trivially" (`harness/tasks/T-104.md:30-31`). The handoff does disclose
+"Unit tests: none added" (`harness/handoffs/T-104.md:81-84`), so this is a
+transparency/labelling issue rather than a false coverage claim; the table
+should mark those two as baseline, not verification of the new files. The
+syntax and the contract regexes
 (`<input[^>]*name="csrf_token"[^>]*>`, `id="probe-count">digits`) trace
 correctly against T-103 and the acceptance draft
 (`acceptance/drafts/probe_go_test.go.txt:51-54`), and the `-f`/`|| die` paths
@@ -152,10 +160,11 @@ behavior, not T-104's code, but the H4 runbook must treat the three
   the real contract strings, not fixture shortcuts.
 - No dead code, no lint-only stubs, no new dependency beyond the prescribed
   `su-exec`, no secret in the diff, no protected path edit.
-- `make check-fast` and `make e2e-task TASK=T-104` are correctly characterized
-  as vacuous for this task (`harness/handoffs/T-104.md:73-74`;
-  `harness/tasks/T-104.md:23-25`); the handoff does not present them as
-  coverage of the new files.
+- `make check-fast` and `make e2e-task TASK=T-104` cannot exercise the new
+  files (`harness/tasks/T-104.md:23-25,30-31`); the handoff discloses that no
+  unit tests were added (`harness/handoffs/T-104.md:81-84`), though its
+  verification table still lists the two green commands without the
+  "baseline" label (finding 5).
 - The Dockerfile/fly.toml/.dockerignore/entrypoint blocks match the packet
   (`harness/tasks/T-104.md:62-89`); `USER root` with an immediate `su-exec`
   drop is the packet-prescribed pattern, not an unexplained privilege change.
