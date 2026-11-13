@@ -5,6 +5,19 @@ primary_region = "ewr"
 
 [build]
 
+# Static, non-secret runtime env baked into the machine at deploy (H4).
+# Secrets (SESSION_KEY, IP_HASH_KEY, ADMIN_TOKEN) are set once with
+# `fly secrets set` — NEVER in this file.
+[env]
+  PORT = "8080"
+  APP_ENV = "prod"
+  DB_PATH = "/data/lights.db"
+  PHOTO_DIR = "/data/photos"
+  TZ = "America/New_York"
+  TOWN_BBOX = "42.70,-71.09,42.82,-70.96"
+  # H5 (custom domain) updates this.
+  BASE_URL = "https://groveland-lights.fly.dev"
+
 [http_service]
   internal_port = 8080
   force_https = true

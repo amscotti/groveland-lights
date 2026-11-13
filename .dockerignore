@@ -6,8 +6,11 @@ playwright-report
 test-results
 dev.db
 dev-photos
+test-run.db
+test-run-photos/
+selftest*
 *.log
 .env
 .env.test
 docs
-harness/runs
+harness
