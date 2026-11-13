@@ -32,12 +32,32 @@ func dsn(dbPath string) string {
 		"&_pragma=foreign_keys(1)"
 }
 
+// errBadDSNPath is wrapped when dbPath contains a character that the DSN
+// grammar would swallow (query separator, fragment separator or a partial
+// percent-escape) instead of treating as part of the filename.
+var errBadDSNPath = errors.New("cannot appear unescaped in a SQLite DSN")
+
+// checkDSNPath rejects paths whose DSN encoding is ambiguous. Open never
+// escapes silently: a path that would be reinterpreted by the driver's URL
+// parsing is refused rather than opened under a different name.
+func checkDSNPath(dbPath string) error {
+	for _, r := range dbPath {
+		if r == '?' || r == '#' || r == '%' {
+			return fmt.Errorf("store: db path %q: %q %w", dbPath, string(r), errBadDSNPath)
+		}
+	}
+	return nil
+}
+
 // Open opens (creating if necessary) the SQLite database at dbPath, applies
 // any not-yet-recorded migrations in filename order, and validates that every
 // already-recorded migration still has the checksum it was applied with. A
 // checksum mismatch returns an error naming the offending file: callers must
 // refuse to boot. Close the returned DB when done.
 func Open(ctx context.Context, dbPath string) (*DB, error) {
+	if err := checkDSNPath(dbPath); err != nil {
+		return nil, err
+	}
 	sqlDB, err := sql.Open("sqlite", dsn(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", dbPath, err)
@@ -63,7 +83,7 @@ func (db *DB) Close() error {
 }
 
 // ErrNotFound is returned when an expected row does not exist.
-var ErrNotFound = fmt.Errorf("store: not found")
+var ErrNotFound = errors.New("store: not found")
 
 // ProbeCount returns the current probe counter value. It wraps ErrNotFound
 // if the seeded probe row is missing.

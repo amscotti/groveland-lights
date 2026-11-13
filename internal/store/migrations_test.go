@@ -2,13 +2,20 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"testing/fstest"
+
+	"github.com/amscotti/groveland-lights/migrations"
 )
 
 // openFresh opens a store on a brand-new database file in a fresh temp dir.
@@ -41,6 +48,20 @@ func embeddedSum(t *testing.T, version string) string {
 	}
 	t.Fatalf("no embedded migration with version %q", version)
 	return ""
+}
+
+// independentSum computes sha256 over the embedded file bytes WITHOUT going
+// through loadMigrations, so the recorded checksum is checked against the
+// digest the contract names (sha256 of file bytes), not merely against the
+// runner's own derivation.
+func independentSum(t *testing.T, file string) string {
+	t.Helper()
+	b, err := fs.ReadFile(migrations.Files, file)
+	if err != nil {
+		t.Fatalf("read embedded %s: %v", file, err)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 func TestMigrationsApplyCleanly(t *testing.T) {
@@ -117,25 +138,62 @@ func checkProbeColumns(t *testing.T, db *DB) {
 		t.Fatalf("pragma table_info: %v", err)
 	}
 	defer rows.Close()
-	var cols []string
+	type col struct {
+		name    string
+		ctype   string
+		notNull int
+		dflt    sql.NullString
+		pk      int
+	}
+	var cols []col
 	for rows.Next() {
 		var cid int
-		var name, ctype string
-		var notNull int
-		var dflt sql.NullString
-		var pk int
-		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+		var c col
+		if err := rows.Scan(&cid, &c.name, &c.ctype, &c.notNull, &c.dflt, &c.pk); err != nil {
 			t.Fatalf("scan table_info: %v", err)
 		}
-		cols = append(cols, name+" "+ctype)
+		cols = append(cols, c)
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate table_info: %v", err)
 	}
-	want := []string{"id INTEGER", "n INTEGER"}
-	if strings.Join(cols, "|") != strings.Join(want, "|") {
-		t.Fatalf("probe columns = %q, want %q", cols, want)
+	if len(cols) != 2 || cols[0].name != "id" || cols[1].name != "n" {
+		t.Fatalf("probe columns = %+v, want [id n]", cols)
 	}
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{name: "id_type_is_integer", got: cols[0].name + " " + cols[0].ctype, want: "id INTEGER"},
+		{name: "id_is_primary_key", got: fmt.Sprint(cols[0].pk), want: "1"},
+		{name: "n_type_is_integer", got: cols[1].name + " " + cols[1].ctype, want: "n INTEGER"},
+		{name: "n_is_not_null", got: fmt.Sprint(cols[1].notNull), want: "1"},
+		// table_info reports DEFAULT 0 as the literal text "0".
+		{name: "n_defaults_to_zero", got: cols[1].dflt.String, want: "0"},
+		{name: "n_is_not_primary_key", got: fmt.Sprint(cols[1].pk), want: "0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("got %q, want %q", tt.got, tt.want)
+			}
+		})
+	}
+
+	t.Run("check_constraint_pins_id_to_1", func(t *testing.T) {
+		// The CHECK constraint lives in the stored DDL, not in table_info.
+		var ddl string
+		if err := db.sql.QueryRowContext(context.Background(),
+			"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'probe'").Scan(&ddl); err != nil {
+			t.Fatalf("select probe DDL: %v", err)
+		}
+		for _, want := range []string{"CHECK (id = 1)", "NOT NULL", "DEFAULT 0"} {
+			if !strings.Contains(ddl, want) {
+				t.Fatalf("probe DDL %q does not contain %q", ddl, want)
+			}
+		}
+	})
 }
 
 func checkCounterStartsAtZero(t *testing.T, db *DB) {
@@ -185,8 +243,12 @@ func checkRecordedChecksum(t *testing.T, db *DB) {
 	if !reHexSum.MatchString(sum) {
 		t.Fatalf("recorded sha256 = %q, want 64-char lowercase hex", sum)
 	}
+	if want := independentSum(t, "0001_init.sql"); sum != want {
+		t.Fatalf("recorded sha256 = %s, want independent sha256 of embedded file bytes %s", sum, want)
+	}
+	// The runner's derivation must agree with the independent digest.
 	if want := embeddedSum(t, "0001_init"); sum != want {
-		t.Fatalf("recorded sha256 = %s, want sha256 of embedded file %s", sum, want)
+		t.Fatalf("recorded sha256 = %s, want runner-derived sha256 %s", sum, want)
 	}
 }
 
@@ -255,6 +317,15 @@ func TestMigrationChecksumGuard(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "recorded") || !strings.Contains(err.Error(), "file") {
 				t.Fatalf("error does not name both recorded and file checksums: %v", err)
+			}
+			// The message must carry the actual values, not just the labels:
+			// the tampered recorded sum and the embedded file sum.
+			if !strings.Contains(err.Error(), tt.tamperWith) {
+				t.Fatalf("error does not name the recorded (tampered) checksum %s: %v", tt.tamperWith, err)
+			}
+			fileSum := embeddedSum(t, "0001_init")
+			if !strings.Contains(err.Error(), fileSum) {
+				t.Fatalf("error does not name the embedded file checksum %s: %v", fileSum, err)
 			}
 			t.Logf("refusal error: %v", err)
 		})
@@ -339,5 +410,168 @@ func TestMigrationsIdempotentOnReopen(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.check(t)
 		})
+	}
+}
+
+// TestRecordedVersionWithoutEmbeddedFileRefusesOpen exercises the branch where
+// schema_migrations names a version that no embedded file provides: the
+// database remembers a migration the binary has never heard of, so boot must
+// refuse. This is the deployment-drift half of the guard (A-104).
+func TestRecordedVersionWithoutEmbeddedFileRefusesOpen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ghost.db")
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	// Record a version no embedded file defines, via the raw driver.
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		"INSERT INTO schema_migrations (version, sha256, applied_at) VALUES (?, ?, ?)",
+		"0002_ghost", strings.Repeat("cd", 32),
+		"2000-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("insert ghost row: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("raw close: %v", err)
+	}
+
+	_, err = Open(ctx, path)
+	if err == nil {
+		t.Fatal("Open with a recorded version absent from the embedded files succeeded, want refusal")
+	}
+	if !strings.Contains(err.Error(), "0002_ghost") {
+		t.Fatalf("error does not name the ghost version 0002_ghost: %v", err)
+	}
+	if errors.Is(err, ErrChecksumMismatch) {
+		t.Fatalf("ghost version must not be reported as a checksum mismatch: %v", err)
+	}
+	t.Logf("refusal error: %v", err)
+}
+
+// TestApplyMigrationsAppliesUnrecordedFilesInOrder drives applyMigrations
+// directly over a synthetic migration set (fstest.MapFS) to prove that
+// unrecorded files apply in filename order: the second file may reference
+// objects created by the first, which fails if the order is violated.
+func TestApplyMigrationsAppliesUnrecordedFilesInOrder(t *testing.T) {
+	ctx := context.Background()
+	fsys := fstest.MapFS{
+		"0001_alpha.sql": &fstest.MapFile{Data: []byte("CREATE TABLE alpha (v TEXT NOT NULL);")},
+		"0002_beta.sql":  &fstest.MapFile{Data: []byte("INSERT INTO alpha (v) VALUES ('from-beta');")},
+	}
+
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "order.db"))
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	defer raw.Close()
+
+	if err := applyMigrations(ctx, raw, fsys); err != nil {
+		t.Fatalf("applyMigrations: %v", err)
+	}
+	fx := orderFixture{t: t, ctx: ctx, raw: raw, fsys: fsys}
+
+	tests := []struct {
+		name  string
+		check func(orderFixture)
+	}{
+		{name: "second_file_applied_after_first", check: checkSecondFileAppliedAfterFirst},
+		{name: "both_versions_recorded_in_order", check: checkBothVersionsRecordedInOrder},
+		{name: "recorded_checksums_are_sha256_of_synthetic_file_bytes", check: checkSyntheticFileChecksums},
+		{name: "reapply_of_same_set_is_a_no_op", check: checkReapplyIsNoOp},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx.t = t
+			tt.check(fx)
+		})
+	}
+}
+
+// orderFixture carries the synthetic migration set and its database to the
+// named sub-checks (keeping each function under the cyclop budget).
+type orderFixture struct {
+	t    *testing.T
+	ctx  context.Context
+	raw  *sql.DB
+	fsys fstest.MapFS
+}
+
+func checkSecondFileAppliedAfterFirst(fx orderFixture) {
+	fx.t.Helper()
+	var v string
+	if err := fx.raw.QueryRowContext(fx.ctx, "SELECT v FROM alpha").Scan(&v); err != nil {
+		fx.t.Fatalf("select from alpha (0002 depends on 0001's table): %v", err)
+	}
+	if v != "from-beta" {
+		fx.t.Fatalf("alpha.v = %q, want from-beta", v)
+	}
+}
+
+func checkBothVersionsRecordedInOrder(fx orderFixture) {
+	fx.t.Helper()
+	rows, err := fx.raw.QueryContext(fx.ctx,
+		"SELECT version FROM schema_migrations ORDER BY version")
+	if err != nil {
+		fx.t.Fatalf("select versions: %v", err)
+	}
+	defer rows.Close()
+	var versions []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			fx.t.Fatalf("scan version: %v", err)
+		}
+		versions = append(versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		fx.t.Fatalf("iterate versions: %v", err)
+	}
+	want := []string{"0001_alpha", "0002_beta"}
+	if strings.Join(versions, ",") != strings.Join(want, ",") {
+		fx.t.Fatalf("recorded versions = %v, want %v", versions, want)
+	}
+}
+
+func checkSyntheticFileChecksums(fx orderFixture) {
+	fx.t.Helper()
+	for _, f := range []string{"0001_alpha.sql", "0002_beta.sql"} {
+		b, err := fs.ReadFile(fx.fsys, f)
+		if err != nil {
+			fx.t.Fatalf("read %s from MapFS: %v", f, err)
+		}
+		sum := sha256.Sum256(b)
+		var recorded string
+		if err := fx.raw.QueryRowContext(fx.ctx,
+			"SELECT sha256 FROM schema_migrations WHERE version = ?",
+			nameWithoutExt(f)).Scan(&recorded); err != nil {
+			fx.t.Fatalf("select recorded sha256 for %s: %v", f, err)
+		}
+		if want := hex.EncodeToString(sum[:]); recorded != want {
+			fx.t.Fatalf("recorded sha256 for %s = %s, want %s", f, recorded, want)
+		}
+	}
+}
+
+func checkReapplyIsNoOp(fx orderFixture) {
+	fx.t.Helper()
+	if err := applyMigrations(fx.ctx, fx.raw, fx.fsys); err != nil {
+		fx.t.Fatalf("re-apply: %v", err)
+	}
+	var n int
+	if err := fx.raw.QueryRowContext(fx.ctx,
+		"SELECT COUNT(*) FROM schema_migrations").Scan(&n); err != nil {
+		fx.t.Fatalf("count rows: %v", err)
+	}
+	if n != 2 {
+		fx.t.Fatalf("schema_migrations rows = %d after re-apply, want 2", n)
 	}
 }
