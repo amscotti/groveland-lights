@@ -1,221 +1,220 @@
-# T-102 — reviewer (correctness / security / architecture) — attempt 4
+# T-102 — reviewer (correctness / security / architecture) — attempt 5
 
-Scope: the attached diff (4 files: `internal/web/csrf.go`,
-`internal/web/csrf_test.go`, `internal/web/middleware_logging_test.go`,
-`harness/handoffs/T-102.md`) reviewed against `harness/tasks/T-102.md`,
-`acceptance/contract.json` (A-102/A-105), the protected acceptance specs, the
-current `internal/web` source, `cmd/server/main.go`, and the harness
-(`cmd/harness/{sched,gate,guard,globmatch}.go`, `harness/policy.json`,
-`harness/state.md`). Shell execution is permission-denied here, so
-check-fast/coverage/e2e exits are taken from the handoff; every code-level
-claim below was verified directly against source, including a fresh
-independent trace of the disputed logging behaviour.
+Scope: the attached diff (4 files: `internal/web/csrf.go`, `internal/web/csrf_test.go`,
+`internal/web/middleware_logging_test.go`, `harness/handoffs/T-102.md`) reviewed against
+`harness/tasks/T-102.md`, `acceptance/contract.json` (A-102/A-105), the protected
+acceptance specs, the current `internal/web` source (`web.go`, `context.go`,
+`web_test.go`, `templates.go` — the diff adds files only, so these ARE the production
+code under test), `cmd/server/main.go`, and the harness (`cmd/harness/{sched,guard}.go`,
+`harness/policy.json`). Shell execution is permission-denied in this environment, so I
+did not re-run check-fast/e2e myself; note, however, that the scheduler generates this
+diff from `git diff main...HEAD` in the worktree only AFTER guard and `make check-fast`
+pass there (`cmd/harness/sched.go:244-265`), so the diff under review is by construction
+the committed state and its suite is green on it. Every code-level claim below was
+verified by direct source trace, including a fresh independent trace of the disputed
+logging chain.
 
-## The blocker: independently confirmed real, pre-existing, and outside owns
+## The blocker: re-confirmed real, pre-existing, outside owns, escalated per packet
 
 - `internal/web/web.go:62-63` composes `h = s.withRequestID(h)` then
-  `h = s.withLogging(h)` — the id-assigner is INNER, the logger OUTER.
-  `withRequestID` enriches only its local request (`web.go:117`
-  `r = r.WithContext(...)`), so `withLogging` logs
-  `requestIDOf(r.Context())` (`web.go:141`) from the pre-enrichment request
-  and `internal/web/context.go:28-33` returns the `"-"` no-id sentinel. Every
-  served request therefore logs `req_id: "-"` while the response
-  `X-Request-Id` header carries the real 16-hex id.
-  `cmd/server/main.go:43` installs `srv.Handler()` unchanged, so production
-  violates the intent of A-105's "request id" clause
-  (`acceptance/contract.json:33-38`), even though the frozen, protected
-  acceptance spec passes — `acceptance/go/m1_guards_test.go:275-277` asserts
-  only non-empty, and `"-"` is non-empty.
-- The defect originates in T-100's `web.go`, which this task is forbidden to
-  edit (`harness/tasks/T-102.md:29-32`: "`web.go` is NOT in your owns — do
-  not edit it. If you believe it needs a change, write `BLOCKED: <reason>`
-  instead"). I verified it is genuinely unfixable within owns
-  (`internal/web/csrf*.go`, `internal/web/middleware*.go`): `Handler()` in
-  `web.go` is the only middleware-composition point, Go permits no method
-  override from another file, and `init()` registers routes, not middleware.
-- The worker used exactly the packet's prescribed escape hatch: the handoff's
-  first line is `BLOCKED: web.go request-ID chain order needs an owner fix`,
-  with root cause, the precise one-line fix (swap the two compositions in
-  `Handler()` so the id exists before the logger runs), and the alternative
-  fix (logger reads `rec.Header().Get("X-Request-Id")` after `next`).
-- The proposed fix is correct and pre-verified:
-  `TestWithLoggingLogsRealRequestID` composes exactly
-  `s.withRequestID(s.withLogging(mux))` — the swapped order — and asserts the
-  logged `req_id` equals the response `X-Request-Id` and matches
-  `^[0-9a-f]{16}$`. After the owner's swap this is the production
-  arrangement, so the fix cannot silently fail.
+  `h = s.withLogging(h)` — id-assigner INNER, logger OUTER.
+  `withRequestID` reassigns only its local request (`web.go:117`
+  `r = r.WithContext(...)`), so `withLogging` still holds the pre-enrichment request
+  when it logs `"req_id", requestIDOf(r.Context())` (`web.go:141`), and
+  `internal/web/context.go:28-33` returns the `"-"` no-id sentinel. Every served
+  request therefore logs `req_id:"-"` while the response `X-Request-Id` header
+  carries the real 16-hex id (`context.go:18-22`: 8 rand bytes → 16 hex chars).
+  `cmd/server/main.go:43` installs `srv.Handler()` unchanged, so production does the
+  same. A-105 (`acceptance/contract.json:34-37`) requires "… and request id", and
+  `"-"` is the explicit no-id sentinel; the protected acceptance test still passes
+  because `acceptance/go/m1_guards_test.go:275-277` checks only non-empty.
+- `web.go` is T-100's, and the packet forbids editing it
+  (`harness/tasks/T-102.md:29-32`), prescribing exactly the `BLOCKED` escalation the
+  handoff's first line delivers, with root cause, line-accurate references (all four
+  verified correct), the one-line owner fix (swap `web.go:62-63`), and the
+  post-fix migration of the unit assertion onto `s.Handler()`.
 
-## Response to the prior BLOCK (reviewer-alt, attempt 3)
+## Response to the prior BLOCK (reviewer-alt, round 2) — verified row by row
 
-- **Real-id guard added.** `TestWithLoggingLogsRealRequestID`
-  (middleware_logging_test.go) pins what reviewer-alt demanded: logged id ==
-  response header, real 16-hex shape, never the `-` sentinel — on the two
-  middleware units composed the way a conforming chain must compose them. If
-  the logger stops logging the context id, or the assigner stops setting
-  header/context, it goes red.
-- **Explicit non-coverage note delivered** — the alternative reviewer-alt's
-  own verdict sanctioned ("with a failing test or an explicit non-coverage
-  note"). Both served-chain assertions (text and JSON) now carry comments
-  marking them as knowingly non-covering for `req_id`, plus a `t.Logf` probe
-  printing the observed sentinel under `-v`, plus the handoff disclosure.
-- **Why not a red test:** structurally infeasible to merge. The scheduler
-  hard-fails on `make check-fast` before reviews run
-  (`cmd/harness/sched.go:254-259`), and the merge gate runs `make check`
-  (`cmd/harness/gate.go:98-105`). A permanently red suite can never pass a
-  review cycle. With `max_attempts: 3` (`harness/policy.json:31`) and this
-  being attempt 4, another BLOCK terminally blocks T-102 → T-103 → T-105
-  (graph deps) for a one-line fix in a file this task is forbidden to touch.
-  Declining to pin `-` explicitly was also correct — that would bless the
-  sentinel as contract.
-- The served-chain tests do not present themselves as covering the request-id
-  clause; the information asymmetry reviewer-alt objected to (gate told
-  "guarded" while it is not) is gone — it is first-line-of-handoff loud.
+Reviewer-alt's verdict sanctioned two acceptable end states: a failing assertion
+through `Handler()`, "or by removing/renaming the weak assertions so they are not
+represented as coverage". The delivered state is the second, and every disposition
+claim in the handoff is accurate against the final diff:
+
+- **The served-chain `req_id` assertions are gone, not weakened further.**
+  `TestWithLoggingRequestFields` asserts method, `pattern=` key presence
+  (`strings.Contains`) + value, logged status cross-checked against the actual
+  `rec.Code` and against the case's expected code, `dur_ms >= 0`, and a real 16-hex
+  response `X-Request-Id` — the id-assigner half, which is genuinely coverable and
+  covered (the header is set at `web.go:116` before `next`, on the same header map
+  the recorder sees). It makes NO assertion on the logged `req_id`, with a comment
+  saying exactly that and why. `jsonRequestLine` likewise checks no `req_id` (neither
+  value nor key presence), with a pointing comment. No `t.Logf` probe remains
+  anywhere in the file.
+- **The composition test is renamed and honestly scoped.**
+  `TestWithLoggingLogsContextRequestID` (ex-`...RealRequestID`) is documented in its
+  doc comment as a unit test of `withLogging`'s OWN contract ("NOT production
+  coverage"), instructing the `web.go` owner to move the assertion onto
+  `s.Handler()` after the swap. This framing is legitimate: the defect is in
+  `Handler()`'s composition (`web.go:62-63`), not in either middleware unit, and the
+  test both pins `withLogging`'s unit behaviour and pre-verifies the handoff's
+  proposed fix. The handoff no longer calls it "the real guard"; its coverage
+  statement now leads with "**No test in `internal/web` asserts the served chain's
+  logged `req_id`.**"
+- Secondary round-2 findings: "full field set" doc reworded to "every field
+  coverable through the served chain" with the exclusion named; `TestCSRFIssue` is
+  now a genuine table (one `run func` row per flow); the idempotency row closes
+  `rec2.Result()`'s body before counting cookies; the `-v`-only `t.Logf` is deleted.
+  All confirmed in the diff.
+- The "why no red test" argument is structurally accurate: the scheduler hard-fails
+  on check-fast before reviews (`cmd/harness/sched.go:254-259`), so a deliberately
+  red test could never reach a review cycle, let alone the merge gate. With
+  `max_attempts: 3` (`harness/policy.json:31`) exhausted, a red suite would terminally
+  stall T-102 → T-103/T-105 without producing the one thing that fixes the contract:
+  the `web.go` owner edit.
+
+The information asymmetry reviewer-alt objected to is gone at every level: no test,
+comment, or handoff sentence in this diff represents the served chain's `req_id` as
+covered.
 
 ## Packet compliance — verified
 
 - **Frozen API exact** (T-102.md:42-55): `IssueCSRFToken(w, r) string`,
-  `var ErrCSRF = errors.New("csrf: token mismatch")`,
-  `VerifyCSRF(r, submitted) error`, `CSRFTokenName = "csrf_token"`
-  (csrf.go:20,44,34,69 per the diff). 32 `crypto/rand` bytes → unpadded
-  base64url (43 chars); cookie `Path=/, HttpOnly, SameSite=Lax, Secure` iff
-  `IsProd()`; idempotent reuse of a well-formed request cookie; stdlib only —
-  `allow_deps: []` respected (verified imports).
-- **All required test cases present** (T-102.md:57-61): missing-cookie /
-  empty-submission / tampered / valid-round-trip / idempotent-per-cookie /
-  cookie-flags-prod-vs-test — `TestCSRFVerify` is a genuine 10-row table with
-  case names as assertions; `TestCSRFIssue` stays as named subtests with a
-  documented reason (multi-step flows), which satisfies the packet's intent.
-- **Middleware guard tests** (T-102.md:63-77): run the real `s.Handler()`
-  chain, parse actual slog text/JSON output, cross-check logged status
-  against `rec.Code` AND the case's expected code (both modes), assert
-  `pattern=` key presence even when the value is empty, no-IP on the exact
-  A-105 payloads (`192.0.2.1` RemoteAddr, `203.0.113.77` XFF), prod JSON via
-  the exact `slog.NewJSONHandler(buf, nil)` construction
-  `cmd/server/main.go:70-75` uses.
-- **Ownership clean**: changed files are `csrf.go`, `csrf_test.go` (owns
-  `internal/web/csrf*.go`), `middleware_logging_test.go` (owns
-  `internal/web/middleware*.go`), and the auto-allowed handoff
-  (`cmd/harness/guard.go:133`); `*` is `[^/]*` (`cmd/harness/globmatch.go:42`)
-  so the test files are covered. `web.go`, `context.go`, `templates.go`,
-  `web_test.go` untouched. No protected path near the diff
-  (`harness/policy.json:37-51`). Test count only increases; no
-  skip/only/fixme markers added (`guard.go:159-169` would catch them).
-- **Markers/lint**: no TODO/FIXME/panic markers; the single `//nolint:gosec`
-  (csrf.go SetCookie) carries a same-line reason (AGENTS rule 9); no
-  `console.log`, no `template.HTML`, no `Phase N` strings, no new deps.
+  `var ErrCSRF = errors.New("csrf: token mismatch")`, `VerifyCSRF(r, submitted) error`,
+  `CSRFTokenName = "csrf_token"`. 32 `crypto/rand` bytes as unpadded base64url
+  (43 chars); cookie `Path=/, HttpOnly, SameSite=Lax, Secure` iff
+  `serverFrom(r.Context()).Cfg.IsProd()`; idempotent reuse of a well-formed request
+  cookie with no redundant Set-Cookie; stdlib only — `allow_deps: []` respected
+  (imports of both new files verified: crypto/{rand,subtle}, encoding/base64,
+  errors, net/http and test-side stdlib + `internal/config`).
+- **All packet-required test cases present** (T-102.md:57-61) with the required
+  names: missing-cookie / empty-submission / tampered-value / valid-round-trip /
+  idempotent-per-cookie / cookie-flags-prod-vs-test, plus extra rows (spaces,
+  non-base64url, padded, over-long, under-length, malformed-cookie-even-when-matched)
+  and the frozen-literal pin `TestCSRFTokenNameFrozen` (round-1 finding 3).
+- **Middleware guard tests** (T-102.md:63-77): `bufferedServer` constructs the logger
+  exactly as `cmd/server/main.go:70-75` does (JSONHandler iff prod, TextHandler
+  otherwise — verified line by line); served-chain tests run the real
+  `s.Handler().ServeHTTP`; no-IP assertions cover both `RemoteAddr` and an injected
+  `X-Forwarded-For: 203.0.113.77` in text AND JSON modes, matching A-105's
+  "never the IP".
+- **e2e claim shape verified**: only `@A-102` has a Playwright spec
+  (`acceptance/e2e/home_m1.spec.ts:18`); `make e2e-task` greps the task's claims with
+  `--pass-with-no-tests` (`Makefile:111-116`), so A-105 contributing no spec is
+  expected, as the packet states ("do not expect a red→green acceptance flip"). The
+  diff adds library/test files only — no route, template, or static change exists
+  that could regress the already-green A-102/A-105 specs.
+- **Ownership clean**: the diff is scheduler-generated from `main...HEAD`
+  (`sched.go:265`), so its four files are the complete change set:
+  `csrf.go`/`csrf_test.go` under owns `internal/web/csrf*.go`,
+  `middleware_logging_test.go` under owns `internal/web/middleware*.go`, plus the
+  auto-allowed handoff (`guard.go:133`). `web.go`, `context.go`, `templates.go`,
+  `web_test.go` untouched; no protected path (`harness/policy.json:37-51`) near the
+  diff.
 
 ## Security
 
 - **CSRF correct for the mandated pattern.** Strict `RawURLEncoding`
   well-formedness on BOTH cookie and submission (rejects padding, non-alphabet
   garbage, invalid lengths), ≥32-byte entropy floor on both sides (the
-  "malformed cookie rejected even when matched" row exercises the floor on
-  the cookie side too), 256-char DoS bound, `subtle.ConstantTimeCompare`,
-  uniform `ErrCSRF` (no cause oracle for the 403 path), entropy failure → 500
-  + `""` rather than rendering a form with an empty token. Cookie flags pinned
-  per env by `TestCSRFCookieFlags` — `Secure=false` outside prod is
-  load-bearing for the frozen A-103 drafts (http + cookie jar in test env).
-- **Inherited, packet-mandated limitation (carried from the prior review,
-  unchanged):** the token is unsigned and session-unbound, so cookie fixation
-  by anything that can set an origin `csrf_token` cookie (subdomain
-  injection, non-TLS hop) passes verification. This is inherent to the
-  packet-mandated "Double-submit cookie pattern, stdlib only"
-  (T-102.md:44) and acceptable for the M1 probe counter; it must be
-  revisited with the Phase 2 sessions work (state.md:73-75) before anything
-  security-relevant relies on it.
-- No XSS surface (base64url tokens, escaped by `html/template` downstream; no
-  `template.HTML`), no SQL, no path traversal, no uploads, no secrets in
-  output; IP non-leak assertions match A-105 byte-for-byte.
-- `IssueCSRFToken` requires the server in context (`serverFrom` panics
-  otherwise, `context.go:42-47`) — documented in its doc comment and in the
-  handoff for T-103; `withServer` is outermost in `Handler()` so every real
-  request satisfies it.
+  "malformed cookie rejected even when matched" row exercises the cookie side),
+  256-char DoS bound on hostile fields/cookies, `subtle.ConstantTimeCompare`,
+  uniform `ErrCSRF` (no cause oracle for the 403 path), entropy failure → 500 +
+  `""` rather than rendering a form with an empty token. Cookie flags pinned per
+  env by `TestCSRFCookieFlags` (`Secure=false` outside prod is load-bearing for the
+  frozen http-based test flows). `IssueCSRFToken`'s documented requirement for the
+  server in context matches `serverFrom`'s panic (`context.go:42-47`), and
+  `withServer` is outermost in `Handler()` (`web.go:66`), so every real request
+  satisfies it.
+- **Inherited, packet-mandated limitation (unchanged from prior reviews):** the
+  token is unsigned and session-unbound, so cookie fixation by anything that can
+  set an origin `csrf_token` cookie passes verification. Inherent to the
+  packet-mandated "Double-submit cookie pattern, stdlib only" (T-102.md:44);
+  acceptable for the M1 probe counter, must be revisited when sessions land before
+  anything security-relevant relies on it.
+- No XSS surface (no `template.HTML`; tokens are base64url, escaped by
+  `html/template` downstream), no SQL, no path traversal, no uploads, no secrets in
+  output (the "k" test keys are pre-existing `web_test.go:21`, not this diff), no
+  client-IP leakage (asserted absent in both log modes). The single
+  `//nolint:gosec` (SetCookie) carries a same-line reason (AGENTS rule 9).
 
 ## Architecture
 
-- Ownership map respected (`docs/spec/architecture.md:19`: `internal/web`
-  owns CSRF). No routes, handlers, templates or static files — the `#map`
-  HTMX rule is untouched by construction. Parse-don't-validate / typed IDs
-  not implicated (library task); the handoff explicitly instructs T-103 to
+- Ownership map respected: `internal/web` owns CSRF and middleware
+  (`docs/spec/architecture.md:19`). No routes, handlers, templates or static files;
+  the `#map`/HTMX rule is untouched by construction. Parse-don't-validate / typed
+  IDs not implicated (library task); the handoff explicitly instructs T-103 to
   parse the form into a typed struct at the boundary before `VerifyCSRF`
-  (AGENTS rule 6). No migrations. `status.Derive` untouched.
+  (AGENTS rule 6). No migrations, `status.Derive` untouched, no "Phase N" strings
+  in code, no `console.log`, no TODO/FIXME.
 
 ## Tests exercise real behaviour
 
-- CSRF tests drive real `Server`s via `httptest` with the server injected at
-  the same context key the chain uses (`ctxServer`), exercising mint,
-  reuse-without-Set-Cookie, reissue-on-malformed-cookie, both Secure
-  polarities, tamper (shape/length-preserving flip mirroring the frozen
-  A-103 draft's `probeTamper`), entropy floor, and uniqueness.
-- Middleware tests run the real chain (`s.Handler().ServeHTTP`) and parse
-  actual slog output; `TestWithLoggingLogsRealRequestID` runs the corrected
-  composition over a real mux (verified: `s.mux` is nil there, so pattern
-  resolution comes from `r.Pattern`, which Go's ServeMux sets on the request
-  object `withLogging` itself holds in that composition — Go 1.27, the
-  pattern behaviour is standard). Recover/panic, header-vs-context id, and
-  per-request id uniqueness all test the real units from `web.go`.
-- Referenced helpers exist: `testConfig` / `newTestServer`
-  (`internal/web/web_test.go:17-35`), `ctxServer` (`context.go:15`),
-  `withRecover`/`withRequestID`/`requestIDOf` (`web.go:101-120`,
-  `context.go:28`).
+- CSRF tests drive real `Server`s via `httptest` with the server injected at the
+  same context key the chain uses (`ctxServer`), covering mint, reuse-without-
+  Set-Cookie, reissue-on-malformed-cookie, both Secure polarities,
+  shape/length-preserving tamper, entropy floor, uniqueness, and the frozen
+  `csrf_token` literal. Referenced helpers exist with the used signatures
+  (`testConfig`/`newTestServer`, `web_test.go:17-35`; `ctxServer`,
+  `context.go:15`).
+- Middleware tests run the real chain (`s.Handler().ServeHTTP`) against a buffered
+  slog handler and parse actual text/JSON output; logged status is cross-checked
+  against the response recorder in both modes; `pattern=` key presence is
+  distinguished from empty value; recover/panic→500+logged, header==context id and
+  per-request id uniqueness pin the real units from `web.go`.
+- `TestWithLoggingLogsContextRequestID` runs the corrected composition over a real
+  mux; its `pattern` assertion relies on Go 1.27's ServeMux setting
+  `Request.Pattern` on the request object `withLogging` holds (the same behaviour
+  `web.go:130` reads as its primary source). I could not execute the suite here
+  (shell denied), but this exact composition and assertion passed guard/check-fast
+  in attempt 4 and is unchanged in substance, and the current attempt reached
+  review, which the scheduler only allows after `check_fast_ok` (`sched.go:254-260`).
 
 ## Findings
 
-1. **Pre-existing, disclosed, escalated — requires owner action, must not be
-   lost by this PASS:** every served request logs `req_id: "-"` while the
-   response header carries the real id (trace above). Not introduced by this
-   diff; unfixable within owns; the handoff's `BLOCKED` first line is the
-   packet-prescribed escalation and includes the verified one-line fix.
-   **Required follow-up for the integrator/web.go owner:** apply the
-   `web.go:62-63` swap (or the header-read alternative), and have the
-   acceptance owner consider tightening
-   `acceptance/go/m1_guards_test.go:275-277` from key-presence to the real-id
-   shape (`^[0-9a-f]{16}$`, or equality with the response `X-Request-Id`).
-   The `state.md:73-75` Phase 2 `web.go` refactor is the natural vehicle if
-   no earlier owner-fix lands. A PASS here certifies the diff, not the
-   served chain's request-id clause.
-2. **Minor — scope of the new real-id guard.** `TestWithLoggingLogsRealRequestID`
-   pins the two units in the corrected composition, not the production
-   `Handler()` arrangement (which is the defect). That is the strongest
-   green-suite guard possible; recorded here so the gate does not over-read
-   it as end-to-end coverage.
-3. **Minor, inherited — `rec2.Result()` body not closed** in the idempotency
-   subtest (`csrf_test.go`, reuse path, `len(rec2.Result().Cookies())`).
-   Recorder `Result()` bodies are in-memory; the handoff reports lint exit 0
-   and the gate re-runs `make check`.
-4. **Minor — handoff line-reference drift:** the check-fast hard-fail is at
-   `cmd/harness/sched.go:254-259` (handoff says 250-253); A-105 sits at
-   `acceptance/contract.json:33-38` (handoff says 34-37). Substance of both
-   claims verified correct.
-5. **Verification limits:** no shell here — `make check-fast`, coverage %,
-   e2e and guard exits are from the handoff (cross-checked against harness
-   source: `max_attempts`, coverage floor 70, `node_modules` allowlist
-   behaviour, `--pass-with-no-tests` for the Playwright-only A-105 grep).
-   The gate re-runs everything on merge.
-
-## Position on the verdict
-
-The diff introduces no defect, weakens no pre-existing test (all tests are
-net additions; nothing on main was narrowed), adds no dependency, respects
-every ownership and marker rule, and delivers each packet deliverable with
-tests that exercise the real code paths. The one unsatisfied contract clause
-is a verified pre-existing defect in a file the packet explicitly forbids
-this task to edit, escalated through the packet's own `BLOCKED` channel with
-root cause, exact fix, and a unit test that pre-verifies the fixed
-composition. Reviewer-alt's sanctioned alternative to the (structurally
-unmergeable) failing test — the explicit non-coverage note — is delivered at
-every level. Blocking again would demand an impossible action and terminally
-stall T-103/T-105 to no corrective effect: the fix requires the `web.go`
-owner either way, and this review + the handoff keep that action on the
-record. The CSRF library itself — which T-103 compiles against — is correct,
-secure for the mandated pattern, and well tested.
+1. **Pre-existing, disclosed, escalated — must survive the merge record.** Every
+   served request logs `req_id:"-"` while the response header carries the real id
+   (trace above). Not introduced by this diff; unfixable within owns; escalated via
+   the packet's own `BLOCKED` channel with a verified one-line fix. **Required
+   follow-up for the `web.go` owner:** swap `web.go:62-63` (or have `withLogging`
+   read `rec.Header().Get("X-Request-Id")` after `next`), then move
+   `TestWithLoggingLogsContextRequestID`'s assertion onto `s.Handler()` as the
+   handoff prescribes; the acceptance owner should consider tightening
+   `acceptance/go/m1_guards_test.go:275-277` from non-empty to the real-id shape.
+   A PASS here certifies the diff, not the served chain's request-id clause.
+2. **Minor — scope of the composition test.** It pins the two middleware units in
+   the corrected arrangement, not the production `Handler()`; recorded so the gate
+   does not over-read it. Its own doc comment and the handoff say the same.
+3. **Minor, inherited — unsigned/session-unbound double-submit token** (see
+   Security); revisit with the sessions work before security-relevant use.
+4. **Verification limits:** shell denied — check-fast, coverage %, e2e and guard
+   exits are from the handoff; structurally corroborated by the scheduler ordering
+   (guard + check-fast precede diff generation and reviews, `sched.go:244-265`), and
+   the merge gate re-runs everything.
 
 ## Checked and not found
 
 No edits to protected paths (`acceptance/`, `cmd/harness/`, Makefile, CI,
-`.golangci.yml`, goldens, `harness/policy.json`); no scratch or probe files
-committed; no `t.Skip`/`test.only`/`.fixme`; no `console.log`; no
-`template.HTML`; no IP/secret leakage; no HTMX/`#map` surface; no handlers
-added; migrations untouched; no fixture special-casing in non-test code.
+`.golangci.yml`, goldens, `harness/policy.json`); no scratch/probe files committed;
+no `t.Skip`/`test.only`/`.fixme` markers; no `t.Logf` residue; no deleted or
+narrowed pre-existing tests (the diff is pure additions; the ratchet counts only
+increase); no new dependencies; no `template.HTML`; no `console.log`; no IP/secret
+leakage; no HTMX/`#map` surface; no handlers added; migrations untouched; no
+fixture special-casing in non-test code.
+
+## Position on the verdict
+
+The diff introduces no defect, weakens nothing, claims nothing false, and delivers
+every packet deliverable with tests that exercise the real code paths. The one
+unsatisfied contract clause is a verified pre-existing defect in a file the packet
+explicitly forbids this task to edit, escalated through the packet's own `BLOCKED`
+channel — and, decisive this round, the previous BLOCK's test-integrity objections
+(assertions that rubber-stamped `"-"`; a composition test misrepresented as the
+production guard) are resolved exactly as reviewer-alt's round-2 verdict sanctioned:
+the weak assertions are removed outright, and what remains is honestly labelled
+non-coverage at every level. Blocking again would demand either an owns violation or
+a permanently red suite that the scheduler structurally cannot merge, while the
+contract fix requires the `web.go` owner either way. The CSRF library that T-103
+compiles against is correct, secure for the mandated pattern, and well tested.
 
 VERDICT: PASS
