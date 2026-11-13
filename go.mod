@@ -4,7 +4,10 @@ go 1.27
 
 tool golang.org/x/vuln/cmd/govulncheck
 
-require modernc.org/sqlite v1.62.0
+require (
+	golang.org/x/image v0.47.0
+	modernc.org/sqlite v1.62.0
+)
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect
