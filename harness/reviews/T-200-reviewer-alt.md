@@ -205,10 +205,11 @@ preview decode race, the blank-token contradiction, the exact processed
 dimensions, the SOF guard, the cross-run pagination sweep and the heading
 tolerance, and the remaining probes are satisfiable against the frozen
 contracts. The findings above are test-quality/coverage issues, not an
-unsatisfiable oracle: the strongest (`Path=/` / MaxAge) is a weak cookie-attribute
-assertion that should be fixed before freeze because T-207 may not edit the
-draft, but the functional exchange, replay, guard, CRUD, duplicate, photo and
-pagination behaviours are all exercised against real servers and a real browser.
+unsatisfiable oracle: the strongest (`Path=/` / MaxAge, `#walk-pos` 6 dp) are
+weak attribute/format assertions worth a one-line strengthening while the
+author still owns the oracle, but the functional exchange, replay, guard, CRUD,
+duplicate, photo and pagination behaviours are all exercised against real
+servers and a real browser.
 None of the findings is a deleted/weakened existing test, a skip, a mock of the
 behaviour under test, or a production special-case. The two contract
 reconciliations (client-side bbox alert; numbered/un-numbered duplicate buttons)
