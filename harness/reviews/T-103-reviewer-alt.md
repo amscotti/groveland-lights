@@ -34,7 +34,7 @@ wiring or boot refusal can merge green.
 
 ### 2. [Medium] The tampered-checksum boot test can hang instead of failing
 
-`cmd/server/boot_test.go:406` runs `_ = cmd.Run()` with no deadline. If the
+`cmd/server/boot_test.go:400` runs `_ = cmd.Run()` with no deadline. If the
 byte flip at `cmd/server/boot_test.go:276-296` does not produce a checksum
 mismatch (wrong token index, a future migration adds a prior 64-hex run,
 SQLite rewrites the page), the child boots successfully, `Run` waits forever,
@@ -51,7 +51,7 @@ sanctioned index pin) would be stronger.
 ### 3. [Medium] The POST store-error 500 branch is untested and the handoff overclaims
 
 The packet requires `POST /probe` store errors to map to 500
-(`harness/tasks/T-103.md:87-88`). `internal/web/probe.go:147-151` has that
+(`harness/tasks/T-103.md:87-88`). `internal/web/probe.go:148-153` has that
 branch, but `TestProbePost` (`internal/web/probe_test.go:202-294`) only covers
 success, CSRF rejection, the no-JS 303 and the parse 400. A regression that
 returned 200/403 on a `ProbeInc` failure would pass. The handoff's
@@ -64,12 +64,12 @@ clauses unguarded.
 ### 4. [Medium] The "store unset answers 500" test cannot prove the nil guard or the log line
 
 `internal/web/probe_test.go:179-198` asserts only the status code. If the
-nil-store check in `internal/web/probe.go:64-70` were removed, `probeCount`
+nil-store check in `internal/web/probe.go:70-76` were removed, `probeCount`
 would panic on the nil `*store.DB`; `withRecover` (`internal/web/web.go:101-111`)
 would catch that panic and answer 500 as well, so the test would still pass.
 The packet requires "store unset or error → 500 with a log line"
 (`harness/tasks/T-103.md:82-83`), and no test captures the logger or checks
-the `s.Log.Error` calls at `internal/web/probe.go:94,150`. Deleting either
+the `s.Log.Error` calls at `internal/web/probe.go:93,149`. Deleting either
 log statement would pass. The handoff's claim that both log lines are
 "asserted via 500" (`harness/handoffs/T-103.md:48`) is an overclaim about
 assertion strength.
@@ -84,7 +84,7 @@ when JS is off (`acceptance/drafts/probe.spec.ts.txt:76-94`, and
 (`internal/web/probe_test.go:297-315`) and the boot-level mount assertions
 (`cmd/server/boot_test.go:310-317`) assert the shell/link, so they pass while
 A-103 assertion #12 cannot. The no-JS POST test
-(`internal/web/probe_test.go:265-294`) asserts only the 303 and the store
+(`internal/web/probe_test.go:254-272`) asserts only the 303 and the store
 count; it does not show that `/` renders the new count, which is the outcome
 the packet itself describes (`harness/tasks/T-103.md:58-59`). The handoff
 documents this as gap (a) (`harness/handoffs/T-103.md:77-108`) and correctly
