@@ -9,7 +9,7 @@
   <table id="light-rows">
     <tbody>
     {{range .Rows}}<tr>
-      <td class="light-thumb"><a href="{{.DetailURL}}"><img src="{{.ImgSrc}}" alt="{{.ImgAlt}}" width="48" height="48"></a></td>
+      <td class="light-thumb"><a href="{{.DetailURL}}"><img src="{{.ImgSrc}}" alt="{{.ImgAlt}}" width="48" height="48"><br><svg width="48" height="1" aria-hidden="true" focusable="false"></svg></a></td>
       <td class="light-cell"><a href="{{.DetailURL}}">{{if .AssetNo}}<span class="light-asset">{{.AssetNo}}</span> {{end}}<strong class="light-label">{{.Label}}</strong></a> <span class="status status-{{.Status}}"><span class="dot" aria-hidden="true"></span>{{.Status}}</span></td>
     </tr>
     {{end}}</tbody>

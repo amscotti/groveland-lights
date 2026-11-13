@@ -2,9 +2,9 @@
   <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M12 2 23 21H1Z" fill="#b45309"></path><rect x="11" y="9" width="2" height="6" fill="#ffffff"></rect><rect x="11" y="17" width="2" height="2" fill="#ffffff"></rect></svg>
   <h2>Possible duplicate</h2>
   <p>An existing light looks the same: <strong>{{.Label}}</strong>{{if .AssetNo}} (asset number {{.AssetNo}}){{end}}, about {{.Distance}} from this position.</p>
-  <p class="dup-actions">
+  <p class="grid dup-actions">
     <button type="submit" name="dup_choice" value="merge">Merge</button>
     {{if not .Numbered}}<button type="submit" name="dup_choice" value="save">Save anyway</button>
-    {{else}}<a href="/admin/walk">Cancel</a>{{end}}
+    {{else}}<a href="/admin/walk">Cancel<svg width="1" height="44" aria-hidden="true" focusable="false"></svg></a>{{end}}
   </p>
 </article>
