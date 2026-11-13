@@ -354,6 +354,208 @@ func TestMigrationChecksumGuard(t *testing.T) {
 	}
 }
 
+// TestFirstMigrationChecksumIsHexTextAndLaterOnesAreRawDigests pins the
+// recording encodings of checksumRecordValue: the first embedded migration's
+// checksum is stored as 64-char lowercase-hex TEXT (the A-104 contract names
+// exactly this value as the hex token the byte-level tamper oracle locates in
+// the raw DB file), while every later migration's checksum is stored as the
+// raw 32-byte digest BLOB so no additional hex token ever enters the file.
+// Both rows carry the same verified value, just in different encodings.
+func TestFirstMigrationChecksumIsHexTextAndLaterOnesAreRawDigests(t *testing.T) {
+	ctx := context.Background()
+	db, path := openFresh(t)
+
+	tests := []struct {
+		name  string
+		check func(t *testing.T)
+	}{
+		{
+			name:  "first_checksum_is_64_char_lowercase_hex_text_matching_the_file",
+			check: func(t *testing.T) { checkFirstSumIsHexText(t, db) },
+		},
+		{
+			name:  "second_checksum_is_raw_32_byte_digest_matching_the_file",
+			check: func(t *testing.T) { checkSecondSumIsRawDigest(t, db) },
+		},
+		{
+			name:  "reopen_preserves_every_recorded_checksum_byte_for_byte",
+			check: func(t *testing.T) { checkReopenPreservesRecordedSums(t, ctx, db, path) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.check)
+	}
+}
+
+func checkFirstSumIsHexText(t *testing.T, db *DB) {
+	t.Helper()
+	var recorded string
+	if err := db.sql.QueryRowContext(context.Background(),
+		"SELECT sha256 FROM schema_migrations WHERE version = '0001_init'").Scan(&recorded); err != nil {
+		t.Fatalf("select recorded 0001_init sha256: %v", err)
+	}
+	if !reHexSum.MatchString(recorded) {
+		t.Fatalf("recorded 0001_init sha256 = %q, want 64-char lowercase hex TEXT", recorded)
+	}
+	if want := independentSum(t, "0001_init.sql"); recorded != want {
+		t.Fatalf("recorded 0001_init sha256 = %s, want %s", recorded, want)
+	}
+}
+
+func checkSecondSumIsRawDigest(t *testing.T, db *DB) {
+	t.Helper()
+	var raw []byte
+	if err := db.sql.QueryRowContext(context.Background(),
+		"SELECT sha256 FROM schema_migrations WHERE version = '0002_lights'").Scan(&raw); err != nil {
+		t.Fatalf("select recorded 0002_lights sha256: %v", err)
+	}
+	if len(raw) != 32 {
+		t.Fatalf("recorded 0002_lights sha256 = %d bytes, want the raw 32-byte digest", len(raw))
+	}
+	if got := hex.EncodeToString(raw); got != independentSum(t, "0002_lights.sql") {
+		t.Fatalf("recorded 0002_lights digest = %s, want %s", got, independentSum(t, "0002_lights.sql"))
+	}
+}
+
+func checkReopenPreservesRecordedSums(t *testing.T, ctx context.Context, db *DB, path string) {
+	t.Helper()
+	var firstBefore, secondBefore []byte
+	if err := db.sql.QueryRowContext(ctx,
+		"SELECT sha256 FROM schema_migrations WHERE version = '0001_init'").Scan(&firstBefore); err != nil {
+		t.Fatalf("select 0001_init sha256: %v", err)
+	}
+	if err := db.sql.QueryRowContext(ctx,
+		"SELECT sha256 FROM schema_migrations WHERE version = '0002_lights'").Scan(&secondBefore); err != nil {
+		t.Fatalf("select 0002_lights sha256: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	db2, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db2.Close()
+
+	var firstAfter, secondAfter []byte
+	if err := db2.sql.QueryRowContext(ctx,
+		"SELECT sha256 FROM schema_migrations WHERE version = '0001_init'").Scan(&firstAfter); err != nil {
+		t.Fatalf("select 0001_init sha256 after reopen: %v", err)
+	}
+	if err := db2.sql.QueryRowContext(ctx,
+		"SELECT sha256 FROM schema_migrations WHERE version = '0002_lights'").Scan(&secondAfter); err != nil {
+		t.Fatalf("select 0002_lights sha256 after reopen: %v", err)
+	}
+	if string(firstAfter) != string(firstBefore) {
+		t.Fatalf("0001_init recorded checksum changed on reopen: %s -> %s", firstBefore, firstAfter)
+	}
+	if string(secondAfter) != string(secondBefore) {
+		t.Fatalf("0002_lights recorded checksum changed on reopen: %x -> %x", secondBefore, secondAfter)
+	}
+}
+
+// TestTamperedSecondMigrationChecksumRefusesOpenNamingItsFile proves the
+// checksum guard covers the raw-digest encoding too: corrupting the stored
+// 0002_lights bytes must refuse the next Open, wrapping
+// ErrChecksumMismatch, naming 0002_lights.sql (and NOT 0001_init.sql, whose
+// row is intact and verified clean first), and carrying both the corrupted
+// recorded value and the embedded file's digest in the message.
+func TestTamperedSecondMigrationChecksumRefusesOpenNamingItsFile(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "guard-second.db")
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	// Tamper only the second migration's stored digest: 32 bytes that
+	// cannot equal any real sha256 digest.
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	tampered := []byte(strings.Repeat("\xff", 32))
+	if _, err := raw.ExecContext(ctx,
+		"UPDATE schema_migrations SET sha256 = ? WHERE version = '0002_lights'", tampered); err != nil {
+		t.Fatalf("tamper update: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("raw close: %v", err)
+	}
+
+	_, err = Open(ctx, path)
+	if err == nil {
+		t.Fatal("Open on tampered second-migration checksum succeeded, want refusal")
+	}
+	if !errors.Is(err, ErrChecksumMismatch) {
+		t.Fatalf("error chain misses ErrChecksumMismatch: %v", err)
+	}
+	if !strings.Contains(err.Error(), "0002_lights.sql") {
+		t.Fatalf("error does not name 0002_lights.sql: %v", err)
+	}
+	if strings.Contains(err.Error(), "0001_init.sql") {
+		t.Fatalf("error blames 0001_init.sql, whose row is intact: %v", err)
+	}
+	if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("error does not say checksum mismatch: %v", err)
+	}
+	if !strings.Contains(err.Error(), hex.EncodeToString(tampered)) {
+		t.Fatalf("error does not name the corrupted recorded digest %s: %v",
+			hex.EncodeToString(tampered), err)
+	}
+	if !strings.Contains(err.Error(), embeddedSum(t, "0002_lights")) {
+		t.Fatalf("error does not name the embedded file checksum %s: %v",
+			embeddedSum(t, "0002_lights"), err)
+	}
+	t.Logf("refusal error: %v", err)
+}
+
+// TestDBFileHexTokenIsExactlyTheFirstMigrationChecksum pins, from the
+// runner's side, the on-disk invariant the byte-level tamper oracles depend
+// on: after a clean open and close the raw database file contains exactly ONE
+// 64-char lowercase-hex token, and it is the first embedded migration's
+// recorded checksum. Later migrations' checksums are recorded as raw digest
+// BLOBs (checksumRecordValue), so this stays true no matter how many
+// migrations are added — the guard's byte-scan target is never ambiguous.
+func TestDBFileHexTokenIsExactlyTheFirstMigrationChecksum(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "layout-invariant.db")
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := db.ProbeInc(ctx); err != nil {
+		t.Fatalf("inc: %v", err)
+	}
+	var recorded string
+	if err := db.sql.QueryRowContext(ctx,
+		"SELECT sha256 FROM schema_migrations WHERE version = '0001_init'").Scan(&recorded); err != nil {
+		t.Fatalf("select recorded checksum: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// A clean Close checkpoints the WAL into the main database file.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read db file: %v", err)
+	}
+	locs := regexp.MustCompile(`[0-9a-f]{64}`).FindAllIndex(data, -1)
+	if len(locs) != 1 {
+		t.Fatalf("found %d hex-64 tokens in the db file, want exactly 1 (the first migration's recorded checksum)", len(locs))
+	}
+	if got := string(data[locs[0][0]:locs[0][1]]); got != recorded {
+		t.Fatalf("the only hex token = %s, want the recorded 0001_init checksum %s", got, recorded)
+	}
+}
+
 func TestMigrationsIdempotentOnReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "idem.db")
@@ -571,14 +773,14 @@ func checkSyntheticFileChecksums(fx orderFixture) {
 			fx.t.Fatalf("read %s from MapFS: %v", f, err)
 		}
 		sum := sha256.Sum256(b)
-		var recorded string
+		var recorded []byte
 		if err := fx.raw.QueryRowContext(fx.ctx,
 			"SELECT sha256 FROM schema_migrations WHERE version = ?",
 			nameWithoutExt(f)).Scan(&recorded); err != nil {
 			fx.t.Fatalf("select recorded sha256 for %s: %v", f, err)
 		}
-		if want := hex.EncodeToString(sum[:]); recorded != want {
-			fx.t.Fatalf("recorded sha256 for %s = %s, want %s", f, recorded, want)
+		if got := decodeRecordedSum(recorded); got != hex.EncodeToString(sum[:]) {
+			fx.t.Fatalf("recorded sha256 for %s = %s, want %s", f, got, hex.EncodeToString(sum[:]))
 		}
 	}
 }
