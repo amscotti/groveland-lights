@@ -146,6 +146,10 @@ func checkOwnership(changed []string, t *Task) (int, bool) {
 		if p == "harness/tasks/graph.json" {
 			continue // scheduler-owned; see checkProtectedPaths
 		}
+		if strings.HasPrefix(p, "test-run.db") || strings.HasPrefix(p, "test-run-photos") {
+			continue // e2e runtime artifacts, gitignored on main; branch-level
+			// add/untrack churn is maintenance, never task work
+		}
 		if !ownsCovered(allowed, p) {
 			fmt.Fprintf(os.Stderr, "ERROR: out of ownership: %s not covered by owns of %s\n", p, t.ID)
 			return exitOwnership, false
