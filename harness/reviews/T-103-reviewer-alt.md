@@ -1,167 +1,196 @@
 # T-103 — reviewer-alt (test integrity / reward hacking)
 
 Scope: the attached diff (`cmd/server/boot_test.go`, `cmd/server/main.go`,
-`internal/web/probe.go`, `internal/web/probe_test.go`, the two templates and
-`harness/handoffs/T-103.md`) read against `harness/tasks/T-103.md`, the frozen
-drafts (`acceptance/drafts/probe_go_test.go.txt`,
-`acceptance/drafts/probe.spec.ts.txt`), `Makefile`,
-`internal/web/web.go`, `internal/web/templates.go`, `internal/web/csrf.go`,
+`internal/web/probe.go`, `internal/web/probe_test.go`,
+`web/templates/pages/index.html`, `web/templates/partials/probe.html`,
+`harness/handoffs/T-103.md`) read against `harness/tasks/T-103.md`, the
+protected drafts (`acceptance/drafts/probe_go_test.go.txt`,
+`acceptance/drafts/probe.spec.ts.txt`, `acceptance/drafts/README.md`),
+`Makefile`, `internal/web/{web,templates,csrf,context}.go`,
 `internal/store/{store,migrations}.go`, `acceptance/e2e/*.spec.ts` and
-`harness/policy.json`. Shell execution is permission-denied in this session,
-so the `make check`/`go test` exit codes are taken from the handoff; the code,
-tests and gate definitions were traced directly.
+`cmd/harness/{guard,ratchet}.go`. Shell execution is permission-denied in this
+session, so the `make check`/`go test` exit codes are taken from the handoff;
+the code, tests, gate definitions and test helpers were traced directly.
 
 ## Findings
 
-### 1. [Medium] The two boot tests are skipped by every automated gate
+### 1. [Medium] The only boot-level tests are excluded from every gate
 
-`cmd/server/boot_test.go:1` carries `//go:build smoke`. No target in the
-Makefile runs `go test -tags smoke`:
-`test-unit` is `go test -race -count=1 -shuffle=on ./...` (`Makefile:64-66`),
-`test-acceptance-go` is `-tags acceptance` (`Makefile:103-105`), and the
-`smoke` target is the Playwright `--grep @smoke` suite (`Makefile:194-197`).
-`make check` (`Makefile:135-136`) therefore never compiles
-`cmd/server/boot_test.go`. The two tests that carry the only runtime evidence
-for the A-103 restart path and the A-104 boot refusal
-(`cmd/server/boot_test.go:302` and `:377`) are effectively skipped by default.
-The handoff is transparent about the manual invocation
-(`harness/handoffs/T-103.md:1,133-143`), and the Makefile is protected, but
-the open issues never ask the Makefile/harness owner to wire a `go test -tags
-smoke` target or move the test into the acceptance suite. Until that happens,
-the tests can rot and a regression in `cmd/server/main.go`'s boot refusal
-will not fail the gate. This is the one real "skipped test" in the diff.
+`cmd/server/boot_test.go:1` carries `//go:build smoke`. No target executes
+that tag: `test-unit` is `go test -race -count=1 -shuffle=on ./...`
+(`Makefile:64-66`), the Go acceptance target is `-tags acceptance`
+(`Makefile:103-105`), the `smoke` target is the Playwright `--grep @smoke`
+suite (`Makefile:194-197`), and `make check` (`Makefile:135-136`) has no
+`-tags smoke` step. As a result, the tests that carry the only runtime
+evidence for the A-103 restart path (`cmd/server/boot_test.go:302`) and the
+A-104 boot refusal (`cmd/server/boot_test.go:377`) are invisible to
+`check-fast`, `make check` and CI. The handoff is transparent about the manual
+invocation (`harness/handoffs/T-103.md:145,161`), and this is additive
+evidence rather than a weakened pre-existing test, but the open issues never
+ask a Makefile/harness owner to wire a `go test -tags smoke` target or move
+the cases into the acceptance suite. Until then this is the one real
+"skipped test" in the diff: a regression in `cmd/server/main.go`'s store
+wiring or boot refusal can merge green.
 
-### 2. [Medium] The new count regex deliberately differs from the frozen draft; A-103 #2/#7 still fail
+### 2. [Medium] The tampered-checksum boot test can hang instead of failing
 
-The frozen Go draft pins `probeReCount = regexp.MustCompile("Count:\\s*(\\d+)")`
-over the raw HTML (`acceptance/drafts/probe_go_test.go.txt:52`). The new
-tests instead parse the span (`internal/web/probe_test.go:23`,
-`cmd/server/boot_test.go:41`), because the packet-frozen markup is
-`<p>Count: <span id="probe-count">N</span></p>`
-(`harness/tasks/T-103.md:49`). That is a truthful response to an inconsistent
-packet/draft pair, and the handoff documents it (`harness/handoffs/T-103.md:103-116`);
-but it means the green unit/smoke tests cannot detect the draft mismatch. The
-only test that would is the inert draft, which is protected. This is a
-narrowed test relative to the contract (the new test passes while the frozen
-assertion fails), not a hidden weakening, but it must be resolved by the
-planner before T-105.
+`cmd/server/boot_test.go:406` runs `_ = cmd.Run()` with no deadline. If the
+byte flip at `cmd/server/boot_test.go:276-296` does not produce a checksum
+mismatch (wrong token index, a future migration adds a prior 64-hex run,
+SQLite rewrites the page), the child boots successfully, `Run` waits forever,
+and the test hangs instead of failing. The frozen A-104 draft explicitly
+turns "keeps running" into a bounded failure with a goroutine plus a 15 s
+timeout (`acceptance/drafts/migrations_go_test.go.txt:281-295`); this
+reimplementation drops that protection. If finding 1 is fixed by wiring the
+smoke tag into a gate, a guard regression would time out the whole job rather
+than report the refusal regression. The first-index heuristic is also weaker
+than the store-side `TestMigrationChecksumGuard`, which tampers the recorded
+row directly; a targeted `UPDATE schema_migrations` (or the draft's
+sanctioned index pin) would be stronger.
 
-### 3. [Medium] The no-JS home section (A-103 #12) is not implemented
+### 3. [Medium] The POST store-error 500 branch is untested and the handoff overclaims
 
-`internal/web/probe_test.go:297-315` pins only the empty shell and the
-`<a href="/probe">Probe</a>` link. The frozen TS draft requires `GET /` to
-server-render the heading, live `Count: N` in `#probe-count`, and a live-form
-CSRF token (`acceptance/drafts/probe.spec.ts.txt:73-94`). The handoff admits
-the gap (`harness/handoffs/T-103.md:66,70-101`) and explains why the owned files
-cannot inject live data through `homeData`/`index.html`; `web.go` is out of
-scope. This is a contract gap, not a test hack, but it is real: the task's
-A-103 claim cannot be validated as delivered.
-
-### 4. [Medium] The POST store-error 500 path is untested
-
-The packet requires POST store errors to map to 500
+The packet requires `POST /probe` store errors to map to 500
 (`harness/tasks/T-103.md:87-88`). `internal/web/probe.go:147-151` has that
-branch, but `TestProbePost` (`internal/web/probe_test.go:202-294`) only tests
-success, CSRF rejection, the no-JS 303 and the parse 400. There is no test for
-a closed/unset store on POST, so a regression that returns 200/403 on
-`probeInc` failure would pass. The handoff's "store unset/error → 500" row
-(`harness/handoffs/T-103.md:41`) covers the GET handler only.
+branch, but `TestProbePost` (`internal/web/probe_test.go:202-294`) only covers
+success, CSRF rejection, the no-JS 303 and the parse 400. A regression that
+returned 200/403 on a `ProbeInc` failure would pass. The handoff's
+"Store unset/error → 500 with log line ✅ TestProbeGet unset/failure rows
+(both log lines asserted via 500)" (`harness/handoffs/T-103.md:48`) is false
+for POST and false about log lines (see finding 4). This is a coverage gap,
+not a hidden bypass, but it leaves one of the packet's explicit handler
+clauses unguarded.
 
-### 5. [Low] The "500 with a log line" contract is not asserted; the handoff overclaims
+### 4. [Medium] The "store unset answers 500" test cannot prove the nil guard or the log line
 
-`internal/web/probe.go:92-95` and `:149-150` log the store failure, but
-`internal/web/probe_test.go:179-198` asserts only the 500 status; no logger
-output is captured. A regression deleting the `s.Log.Error` calls would pass.
-The handoff says "both log lines asserted via 500"
-(`harness/handoffs/T-103.md:41`), which is not true. The packet requires the
-log line (`harness/tasks/T-103.md:82-83`), so this is an assertion weaker than
-the contract.
+`internal/web/probe_test.go:179-198` asserts only the status code. If the
+nil-store check in `internal/web/probe.go:64-70` were removed, `probeCount`
+would panic on the nil `*store.DB`; `withRecover` (`internal/web/web.go:101-111`)
+would catch that panic and answer 500 as well, so the test would still pass.
+The packet requires "store unset or error → 500 with a log line"
+(`harness/tasks/T-103.md:82-83`), and no test captures the logger or checks
+the `s.Log.Error` calls at `internal/web/probe.go:94,150`. Deleting either
+log statement would pass. The handoff's claim that both log lines are
+"asserted via 500" (`harness/handoffs/T-103.md:48`) is an overclaim about
+assertion strength.
 
-### 6. [Low] The hx-attribute assertions are unscoped substring checks
+### 5. [Medium] The no-JS home path is not implemented; the new tests pin the weaker shell
+
+`web/templates/pages/index.html:10-12` emits only the empty shell and a plain
+link. The frozen TS draft requires `GET /` to server-render the heading, a
+live `Count: N` in `#probe-count`, and a working form with a live CSRF token
+when JS is off (`acceptance/drafts/probe.spec.ts.txt:76-94`, and
+`acceptance/drafts/README.md:42`). `TestProbeHomeMount`
+(`internal/web/probe_test.go:297-315`) and the boot-level mount assertions
+(`cmd/server/boot_test.go:310-317`) assert the shell/link, so they pass while
+A-103 assertion #12 cannot. The no-JS POST test
+(`internal/web/probe_test.go:265-294`) asserts only the 303 and the store
+count; it does not show that `/` renders the new count, which is the outcome
+the packet itself describes (`harness/tasks/T-103.md:58-59`). The handoff
+documents this as gap (a) (`harness/handoffs/T-103.md:77-108`) and correctly
+identifies `internal/web/web.go` as the blocker; this is a genuine
+packet/draft contradiction, not a hidden test hack, but the new unit tests
+must not be read as covering the frozen no-JS contract.
+
+### 6. [Low] The hx-* assertions are unscoped substring checks
 
 `internal/web/probe_test.go:135-176` and `:297-315`, and
-`cmd/server/boot_test.go:306-314`, check `hx-get`, `hx-trigger`,
-`hx-target` and `hx-swap` with `strings.Contains` anywhere in the body. They do
-not prove the attributes are on `<section id="probe">` (or that the form's
-`hx-post`/`hx-target`/`hx-swap` are on the `<form>`). A regression moving an
-attribute to a sibling element would still pass. The template is correct; the
-test is weaker than the packet's "section containing the four hx attributes"
-clause (`harness/tasks/T-103.md:41-43`).
+`cmd/server/boot_test.go:310-317`, use `strings.Contains` for `hx-get`,
+`hx-trigger`, `hx-target` and `hx-swap` anywhere in the body. They do not
+prove the attributes are on `<section id="probe">` (or that the form's
+`hx-post`/`hx-target`/`hx-swap` are on the `<form>`). Moving an attribute to
+a sibling element would still pass, so the test is weaker than the packet's
+"section containing the four hx attributes" clause
+(`harness/tasks/T-103.md:41-43`). The template is correct; the assertions
+could be scoped to the opening tag without changing implementation.
 
 ### 7. [Low] POST success only re-parses the count, not "the same fragment"
 
-`internal/web/probe_test.go:203-222` and `cmd/server/boot_test.go:340-351`
+`internal/web/probe_test.go:202-222` and `cmd/server/boot_test.go:345-356`
 assert status 200 and the incremented `#probe-count`, but not that the POST
 response is the fragment (heading, form, hidden token). The contract says
-"200 with the same fragment" (`harness/tasks/T-103.md:56`). The GET test covers
-the fragment; a POST-specific rendering regression that returned only the
-count would pass. The frozen TS draft would catch it on activation, but the
-unit/smoke tests do not.
+"200 with the same fragment" (`harness/tasks/T-103.md:56`). A POST-specific
+rendering regression that returned only the count would pass; the frozen TS
+draft would catch it at activation, but the unit and smoke tests do not.
 
-### 8. [Low] The tampered-checksum test can hang; the tamper is heuristic
+### 8. [Low] The count-regex mismatch is a real draft defect, but the handoff's "sanctioned" disposition is not sanctioned
 
-`cmd/server/boot_test.go:399-400` runs `cmd.Run()` with no deadline. If the
-byte flip does not trigger the checksum refusal, the child starts listening and
-the test hangs instead of failing. The rest of the file is careful with bounded
-waits (`bootWaitHealthy`/`bootStop`). In addition, `bootTamper`
-(`cmd/server/boot_test.go:276-296`) assumes the first 64-hex token in the DB is
-`schema_migrations.sha256`; a more targeted `SELECT sha256 ... WHERE
-version='0001_init'` would be stronger. Neither is a false-green (a wrong
-tamper fails the refusal assertion), but it is a fragile test.
+The frozen Go draft pins `probeReCount = Count:\s*(\d+)` over raw HTML
+(`acceptance/drafts/probe_go_test.go.txt:52`); the packet freezes
+`<p>Count: <span id="probe-count">N</span></p>`
+(`harness/tasks/T-103.md:49`), so the draft regex cannot match the packet
+string. The new tests correctly read the span
+(`internal/web/probe_test.go:23`, `cmd/server/boot_test.go:41`), and this is
+not a hidden weakening. However, the handoff calls the fix a "sanctioned
+mechanical-selector class" edit (`harness/handoffs/T-103.md:120-125`), while
+`acceptance/drafts/README.md:29-32` says the A-104 token-index pin is "the
+only sanctioned edit". The planner must explicitly authorize the regex fix
+(or re-freeze the contract) before T-105; the worker cannot treat it as
+pre-approved. A-103 Go assertions #2 and #7 will fail at activation as
+written.
 
-### 9. [Low] Handoff accuracy: "11 of 12" and the active-suite a11y claim are overstated
+### 9. [Low] Handoff accuracy and process
 
-The handoff counts the two regex-dependent draft assertions (#2 and #7) as one
-"sanctioned mechanical" issue and calls #10/#11 green
-(`harness/handoffs/T-103.md:1,56-66`), but #2 and #7 are two distinct
-assertions and #10 is not executable until T-105. The claim that
-`@A-000 @a11y` passes "with the HTMX-filled section present"
-(`harness/handoffs/T-103.md:64,143`) is also not supported by the active test:
-`acceptance/e2e/home.spec.ts:13-19` does not wait for the probe heading, so the
-axe run can happen before `hx-trigger="load"` inserts the fragment.
-`acceptance/e2e/home_m1.spec.ts:35-52` likewise checks console/CSP at `load`,
-not after the XHR. The active 20/20 green is real, but it does not prove the
-populated fragment is clean; the @A-103 draft is the only test that does that.
-
-### 10. [Low] Process: the handoff is `BLOCKED (partial)` rather than `BLOCKED: ...`
-
-The hard rule says to write `BLOCKED: <reason>` and stop. The first line is
-`BLOCKED (partial)` (`harness/handoffs/T-103.md:1`) and the worker continued to
-deliver. The escalation is honest and the two gaps are documented, so this is
-process hygiene rather than a hidden hack, but the exact handoff contract was
-not followed.
+- The first line is `BLOCKED (partial)` (`harness/handoffs/T-103.md:1`), not
+  the AGENTS.md `BLOCKED: <reason>` form; T-102's precedent used the exact
+  form. The escalation is honest, but the contract was not followed.
+- The intro claims "11 of the 12 frozen A-103 draft assertions are satisfied
+  in substance" (`harness/handoffs/T-103.md:1`), while its own table marks
+  #2, #7 and #12 as ❌ (`:63,68,73`) — nine ✅, not eleven — and #2/#7 are
+  two distinct assertions, not one "sanctioned" issue.
+- The a11y claim "active @A-000 @a11y passes 4/4 projects with the
+  HTMX-filled section present" (`harness/handoffs/T-103.md:72`) is not
+  supported by the active test: `acceptance/e2e/home.spec.ts:13-19` does not
+  wait for the probe heading, so axe may run before the `hx-trigger="load"`
+  XHR inserts the fragment; `acceptance/e2e/home_m1.spec.ts:35-52` likewise
+  checks load-time console/CSP only. The green 20/20 is real but does not
+  prove the populated fragment is clean; the inert @A-103 draft does.
+- The scratch makefile at `harness/handoffs/T-103-scratch.mk`
+  (`harness/handoffs/T-103.md:174-176`) is an extra write under `harness/`
+  beyond the permitted handoff file. It is disclosed, untracked and
+  guard-exempt (`cmd/harness/ratchet.go:127`), but should not become a
+  pattern; the `test-run.db*` artifacts it cleans are a real `.gitignore`
+  follow-up (`playwright.config.ts:56`).
 
 ## Checked and not found
 
-- No `t.Skip`, `test.skip`, `test.only`, `.fixme`, TODO/FIXME or `console.log`
-  in the diff. The only skip is the `smoke` build tag (finding 1).
-- No protected file touched: `acceptance/**`, `Makefile`, `.golangci.yml`,
-  `cmd/harness/**` and golden files are untouched; `harness/handoffs/T-103.md`
-  is the permitted handoff.
-- No existing test was deleted or weakened. All changes are additions except
-  the `main.go` boot wiring and the static `index.html` mount.
-- No mock bypasses the behaviour under test: `probe_test.go` uses a real
-  `store.Open` temp-file DB, the full `s.Handler()` middleware chain, and the
-  real CSRF/store code; `boot_test.go` spawns the real `bin/server`.
-- No fixture-value special-casing in production logic: `Probe`, `Count:`,
+- **No deleted or weakened pre-existing test.** The diff only adds test code;
+  no acceptance/ or existing `*_test.go` file is modified.
+- **No `t.Skip`, `test.skip`, `test.only`, `.fixme`, TODO/FIXME or
+  `console.log`.** The only skip is the additive `smoke` build tag (finding 1).
+- **No mock bypasses the behaviour under test.** `probe_test.go` uses a real
+  `store.Open` temp-file SQLite DB and the full `s.Handler()` middleware
+  chain; `boot_test.go` spawns the real `bin/server`.
+- **No fixture-value special-casing in production code.** `Probe`, `Count:`,
   `#probe-count`, `Increment counter`, `csrf_token` and `/probe` are the
-  feature's frozen markup/route strings, not branches in `probe.go`/`main.go`.
-- No dead code to satisfy linters: `errProbeStoreUnset`, `probeData`,
-  `renderPartial`, `bootReHex`, `bootServer.dbPath/out` are all used.
-- No new dependency; `go.mod`/`go.sum` are absent from the diff.
-- The core assertions can fail: the counter must be exactly `n+1`, rejected
-  tokens must be 403 with an unchanged count, the no-JS POST must be 303 to
-  `/`, the restart must preserve `n+1`, and the tampered DB must exit non-zero
-  with `0001_init.sql`/`checksum` in the output.
+  feature's frozen markup/route strings, not branches in `probe.go` or
+  `main.go`.
+- **No dead code to satisfy linters.** `errProbeStoreUnset`, `probeData`,
+  `renderPartial`, `bootReHex`, `bootServer.dbPath/out`, `syncBuf` and the
+  test helpers are all used.
+- **No protected path touched:** `acceptance/**`, `Makefile`,
+  `.golangci.yml`, `cmd/harness/**` and golden files are absent from the
+  diff; `harness/handoffs/T-103.md` is the permitted handoff.
+- **No new dependency:** `go.mod`/`go.sum` are absent from the diff;
+  `allow_deps: []`.
+- **The core assertions can fail.** The counter must be exactly `n+1`;
+  rejected tokens must be 403 with an unchanged count; the no-HX POST must
+  be 303 to `/`; the restart must preserve `n+1`; the tampered DB must exit
+  non-zero with `0001_init.sql` and `checksum` in the output.
+- **Verification limit:** `make check-fast`, `make check`, coverage and e2e
+  exits are taken from the handoff because shell execution was denied here;
+  the code and handoff claims are internally consistent with the current
+  `web.go`, `templates.go`, `csrf.go` and store sources.
 
-## Verdict
+## Verdict rationale
 
-The work is honest about the two frozen-contract gaps and does not weaken or
-edit a protected test. The defects above are coverage/skip/scoping gaps and
-handoff overclaims, not a hidden special-case or a mock that bypasses the
-behaviour. The handoff's `BLOCKED` escalation is the correct mechanism for
-findings 2 and 3; this verdict is a test-integrity verdict, not an A-103
-acceptance verdict, and the planner must resolve the regex/no-JS gaps before
+The work is honest about the two frozen-contract gaps and does not weaken,
+delete or edit a protected test. The medium findings are a gate-invisible
+smoke suite, a hang-prone boot test, missing POST store-error/log
+assertions, and a no-JS contract the task's owns cannot satisfy. None is a
+hidden special-case, mock bypass or false-green assertion, but findings 1–4
+should be fixed or explicitly tracked before the smoke suite is cited as
+merge evidence, and the planner must resolve the regex/no-JS gaps before
 T-105.
 
 VERDICT: PASS
