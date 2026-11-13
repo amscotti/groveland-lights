@@ -286,7 +286,7 @@
       "milestone": "M2",
       "type": "feature",
       "role": "worker",
-      "title": "Migration 0002 creates the product schema; sqlc-backed lights \u0026 photos store",
+      "title": "Migration 0002 creates the product schema; sqlc-backed lights & photos store",
       "deps": [
         "T-200"
       ],
@@ -425,7 +425,7 @@
       ],
       "ui": true,
       "allow_deps": [],
-      "status": "blocked",
+      "status": "review",
       "attempts": 3,
       "model": "deepseek",
       "budget": {
