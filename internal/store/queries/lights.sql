@@ -49,6 +49,14 @@ RETURNING id, asset_no, kind, label, lat, lon, accuracy_m, photo_id,
   status, status_source, status_at, status_confirmed_at, gml_pole_no,
   created_by, created_at, updated_at, deleted_at;
 
+-- name: UpdateLightPhoto :one
+UPDATE lights
+SET photo_id = sqlc.arg('photo_id'), updated_at = sqlc.arg('updated_at')
+WHERE id = sqlc.arg('id') AND deleted_at IS NULL
+RETURNING id, asset_no, kind, label, lat, lon, accuracy_m, photo_id,
+  status, status_source, status_at, status_confirmed_at, gml_pole_no,
+  created_by, created_at, updated_at, deleted_at;
+
 -- name: SoftDeleteLight :one
 UPDATE lights
 SET deleted_at = ?1

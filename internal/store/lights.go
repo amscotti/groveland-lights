@@ -273,6 +273,25 @@ func (db *DB) EditLight(ctx context.Context, id LightID, label string, assetNo *
 	return lightFromGen(row)
 }
 
+// EditLightPhoto points a live light at another photo row, stamps updated_at
+// and returns the row as read back. The merge-duplicate flow (A-205) uses it to
+// apply the submitted photo to the surviving light. A missing or soft-deleted
+// id wraps ErrNotFound; the photos.id foreign key refuses unknown photo ids.
+func (db *DB) EditLightPhoto(ctx context.Context, id LightID, photo PhotoID) (Light, error) {
+	row, err := db.q.UpdateLightPhoto(ctx, gen.UpdateLightPhotoParams{
+		PhotoID:   sql.NullInt64{Int64: int64(photo), Valid: true},
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		ID:        int64(id),
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Light{}, ErrNotFound
+		}
+		return Light{}, fmt.Errorf("store: edit light %d photo: %w", id, err)
+	}
+	return lightFromGen(row)
+}
+
 // SoftDeleteLight stamps deleted_at on a live light, making it invisible to
 // every read and edit and freeing its asset number. A missing id, a
 // soft-deleted id (the WHERE deleted_at IS NULL guard makes the delete

@@ -801,6 +801,92 @@ func checkEditDuplicate(t *testing.T, ctx context.Context, db *DB) {
 	}
 }
 
+// TestEditLightPhoto pins the merge-photo write (A-205): only photo_id moves,
+// the other columns survive, updated_at is re-stamped, and missing/deleted rows
+// wrap ErrNotFound. A canceled context exercises the driver-error branch (the
+// wrapper must not mistake it for a missing row).
+func TestEditLightPhoto(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name  string
+		check func(t *testing.T, ctx context.Context, db *DB)
+	}{
+		{"edit_sets_photo_and_stamps_updated_at_without_touching_other_columns", checkEditPhotoUpdatesColumn},
+		{"missing_or_deleted_id_wraps_err_not_found", checkEditPhotoNotFound},
+		{"driver_error_is_not_reported_as_not_found", checkEditPhotoDriverError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, _ := openFresh(t)
+			tt.check(t, ctx, db)
+		})
+	}
+}
+
+func checkEditPhotoUpdatesColumn(t *testing.T, ctx context.Context, db *DB) {
+	t.Helper()
+	oldPhoto := mustCreatePhoto(t, ctx, db, "photos/old.jpg", 10, 10)
+	newPhoto := mustCreatePhoto(t, ctx, db, "photos/new.jpg", 20, 20)
+	created := mustCreateLight(t, ctx, db, NewLight{
+		AssetNo: strPtr("GP-017"), Kind: KindPark, Label: "Ball field lamp",
+		Lat: grovelandLat, Lon: grovelandLon, PhotoID: photoPtr(oldPhoto.ID),
+	})
+	backdateLightStamps(t, ctx, db, created.ID)
+	edited, err := db.EditLightPhoto(ctx, created.ID, newPhoto.ID)
+	if err != nil {
+		t.Fatalf("EditLightPhoto: %v", err)
+	}
+	if edited.PhotoID == nil || *edited.PhotoID != newPhoto.ID {
+		t.Fatalf("edited photo_id = %v, want %d", edited.PhotoID, newPhoto.ID)
+	}
+	if edited.Label != "Ball field lamp" || edited.AssetNo == nil || *edited.AssetNo != "GP-017" {
+		t.Fatalf("photo edit changed label/asset: (%q, %v)", edited.Label, edited.AssetNo)
+	}
+	if edited.Lat != grovelandLat || edited.Lon != grovelandLon {
+		t.Fatalf("photo edit changed position = (%v, %v)", edited.Lat, edited.Lon)
+	}
+	checkEditedStamps(t, edited)
+	got, err := db.GetLight(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetLight after photo edit: %v", err)
+	}
+	if got.PhotoID == nil || *got.PhotoID != newPhoto.ID {
+		t.Fatalf("persisted photo_id = %v, want %d", got.PhotoID, newPhoto.ID)
+	}
+}
+
+func checkEditPhotoNotFound(t *testing.T, ctx context.Context, db *DB) {
+	t.Helper()
+	photo := mustCreatePhoto(t, ctx, db, "photos/only.jpg", 10, 10)
+	if _, err := db.EditLightPhoto(ctx, LightID(999999), photo.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("EditLightPhoto(missing) error = %v, want ErrNotFound", err)
+	}
+	l := mustCreateLight(t, ctx, db, NewLight{
+		Kind: KindPark, Label: "Doomed", Lat: grovelandLat, Lon: grovelandLon,
+	})
+	mustSoftDelete(t, ctx, db, l.ID)
+	if _, err := db.EditLightPhoto(ctx, l.ID, photo.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("EditLightPhoto(deleted) error = %v, want ErrNotFound", err)
+	}
+}
+
+func checkEditPhotoDriverError(t *testing.T, ctx context.Context, db *DB) {
+	t.Helper()
+	photo := mustCreatePhoto(t, ctx, db, "photos/only.jpg", 10, 10)
+	l := mustCreateLight(t, ctx, db, NewLight{
+		Kind: KindPark, Label: "Lamp", Lat: grovelandLat, Lon: grovelandLon,
+	})
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	_, err := db.EditLightPhoto(canceled, l.ID, photo.ID)
+	if err == nil {
+		t.Fatal("EditLightPhoto with a canceled context succeeded, want a driver error")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatalf("driver error = %v, want a wrapped DB error, not ErrNotFound", err)
+	}
+}
+
 // TestSoftDeleteLight is the A-208 store half: one delete hides the row from
 // every read, stamps deleted_at in place, and frees the asset number.
 func TestSoftDeleteLight(t *testing.T) {

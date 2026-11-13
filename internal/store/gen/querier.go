@@ -34,6 +34,7 @@ type Querier interface {
 	ProbeInc(ctx context.Context) (int64, error)
 	SoftDeleteLight(ctx context.Context, arg SoftDeleteLightParams) (int64, error)
 	UpdateLight(ctx context.Context, arg UpdateLightParams) (Light, error)
+	UpdateLightPhoto(ctx context.Context, arg UpdateLightPhotoParams) (Light, error)
 }
 
 var _ Querier = (*Queries)(nil)

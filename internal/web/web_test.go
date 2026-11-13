@@ -173,12 +173,23 @@ func TestRenderAll(t *testing.T) {
 			continue
 		}
 		rec := httptest.NewRecorder()
-		s.tpl.renderPage(rec, filepath.Base(name), fixture)
+		if err := s.tpl.renderPage(rec, filepath.Base(name), fixture); err != nil {
+			// renderPage buffers and writes nothing on execution failure; a
+			// swallowed error would snapshot an empty document that
+			// html-validate cannot police.
+			t.Errorf("render %s: %v", name, err)
+			continue
+		}
+		body := rec.Body.String()
+		if strings.TrimSpace(body) == "" {
+			t.Errorf("render %s produced an empty document", name)
+			continue
+		}
 		out := filepath.Join(outDir, strings.TrimPrefix(name, "pages/"))
 		// Trim template-induced trailing whitespace before validating: the
 		// conditional tags leave indented blank lines, which html-validate
 		// would flag although the HTML itself is well-formed.
-		trimmed := regexp.MustCompile(`[ \t]+\n`).ReplaceAllString(rec.Body.String(), "\n")
+		trimmed := regexp.MustCompile(`[ \t]+\n`).ReplaceAllString(body, "\n")
 		if err := os.WriteFile(out, []byte(trimmed), 0o600); err != nil {
 			t.Fatalf("write %s: %v", out, err)
 		}

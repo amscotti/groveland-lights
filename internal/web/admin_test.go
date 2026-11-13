@@ -167,15 +167,86 @@ var reRowsRoot = regexp.MustCompile(`\A\s*<[a-zA-Z][^>]*\bid="rows"`)
 // reCSRFInput captures the rendered hidden csrf_token input's value.
 var reCSRFInput = regexp.MustCompile(`<input[^>]*name="csrf_token"[^>]*value="([^"]+)"`)
 
-// csrfInputValue extracts the form's double-submit token, failing when the
-// rendered form has none.
-func csrfInputValue(t *testing.T, body string) string {
-	t.Helper()
+// csrfInputValue extracts the form's double-submit token. ok is false when the
+// rendered form carries no token (the caller decides whether that is a failure).
+func csrfInputValue(body string) (value string, ok bool) {
 	m := reCSRFInput.FindStringSubmatch(body)
 	if m == nil {
-		t.Fatalf("rendered form has no csrf_token value; body:\n%s", body)
+		return "", false
 	}
-	return m[1]
+	return m[1], true
+}
+
+// reArticle matches one rendered <article> element, including its content.
+var reArticle = regexp.MustCompile(`(?s)<article\b[^>]*>.*?</article>`)
+
+// alertWithMessage extracts the rendered <article> element that carries
+// message. The walk page also renders a permanently hidden, empty
+// #walk-alert article, so a bare role="alert" search would match an element
+// that never shows the rejection.
+func alertWithMessage(t *testing.T, body, message string) string {
+	t.Helper()
+	for _, el := range reArticle.FindAllString(body, -1) {
+		if strings.Contains(el, message) {
+			return el
+		}
+	}
+	t.Fatalf("no rendered <article> carries %q; body:\n%s", message, body)
+	return ""
+}
+
+// assertVisibleAlert asserts the alert that carries message is a visible
+// role=alert element (not the walk page's hidden status placeholder) in both
+// the full-page and HX responses.
+func assertVisibleAlert(t *testing.T, body, message string) {
+	t.Helper()
+	el := alertWithMessage(t, body, message)
+	open := el[:strings.Index(el, ">")+1]
+	if !strings.Contains(open, `role="alert"`) {
+		t.Errorf("alert carrying %q is not role=alert; element:\n%s", message, el)
+	}
+	if regexp.MustCompile(`\bhidden\b`).MatchString(open) {
+		t.Errorf("alert carrying %q is hidden; element:\n%s", message, el)
+	}
+	if !strings.Contains(el, message) {
+		t.Errorf("alert element does not show %q; element:\n%s", message, el)
+	}
+}
+
+// reForm matches one rendered <form> element, including its content.
+var reForm = regexp.MustCompile(`(?s)<form\b[^>]*>.*?</form>`)
+
+// pagerFormOf extracts the pager GET form whose button carries control
+// ("Older"/"Newer"), so the hidden page input is proven to be inside the form
+// that submits to /admin/rows (a stray input elsewhere cannot satisfy it).
+func pagerFormOf(t *testing.T, body, control string) string {
+	t.Helper()
+	for _, f := range reForm.FindAllString(body, -1) {
+		open := f[:strings.Index(f, ">")+1]
+		if !strings.Contains(open, `method="get"`) || !strings.Contains(open, `action="/admin/rows"`) {
+			continue
+		}
+		if strings.Contains(f, ">"+control+"</button>") {
+			return f
+		}
+	}
+	t.Fatalf("no GET /admin/rows pager form with a %s button; body:\n%s", control, body)
+	return ""
+}
+
+// assertPagerPageInput pins the no-JS pager contract: the control's form is a
+// GET to /admin/rows and carries the target page in a hidden input, so a
+// browser submission does not fall back to page 1.
+func assertPagerPageInput(t *testing.T, body, control string, page int) {
+	t.Helper()
+	form := pagerFormOf(t, body, control)
+	want := fmt.Sprintf(`<input type="hidden" name="page" value="%d">`, page)
+	if !strings.Contains(form, want) {
+		t.Errorf("%s pager form lacks %s; form:\n%s", control, want, form)
+	}
+	if !strings.Contains(form, fmt.Sprintf(`hx-get="/admin/rows?page=%d"`, page)) {
+		t.Errorf("%s pager form lacks the matching hx-get; form:\n%s", control, form)
+	}
 }
 
 // dupPanelOf extracts the exact #dup-panel element from a rendered page, so
@@ -276,6 +347,20 @@ func TestAdminRoutesGuard(t *testing.T) {
 			t.Fatalf("status = %d, want 302", rec.Code)
 		}
 	})
+	for _, target := range []string{"/admin/lights/1", "/admin/lights/1/delete"} {
+		t.Run("guard anonymous POST "+target, func(t *testing.T) {
+			s, _ := newAdminServer(t)
+			rec := adminPostMultipart(t, s, target,
+				map[string]string{CSRFTokenName: "x", "label": "x", "asset_no": ""},
+				"", "", nil, "", "", false)
+			if rec.Code != http.StatusFound {
+				t.Fatalf("status = %d, want 302; body:\n%s", rec.Code, rec.Body.String())
+			}
+			if loc := rec.Header().Get("Location"); loc != "/admin/login" {
+				t.Fatalf("Location = %q, want /admin/login", loc)
+			}
+		})
+	}
 }
 
 // --- login page (T-203's frozen strings on T-205's styled pipeline page) ---
@@ -332,7 +417,11 @@ func TestAdminWalkPage(t *testing.T) {
 	if cookieToken == "" {
 		t.Fatal("walk page set no csrf_token cookie")
 	}
-	if inputToken := csrfInputValue(t, body); inputToken != cookieToken {
+	inputToken, ok := csrfInputValue(body)
+	if !ok {
+		t.Fatal("walk page has no csrf_token input value")
+	}
+	if inputToken != cookieToken {
 		t.Errorf("csrf_token input = %q, cookie = %q; the double-submit pair must match", inputToken, cookieToken)
 	}
 }
@@ -481,8 +570,8 @@ func TestAdminCreateValidation(t *testing.T) {
 		body := rec.Body.String()
 		// A parse failure has no submitted values to echo, but the page must
 		// still be a retryable form: a fresh CSRF pair and the town bbox.
-		if csrfInputValue(t, body) == "" {
-			t.Error("parse-error page has an empty csrf_token")
+		if _, ok := csrfInputValue(body); !ok {
+			t.Error("parse-error page has no csrf_token value")
 		}
 		if !strings.Contains(body, `data-bbox="42.7,-71.09,42.82,-70.96"`) {
 			t.Errorf("parse-error page lost the bbox; body:\n%s", body)
@@ -505,16 +594,13 @@ func TestAdminCreateOutsideBBox(t *testing.T) {
 		t.Fatalf("status = %d, want 422; body:\n%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "outside Groveland town bounds") {
-		t.Errorf("body lacks the frozen message; body:\n%s", body)
-	}
-	if !strings.Contains(body, `role="alert"`) {
-		t.Error("rejection page lacks role=alert")
-	}
+	// The rejection itself — not the page's permanently hidden status
+	// placeholder — must be a visible role=alert carrying the frozen message.
+	assertVisibleAlert(t, body, "That position is outside Groveland town bounds")
 	// The no-JS re-render keeps every typed value (asset number included) and
 	// remains a usable form (fresh token + bbox).
-	if csrfInputValue(t, body) == "" {
-		t.Error("rejection page has an empty csrf_token")
+	if _, ok := csrfInputValue(body); !ok {
+		t.Error("rejection page has no csrf_token value")
 	}
 	for _, want := range []string{
 		`value="OUT-1"`, `value="Out lamp"`, `value="42.36"`, `value="-71.06"`,
@@ -535,9 +621,7 @@ func TestAdminCreateOutsideBBox(t *testing.T) {
 	if hx.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("HX status = %d, want 422", hx.Code)
 	}
-	if !strings.Contains(hx.Body.String(), "outside Groveland town bounds") {
-		t.Errorf("HX fragment lacks the frozen message; body:\n%s", hx.Body.String())
-	}
+	assertVisibleAlert(t, hx.Body.String(), "That position is outside Groveland town bounds")
 	if strings.Contains(hx.Body.String(), "<!doctype") || strings.Contains(hx.Body.String(), "<html") {
 		t.Error("HX rejection must be a fragment, not a full page")
 	}
@@ -981,19 +1065,15 @@ func TestAdminPaginationBoundary(t *testing.T) {
 		}
 		assertLampPage(t, "page 1 (51 lights)", body, newest, []int{1})
 		// No-JS pager contract: a GET form submission replaces the action
-		// URL's query, so the page number must travel in a hidden input, not
-		// only in formaction.
-		if !strings.Contains(body, `<input type="hidden" name="page" value="2">`) {
-			t.Errorf("page 1 Older control has no hidden page input; body:\n%s", body)
-		}
+		// URL's query, so the page number must travel in a hidden input inside
+		// the Older form, not only in formaction.
+		assertPagerPageInput(t, body, "Older", 2)
 		page2 := adminGet(t, s, "/admin?page=2", session, false)
 		if page2.Code != http.StatusOK {
 			t.Fatalf("page 2 status = %d, want 200", page2.Code)
 		}
 		assertLampPage(t, "page 2", page2.Body.String(), []int{1}, []int{51})
-		if !strings.Contains(page2.Body.String(), `<input type="hidden" name="page" value="1">`) {
-			t.Errorf("page 2 Newer control has no hidden page input; body:\n%s", page2.Body.String())
-		}
+		assertPagerPageInput(t, page2.Body.String(), "Newer", 1)
 	})
 	t.Run("rows fragment page 2 carries exactly the oldest", func(t *testing.T) {
 		frag := adminGet(t, s, "/admin/rows?page=2", session, true)
@@ -1001,9 +1081,7 @@ func TestAdminPaginationBoundary(t *testing.T) {
 			t.Fatalf("fragment status = %d", frag.Code)
 		}
 		assertLampPage(t, "rows fragment page 2", frag.Body.String(), []int{1}, []int{51})
-		if !strings.Contains(frag.Body.String(), `<input type="hidden" name="page" value="1">`) {
-			t.Errorf("rows fragment Newer control has no hidden page input; body:\n%s", frag.Body.String())
-		}
+		assertPagerPageInput(t, frag.Body.String(), "Newer", 1)
 	})
 }
 
