@@ -1,155 +1,168 @@
 # T-208 — independent review (reviewer-alt)
 
 Basis: the attached diff (`harness/reviews/T-208.diff`), packet
-`harness/tasks/T-208.md`, `harness/findings/judge-M1.md` (gap b), the active
-probe contracts (`acceptance/go/probe_test.go`, `acceptance/e2e/probe.spec.ts`),
-the pre-change sources on main (`internal/web/{web,probe,csrf}.go`,
-`web_test.go`, `probe_test.go`, `middleware_logging_test.go`,
-`cmd/server/{main,boot_test}.go`), and the handoff added by the diff.
+`harness/tasks/T-208.md`, the judge-M1 finding (`harness/findings/judge-M1.md`,
+gap b), the pre-change sources on main (`internal/web/{web,probe,csrf,web_test,
+probe_test,middleware_logging_test}.go`, `cmd/server/{main,boot_test}.go`,
+`web/templates/**`), the active probe contracts (`acceptance/go/probe_test.go`,
+`acceptance/e2e/probe.spec.ts`), and the harness (`cmd/harness/{guard,gate}.go`,
+`harness/state.md`). I also cross-checked the worker's recorded run
+(`harness/runs/20261113T151011/T-208/worker.jsonl`) for the red/green
+Content-Type reproduction and the final `make check` / `git diff --name-only`
+output.
 
-Verification limit: the worktree is at the pre-change `main` (the diff is not
-applied here) and shell execution is denied in this session, so I did not re-run
-`make check-fast`, `make check` or the red/green command. The exit codes below
-are from the handoff; every claim about the code was traced statically against
-the diff and the current sources.
+Verification limit: shell execution is denied in this session, so I did not
+re-run `make check`, the smoke suite or the red-check myself; the recorded
+outputs are quoted where they matter, and every code claim was traced against
+the diff and the on-disk pre-change files. Line numbers below refer to the
+patched tree (the diff is not applied in this checkout).
 
 ## Findings
 
-### 1. [Medium, API/spec — planner decision, not a test-integrity failure] `New` is variadic, not the frozen fixed-arity signature
+### 1. [Medium — planner ratification, not a test weakening] `New` is variadic, not the frozen fixed-arity signature
 
-`internal/web/web.go:46` delivers
-`func New(cfg config.Config, log *slog.Logger, db ...*store.DB) (*Server, error)`,
-with the first element copied at `internal/web/web.go:51-54`. The packet
-(`harness/tasks/T-208.md:36-38`) explicitly freezes
-`New(cfg config.Config, log *slog.Logger, db *store.DB)` and the handoff itself
-says downstream tasks compile against `New(cfg, log, db)`
-(`harness/handoffs/T-208.md` "Frozen API").
+The packet freezes
+`func New(cfg config.Config, log *slog.Logger, db *store.DB) (*Server, error)`
+(`harness/tasks/T-208.md:36-38`); the delivered signature is
+`db ...*store.DB` at `internal/web/web.go:45` (copy at `:46-49`). The forcing
+constraint is real and I verified it: main's
+`internal/web/middleware_logging_test.go:29` calls `New(testConfig(env),
+slog.New(h))` (two args), that file is outside T-208's `owns`, and a fixed
+third parameter cannot compile it. Attempt 1's one-token edit of that file was
+rejected by the ownership guard (exit 4), so the worker chose a variadic third
+parameter rather than a `BLOCKED` handoff, and disclosed the choice
+(`harness/handoffs/T-208.md`, "Spec deviation, precisely").
 
-The reason is real and disclosed: main's `internal/web/middleware_logging_test.go:29`
-calls `New` with two arguments and that file is outside `owns`, so a literal
-3-arg signature cannot compile the branch without a guard failure. The worker
-chose the variadic third parameter instead of editing the unowned test and
-documented the contradiction (`harness/handoffs/T-208.md:53-69, 90-115`).
+Impact: `New(cfg, log, db)` still compiles and wires the store, and `s.Store`
+is the frozen access path, so T-203/T-205/T-206 are unaffected if they use the
+documented form. The cost is loss of the compiler-enforced wiring guarantee: a
+future caller can write `New(cfg, log)` (or pass extra stores that are silently
+ignored past the first) and get a nil `Server.Store` and a runtime 500 instead
+of a compile error. No test assertion was weakened to accommodate this, and the
+handoff documents the trade-off, but the planner should either ratify the
+variadic form or extend `owns` and restore the literal signature; I do not
+block on it.
 
-Test-integrity impact: no test assertion was weakened to accommodate it, and
-`New(cfg, log, db)` still compiles and wires the store. `web_test.go:30-32` adds
-the explicit `nil` argument, which is a test-file edit but not a narrowing.
-The cost is that the compiler no longer enforces the packet's frozen arity: a
-future caller can omit the store and get a silent nil-`Server.Store` (every
-store-backed route 500s) instead of a compile error. The planner should either
-accept the variadic form or extend `owns` and restore the fixed arity; I do not
-block on this because the handoff discloses it and the requested call form
-works.
+### 2. [Medium-Low — coverage theatre] The nil-store 500 subtest cannot detect removal of the nil guard
 
-### 2. [Low, unit coverage of the new API] No unit test calls `New(cfg, log, db)` with a non-nil store
+`internal/web/probe_test.go:184-194` asserts only that `GET /probe` with a
+nil store returns 500. The guard it is meant to pin is
+`if s.Store == nil { return 0, errProbeStoreNotWired }` at
+`internal/web/probe.go:60-62`. If that guard is deleted, `s.Store.ProbeCount`
+dereferences a nil `*store.DB`, `withRecover` in `internal/web/web.go:102-111`
+catches the panic and still writes 500, so the test passes either way. The
+packet also requires the message `probe: store not wired`
+(`harness/tasks/T-208.md:39-41`), but no test asserts it. This row predates
+T-208 in coarse shape, so it is not a newly introduced weakening, but it is
+presented as pinning the new nil path and is weaker than that contract. Fix:
+unit-test `(*Server).probeCount` directly (nil → `errProbeStoreNotWired`), or
+build the server with a captured logger and assert the `probe: count` error
+path rather than relying on the recovered panic.
 
-`internal/web/probe_test.go:34-43` builds the probe server with
-`newTestServer(t, config.EnvTest)` and then assigns `s.Store = db` directly at
-line 42. `internal/web/web_test.go:30-32` passes `nil`. So no test in
-`internal/web` exercises the production call form's positive branch
-(`internal/web/web.go:51-55`).
+### 3. [Low-Medium — test robustness] The wire-level POST row follows redirects and can pass on the home page
 
-The branch is still covered end-to-end by the gate's spawned-binary suites:
-the acceptance Go probe test (`acceptance/go/probe_test.go`, which `make check`
-runs as `acceptance-go`) and the Playwright probe spec start `bin/server`, whose
-`main.go` calls `web.New(cfg, logger, db)`; if `New` stopped copying `db` into
-`Server.Store`, those suites would 500 and fail. The additional smoke-tagged
-`cmd/server/boot_test.go` covers it too but is not in the gate
-(`harness/handoffs/T-208.md` lists it as a separate command). So this is not a
-missing coverage hole so much as a missing unit-level assertion: a
-`check-fast` run alone would not catch a `New` wiring regression. Adding
-`TestNewWiresStore` (or constructing `newProbeServer` through
-`New(testConfig(config.EnvTest), logger, db)`) would close the gap cheaply.
-
-### 3. [Medium–Low, coverage theatre] The nil-store 500 row cannot fail if the nil guard is deleted
-
-`internal/web/probe_test.go:184-194` asserts only `rec.Code == 500`. The guard
-it is meant to protect is `internal/web/probe.go:60-62`
-(`if s.Store == nil { return 0, errProbeStoreNotWired }`). If that guard were
-deleted, `s.Store.ProbeCount(ctx)` would dereference a nil `*store.DB`, and
-`withRecover` in `internal/web/web.go` would catch the panic and answer 500, so
-the test would still pass. The packet (`harness/tasks/T-208.md:39-41`) requires
-the message `probe: store not wired`; no test captures the logger or asserts
-`errProbeStoreNotWired`. The test is therefore weaker than the contract it is
-presented as pinning (this is the same issue the T-103 alt review raised for the
-"store unset" row).
-
-Fix: unit-test `(*Server).probeCount` directly (nil store returns
-`errProbeStoreNotWired`) or capture `s.Log` output and assert the
-`probe: count` log path rather than relying on the recovered panic.
-
-### 4. [Low, test robustness] The wire-level POST row follows redirects; it can pass on the home page instead of the fragment
-
-`internal/web/probe_test.go:385` sends the HTMX POST and
-`internal/web/probe_test.go:403` creates the client as
-`&http.Client{Jar: jar}` with no `CheckRedirect`. The status/header assertions
-are at `internal/web/probe_test.go:412-414`. If `probePost` regressed to a 303
-for the HTMX request, the client would follow to `/`; the home page starts with
-`<!DOCTYPE html>` and sniffs as `text/html; charset=utf-8`, so both the 200 and
-the exact Content-Type assertion would pass on the redirect target — the test
-would not notice that the POST response was not the fragment.
-
-`TestProbePost`'s existing rows would catch the 303 today, so this is not a live
-coverage hole for the handler; it is a robustness flaw in the new test's claim
-to pin both fragment transports. Set
+`internal/web/probe_test.go:403` constructs
+`client := &http.Client{Jar: jar}` with no `CheckRedirect`, and the status/type
+assertions are at `:412-415`. If `probePost` regressed to a 303 for an
+`HX-Request` POST, the client would follow to `/`; the home page starts
+`<!DOCTYPE html>` (`web/templates/base.html:1`), sniffs as
+`text/html; charset=utf-8`, and both the 200 and exact-header assertions would
+pass on the redirect target. `TestProbePost` still catches a 303 today, so this
+is not a live handler-coverage hole, but the new test's claim to pin "both
+fragment transports" is weaker than stated. Fix: set
 `CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }`
-(as `acceptance/go/probe_test.go:177-183` already does) and/or assert the body
-contains `<h2>Probe</h2>` before the header check.
+(as `acceptance/go/probe_test.go:177-183` does) and/or assert the body contains
+`<h2>Probe</h2>` before checking the header.
 
-### 5. [Info] The handoff's `make e2e-task T=` note is accurate but unrelated to the diff
+### 4. [Low — coverage of the new API + handoff accuracy] No unit test exercises `New(cfg, log, db)` with a non-nil store
 
-`harness/handoffs/T-208.md` records that `make e2e-task T=T-208` exits 2
-because the Makefile variable is `TASK`. The Makefile is protected and the
-packet has `claims: []`, so this is documentation for the planner, not a
-test-integrity issue.
+`internal/web/probe_test.go:34-43` builds the server with
+`newTestServer(t, config.EnvTest)` (nil store) and then assigns
+`s.Store = db` directly; `internal/web/web_test.go:30-32` passes nil. So the
+positive branch of the constructor (`st = db[0]`, `internal/web/web.go:46-49`)
+has no in-package test. The path is still covered end-to-end by the gate's
+black-box spawn suites (`make check` includes `test-acceptance-go`, Makefile:136;
+`acceptance/go/probe_test.go` starts the binary, and `main.go` calls
+`New(cfg, logger, db)`), so a constructor-copy bug would fail the gate, but
+`make check-fast` alone would not catch it. This also makes the handoff's
+"every store-backed test call[s] it exactly as the packet freezes:
+`New(cfg, log, db)`" (`harness/handoffs/T-208.md`, "Frozen API") inaccurate for
+the unit tests. A one-row `TestNewWiresStore` (`New(cfg, log, db)` → `s.Store
+== db`) would close the gap and make the handoff true.
+
+### 5. [Info — verified] The Content-Type fix is real and the new test is load-bearing
+
+The fragment begins `<h2>Probe</h2>` (`web/templates/partials/probe.html:1`);
+`<H2` is not in Go's `DetectContentType` HTML signature set, so without the
+explicit header a real server sniffs the response as text/plain. The recorded
+red-check confirms it: with the two `w.Header().Set(probeContentType)` lines
+disabled, `TestProbeFragmentContentType` exits 1 with
+`fragment Content-Type = "text/plain; charset=utf-8"` on both rows
+(`harness/runs/20261113T151011/T-208/worker.jsonl`, the `go test ... -run
+TestProbeFragmentContentType` tool result); with them restored it exits 0 and
+`git diff` on `probe.go` is empty. The new test uses
+`httptest.NewServer` + a real `net/http` client, not a `ResponseRecorder`
+(which never sniffs), so it genuinely exercises the defect. The fix is applied
+only in `probeGet` and the HTMX branch of `probePost`; the no-JS 303 branch and
+`templates.go` (not owned) are untouched, and `http.Error` on a render failure
+overwrites the header with its own text/plain 500.
 
 ## Checked and not found
 
-- **No weakened, deleted, skipped or narrowed test.** The only pre-existing test
-  rows touched are `TestProbeGet`'s "store unset" row and the helper signatures;
-  the "store unset" row is semantically preserved as "store nil" (both exercise
-  the same `Server.Store == nil` path), and all probe rows still run against a
-  real `store.Open` temp SQLite DB. No `t.Skip`, `test.skip`, `test.only` or
-  `.fixme` is added (`harness/reviews/T-208.diff` scan).
-- **No mock bypasses the behaviour under test.** The probe tests use
-  `s.Handler()` (the real middleware chain) and a real SQLite store; the new
-  Content-Type test uses `httptest.NewServer` and a real `net/http` client, not
-  a `ResponseRecorder` (which would not sniff, as the handoff correctly notes).
+- **No weakened, deleted, skipped or narrowed test.** The only pre-existing
+  probe rows touched are helper-signature adaptations and the renamed
+  "store unset" → "store nil" row, which still exercises the same
+  `Server.Store == nil` path against a real `store.Open` temp SQLite DB where a
+  counter is needed. `TestProbePost`'s CSRF matrix (missing/tampered → 403,
+  count unchanged), the 400 parse row, the 303 no-JS row, the fragment markup
+  row and the `#map`/`<html>`/`<body>` ban are all retained. No
+  `t.Skip`/`test.skip`/`test.only`/`.fixme` appears in the diff.
+- **No mocks bypass the behaviour under test.** Probe rows run through the real
+  `s.Handler()` middleware chain against a real SQLite store; the new
+  Content-Type row uses a real server and cookie jar. `probeCountNow` reads the
+  real store to prove the increment, which is a legitimate direct oracle, not a
+  mock.
 - **No fixture-value special-casing in production code.** The only new
   production literal is `probeContentType = "text/html; charset=utf-8"`
-  (`internal/web/probe.go`), which is the HTTP media type required by the
-  packet, not an acceptance fixture string. `Probe`, `Count:`, `#probe-count`,
-  `csrf_token`, `/probe` and `Increment counter` are unchanged feature
-  strings, not branches.
-- **No dead code to satisfy a linter.** `probeContentType` is used twice;
-  `errProbeStoreNotWired` is used by both `probeCount` and `probeInc`; the
-  `len(db) > 0` branch is exercised by the production `New(cfg, log, db)` call
-  (and by `New(cfg, log, nil)` in `web_test.go`). `probeReToken` is used by the
-  new test. No `//nolint` without a reason was added.
-- **The header fix is correct and the new test can fail.** The fragment starts
-  with `<h2>`; Go's `http.DetectContentType` HTML signatures include `<H1` but
-  not `<H2`, so without the explicit header a real server sniffs the fragment as
-  `text/plain; charset=utf-8` and the new exact-header assertion fails. With the
-  two `w.Header().Set(probeContentType)` lines (`internal/web/probe.go:92` for
-  GET, `internal/web/probe.go:161` for the HTMX POST) it passes. The handoff's
-  red/green claim matches this mechanism.
-- **No protected path or dependency change.** The diff touches `cmd/server/{main,boot_test}.go`,
-  `internal/web/{web,web_test,probe,probe_test}.go`, and the permitted handoff;
-  `acceptance/**`, `harness/` orchestration code, `Makefile`, `.golangci.yml`
-  and goldens are absent. No `go.mod`/`go.sum` change (`allow_deps: []`).
+  (`internal/web/probe.go:23`), the exact media type the packet requires.
+  `Probe`, `Count:`, `#probe-count`, `csrf_token`, `/probe` and
+  `Increment counter` remain ordinary template/handler strings; there is no
+  branch on test/fixture values.
+- **No dead code to satisfy linters.** `probeContentType` is used twice
+  (`internal/web/probe.go:94` GET, `:159` POST); `errProbeStoreNotWired` is used
+  by both `probeCount` and `probeInc`; `probeReToken` is used by the new test;
+  the `len(db) > 0` branch is exercised by both `New(cfg, log, nil)` and the
+  production `New(cfg, log, db)` call. No new `//nolint` without a reason, no
+  `TODO`/`FIXME`, no "Phase N" strings in code.
+- **No protected-path or dependency change.** The branch diff touches
+  `cmd/server/{main,boot_test}.go`, `internal/web/{web,probe,probe_test,
+  web_test}.go`, and the permitted handoff; `acceptance/**`, the harness code,
+  `Makefile`, `.golangci.yml`, goldens and `go.mod/go.sum` are absent.
+  `harness/tasks/graph.json`'s `review` → `merging` line is the
+  scheduler/gate artifact, explicitly exempt in the guard
+  (`cmd/harness/guard.go:117-123,146`) and restored by the gate
+  (`cmd/harness/gate.go:122-126`), not a worker edit.
+- **The boot smoke tests remain black-box.** `cmd/server/boot_test.go` is
+  comment-only in this diff (the old comment named `SetProbeStore`); its bodies
+  spawn `bin/server` and are unaffected by the signature change. `make check`
+  still runs `test-acceptance-go`, which exercises `main.go`'s
+  `New(cfg, logger, db)` wiring end-to-end.
 
 ## Verdict rationale
 
-Both deliverables are implemented correctly: the store moved onto `Server`
-without the package global, `SetProbeStore` is gone, and `probeGet` plus the
-HTMX `probePost` branch now send the exact `text/html; charset=utf-8` header.
-No protected or pre-existing test was weakened, deleted, skipped or narrowed,
-and the new wire-level test is a genuine regression guard (it fails on the
-unfixed wire response). The findings above are a disclosed API-shape deviation
-and three test-strength/coverage gaps, not hidden special-cases or fabricated
-verification. The planner should resolve the variadic-vs-fixed `New` signature,
-and the worker (or a follow-up) should add the positive `New` wiring test and
-strengthen the nil-guard and POST-redirect assertions; none of these justify
-blocking the merge of the correct implementation.
+Both deliverables are implemented correctly. `SetProbeStore`/`probeStore`/
+`errProbeStoreUnset` are gone, `Server.Store` is wired from `main.go`, the
+nil-store path still answers 500, and `probeGet` plus the HTMX `probePost`
+branch send the exact `text/html; charset=utf-8` header. The new wire-level
+test genuinely fails without the header and passes with it. No protected or
+pre-existing test was weakened, deleted, skipped or narrowed, and I found no
+fixture special-casing or mock substitution.
+
+The findings are a disclosed API-shape deviation (planner should ratify or
+extend `owns`), two test-strength gaps (the nil-store row cannot distinguish
+the intended error from a recovered panic; the POST row follows redirects), and
+a missing positive unit test for the constructor. None of these changes the
+correctness of the implementation or hides the defect the task was cut to fix,
+so they are follow-up hardening items rather than merge blockers.
 
 VERDICT: PASS
