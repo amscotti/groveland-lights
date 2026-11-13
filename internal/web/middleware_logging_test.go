@@ -66,9 +66,11 @@ func requestTextLines(out string) []string {
 	return lines
 }
 
-// TestWithLoggingRequestFields feeds requests through the middleware chain
-// over a real mux and asserts every request line carries method, route
-// pattern, status and a duration >= 0 (A-105 contract at unit level).
+// TestWithLoggingRequestFields feeds requests through the production
+// Handler() chain and asserts every request line carries method, route
+// pattern, status and a duration >= 0 (A-105 contract at unit level). The
+// request-id clause of A-105 is deliberately NOT covered here: see the
+// non-coverage note in the body and harness/handoffs/T-102.md (BLOCKED).
 func TestWithLoggingRequestFields(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -117,17 +119,21 @@ func TestWithLoggingRequestFields(t *testing.T) {
 			if dur < 0 {
 				t.Errorf("dur_ms = %d, want >= 0", dur)
 			}
-			// Known gap, documented here on purpose: through Handler() the
-			// logged request id is currently the "-" no-id sentinel, because
-			// web.go composes withRequestID inside withLogging, so the logger
-			// still holds the pre-enrichment request. "Non-empty" is the
-			// strongest assertion that can honestly pass at this level; the
-			// full contract — the logged id IS the request's id — is pinned by
-			// TestWithLoggingLogsRealRequestID below, and the observed value
-			// is printed under -v to keep the current behavior visible.
-			t.Logf("served-chain req_id = %q", f["req_id"])
-			if f["req_id"] == "" {
-				t.Error("req_id missing from request line")
+			// Deliberate non-coverage: the logged req_id value. Handler() in
+			// web.go composes withLogging OUTSIDE withRequestID, so the logger
+			// still holds the pre-enrichment request and every served line
+			// logs the "-" no-id sentinel (requestIDOf), while the response
+			// header carries the real id. An assertion that passes today
+			// would rubber-stamp the sentinel as a request id; the failing
+			// assertion belongs with the fix, which is a one-line reorder in
+			// web.go — outside this task's owns, escalated as BLOCKED in
+			// harness/handoffs/T-102.md. No test in this package asserts the
+			// served chain's logged req_id. What IS covered on the served
+			// chain is the id-assigner half of the clause: the response
+			// carries a real 16-hex X-Request-Id for withLogging to have
+			// logged.
+			if id := rec.Header().Get("X-Request-Id"); !reRealRequestID.MatchString(id) {
+				t.Errorf("response X-Request-Id = %q, want a real 16-hex request id", id)
 			}
 		})
 	}
@@ -138,17 +144,22 @@ func TestWithLoggingRequestFields(t *testing.T) {
 // requestIDOf returns when no id is in the request context.
 var reRealRequestID = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
-// TestWithLoggingLogsRealRequestID pins the A-105 request-id clause at unit
-// level: withRequestID assigns the id to the response header AND the request
-// context, and withLogging logs the id from the request context. Composed
-// with the id-assigner outside the logger — the arrangement in which the
-// logger can even see the id — the logged req_id must be the request's real
-// id (equal to the response X-Request-Id), never the "-" sentinel. This pins
-// the two middleware units' own contract, i.e. what a conforming production
-// chain must compose; the current Handler() arrangement (id-assigner inner,
-// logger outer) cannot satisfy this and is documented on
-// TestWithLoggingRequestFields.
-func TestWithLoggingLogsRealRequestID(t *testing.T) {
+// TestWithLoggingLogsContextRequestID is a unit test of withLogging's OWN
+// contract: when the request being logged carries an id in its context —
+// which happens exactly when the logger is composed inside withRequestID —
+// the logged req_id is that request's real id (equal to the response
+// X-Request-Id header), never the "-" sentinel. Here withRequestID wraps
+// withLogging only to put a real id in the context; that is the arrangement
+// withLogging was built for, and this test pins what each middleware unit
+// contributes to A-105's request-id clause.
+//
+// NOT production coverage: Handler() in web.go composes the pair the other
+// way around (logger outside id-assigner), so served requests log "-" and no
+// test in this package asserts the served chain's logged req_id — that gap
+// is escalated as BLOCKED in harness/handoffs/T-102.md. Whoever swaps the
+// two composition lines in web.go should move this assertion onto
+// s.Handler() so it guards the real chain.
+func TestWithLoggingLogsContextRequestID(t *testing.T) {
 	var buf bytes.Buffer
 	s := bufferedServer(t, config.EnvTest, &buf)
 	mux := http.NewServeMux()
@@ -210,8 +221,10 @@ func TestWithLoggingOmitsClientIP(t *testing.T) {
 
 // jsonRequestLine validates one prod log line as JSON and returns whether it
 // is a request record (plus its pattern and logged status). Mirrors the A-105
-// acceptance contract: request lines carry method, pattern key, numeric
-// status, numeric dur_ms >= 0 and a req_id.
+// acceptance contract for the fields coverable through the served chain:
+// method, pattern key, numeric status, numeric dur_ms >= 0. The logged
+// req_id value is deliberately not checked — see the non-coverage note in
+// TestWithLoggingRequestFields and harness/handoffs/T-102.md (BLOCKED).
 func jsonRequestLine(t *testing.T, line string) (ok bool, pattern, status string) {
 	t.Helper()
 	dec := json.NewDecoder(strings.NewReader(line))
@@ -241,20 +254,21 @@ func jsonRequestLine(t *testing.T, line string) (ok bool, pattern, status string
 	} else if d, err := dur.Int64(); err != nil || d < 0 {
 		t.Errorf("dur_ms = %v, want a number >= 0", dur)
 	}
-	// See TestWithLoggingRequestFields: through Handler() the logged request
-	// id is currently the no-id sentinel, so key-presence is the strongest
-	// assertion that can honestly pass at this level; the real-id contract is
-	// pinned by TestWithLoggingLogsRealRequestID.
-	if id, _ := obj["req_id"].(string); id == "" {
-		t.Errorf("request line without req_id: %s", line)
-	}
+	// req_id is deliberately not asserted here: through the served chain the
+	// logged value is the "-" no-id sentinel, and neither a value check nor
+	// a mere key-presence check would be an honest assertion of A-105's
+	// request-id clause (see the non-coverage note in
+	// TestWithLoggingRequestFields and the BLOCKED handoff).
 	return true, pattern, status
 }
 
 // TestProdLoggingIsJSON constructs the logger the way cmd/server/main.go does
 // in prod (slog.NewJSONHandler) and asserts: every stdout line is JSON,
-// request lines carry the full field set, each logged status is the status
-// actually sent, and the injected client IP never appears.
+// request lines carry every field coverable through the served chain
+// (method, pattern key, numeric status, numeric dur_ms; the logged req_id
+// value is deliberately not asserted — see the BLOCKED note in
+// TestWithLoggingRequestFields), each logged status is the status actually
+// sent, and the injected client IP never appears.
 func TestProdLoggingIsJSON(t *testing.T) {
 	const clientIP = "203.0.113.77"
 	var buf bytes.Buffer

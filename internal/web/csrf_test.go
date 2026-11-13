@@ -124,61 +124,69 @@ func TestCSRFVerify(t *testing.T) {
 	}
 }
 
-// TestCSRFIssue covers IssueCSRFToken: reuse, entropy, malformed-cookie
-// reissue. Case names are the assertions. These cases stay as named subtests
-// (rather than rows of one table) because each needs its own multi-step
-// assertion flow; TestCSRFVerify and TestCSRFCookieFlags carry the
-// table-driven cases.
+// TestCSRFIssue covers IssueCSRFToken table-driven: reuse, entropy,
+// malformed-cookie reissue. Case names are the assertions; each row is a
+// self-contained flow, so the table carries funcs rather than plain values
+// (the flows issue, re-request and inspect cookies in different orders).
 func TestCSRFIssue(t *testing.T) {
-	s := newTestServer(t, config.EnvTest)
-
-	t.Run("issue is idempotent per cookie", func(t *testing.T) {
-		rec1, first := csrfIssue(t, s)
-		if first == "" {
-			t.Fatal("first issue returned an empty token")
-		}
-		if c := csrfCookieOf(t, rec1); c.Value != first {
-			t.Fatalf("cookie value %q != issued token %q", c.Value, first)
-		}
-		// A second request carrying the first cookie must reuse the value,
-		// not mint a fresh one, and needs no redundant Set-Cookie.
-		rec2, second := issueOn(t, s, []*http.Cookie{{Name: CSRFTokenName, Value: first}})
-		if second != first {
-			t.Fatalf("second issue = %q, want reused %q", second, first)
-		}
-		if n := len(rec2.Result().Cookies()); n != 0 {
-			t.Errorf("reuse path set %d cookie(s), want 0", n)
-		}
-	})
-
-	t.Run("issued token meets entropy floor", func(t *testing.T) {
-		_, a := csrfIssue(t, s)
-		_, b := csrfIssue(t, s)
-		raw, err := base64.RawURLEncoding.DecodeString(a)
-		if err != nil {
-			t.Fatalf("issued token not base64url: %v", err)
-		}
-		if len(raw) < csrfTokenBytes {
-			t.Fatalf("issued token carries %d bytes, want >= %d", len(raw), csrfTokenBytes)
-		}
-		if a == b {
-			t.Fatal("two issues produced identical tokens")
-		}
-	})
-
-	t.Run("malformed cookie is reissued", func(t *testing.T) {
-		bad := "garbage-not-base64!!"
-		rec, got := issueOn(t, s, []*http.Cookie{{Name: CSRFTokenName, Value: bad}})
-		if got == bad {
-			t.Fatal("malformed cookie value reused as the token")
-		}
-		if !validCSRFToken(got) {
-			t.Fatalf("reissued token %q is not well-formed", got)
-		}
-		if c := csrfCookieOf(t, rec); c.Value != got {
-			t.Fatalf("Set-Cookie value %q != reissued token %q", c.Value, got)
-		}
-	})
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"issue is idempotent per cookie", func(t *testing.T) {
+			s := newTestServer(t, config.EnvTest)
+			rec1, first := csrfIssue(t, s)
+			if first == "" {
+				t.Fatal("first issue returned an empty token")
+			}
+			if c := csrfCookieOf(t, rec1); c.Value != first {
+				t.Fatalf("cookie value %q != issued token %q", c.Value, first)
+			}
+			// A second request carrying the first cookie must reuse the value,
+			// not mint a fresh one, and needs no redundant Set-Cookie.
+			rec2, second := issueOn(t, s, []*http.Cookie{{Name: CSRFTokenName, Value: first}})
+			if second != first {
+				t.Fatalf("second issue = %q, want reused %q", second, first)
+			}
+			resp := rec2.Result()
+			defer func() { _ = resp.Body.Close() }()
+			if n := len(resp.Cookies()); n != 0 {
+				t.Errorf("reuse path set %d cookie(s), want 0", n)
+			}
+		}},
+		{"issued token meets entropy floor", func(t *testing.T) {
+			s := newTestServer(t, config.EnvTest)
+			_, a := csrfIssue(t, s)
+			_, b := csrfIssue(t, s)
+			raw, err := base64.RawURLEncoding.DecodeString(a)
+			if err != nil {
+				t.Fatalf("issued token not base64url: %v", err)
+			}
+			if len(raw) < csrfTokenBytes {
+				t.Fatalf("issued token carries %d bytes, want >= %d", len(raw), csrfTokenBytes)
+			}
+			if a == b {
+				t.Fatal("two issues produced identical tokens")
+			}
+		}},
+		{"malformed cookie is reissued", func(t *testing.T) {
+			s := newTestServer(t, config.EnvTest)
+			bad := "garbage-not-base64!!"
+			rec, got := issueOn(t, s, []*http.Cookie{{Name: CSRFTokenName, Value: bad}})
+			if got == bad {
+				t.Fatal("malformed cookie value reused as the token")
+			}
+			if !validCSRFToken(got) {
+				t.Fatalf("reissued token %q is not well-formed", got)
+			}
+			if c := csrfCookieOf(t, rec); c.Value != got {
+				t.Fatalf("Set-Cookie value %q != reissued token %q", c.Value, got)
+			}
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, tc.run)
+	}
 }
 
 // TestCSRFCookieFlags: Path=/, HttpOnly and SameSite=Lax always; Secure
