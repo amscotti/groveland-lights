@@ -198,13 +198,14 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "merging",
-      "attempts": 3,
+      "status": "blocked",
+      "attempts": 4,
       "model": "glm",
       "budget": {
         "steps": 200,
         "wall_min": 90
-      }
+      },
+      "findings": "gate: make check failed: exit status 2"
     }
   ]
 }
