@@ -425,8 +425,8 @@
       ],
       "ui": true,
       "allow_deps": [],
-      "status": "review",
-      "attempts": 1,
+      "status": "rework",
+      "attempts": 2,
       "model": "deepseek",
       "budget": {
         "steps": 200,
