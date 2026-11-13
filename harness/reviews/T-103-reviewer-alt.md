@@ -90,7 +90,7 @@ clause (`harness/tasks/T-103.md:41-43`).
 
 ### 7. [Low] POST success only re-parses the count, not "the same fragment"
 
-`internal/web/probe_test.go:218-238` and `cmd/server/boot_test.go:345-357`
+`internal/web/probe_test.go:203-222` and `cmd/server/boot_test.go:340-351`
 assert status 200 and the incremented `#probe-count`, but not that the POST
 response is the fragment (heading, form, hidden token). The contract says
 "200 with the same fragment" (`harness/tasks/T-103.md:56`). The GET test covers
