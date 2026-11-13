@@ -1,198 +1,266 @@
-# T-200 — reviewer-alt (test integrity / reward hacking), attempt 2
+# T-200 — reviewer-alt (test integrity / reward hacking), attempt 3
 
-Review basis: the attached diff (`harness/reviews/T-200.diff`), the operative
-packet `harness/tasks/T-200.md`, the downstream packets/contracts (T-201,
-T-203, T-204, T-205, T-207, `acceptance/contract.json`), the real test topology
-(`playwright.config.ts`, `Makefile`, `scripts/holdout-run.sh`, `.gitignore`),
-and the checked-in existing acceptance suite.
+Review basis: the attached diff (`harness/reviews/T-200.diff`, also the file
+under review), the operative packet `harness/tasks/T-200.md` (including the
+attempt-1/2 reviews appended to it), the downstream packets
+`T-201/T-203/T-204/T-205/T-206/T-207`, `acceptance/contract.json`,
+`playwright.config.ts`, `Makefile`, `.gitignore`,
+`cmd/harness/{guard,ratchet}.go`, `harness/.ratchet.json`,
+`harness/protected.sha256`, `internal/web/csrf.go`,
+`migrations/0001_init.sql`, the checked-in `acceptance/` suite and the
+installed Playwright types.
 
 Verification limits: the diff is **not applied** in this checkout (there is no
-`acceptance/drafts/`, and `testdata/photos/*` is absent), shell execution is
-denied in this session, and the holdout repo is outside the sandbox. I could
-therefore not execute the handoff's commands; all findings below are static
-checks of the drafted bytes and the contracts they freeze. The blocker is a
-static certainty (an interaction is simply missing), not an environmental
-guess. The handoff's exit codes and the holdout results are taken on trust.
+`acceptance/drafts/`, `testdata/photos/*` is empty and
+`testdata/schema.expected.sql` is absent), shell execution is denied in this
+session, and the holdout repo is outside the sandbox. Every finding below is a
+static check of the diffed bytes against the contracts and repo facts I could
+read. The handoff's executed red/green results and the holdout commits are
+taken on trust; the line references are to the activated draft paths (the
+files as T-207 will `git mv` them).
 
-## Findings
+## Attempt-2 findings: verified fixed in the diff
 
-### 1. [Blocker] `@A-205` never submits its first create — the test can never pass
+I re-checked all twelve attempt-2 alt findings against the bytes:
 
-`acceptance/drafts/admin-walk.spec.ts.txt:311` calls
-`addLightFromForm(page, { assetNo: asset, label: 'Dup panel lamp' })`, then
-`:312` immediately expects `getByRole('status')` to contain `Saved`.
+1. **@A-205 missing `Confirm pin`** — the first create now clicks
+   `Confirm pin` and waits for `Saved`
+   (`acceptance/drafts/admin-walk.spec.ts.txt:372-374`), then re-submits the
+   same asset to raise the panel (`:397-404`). The whole numbered →
+   `Merge` → unnumbered → `Save anyway` flow is present (`:372-444`).
+2. **Detail-link discovery assumed one link per row** — the e2e helper
+   dedupes with a `Set` (`admin-walk.spec.ts.txt:136-150`) and the Go helper
+   with a `seen` map (`acceptance/drafts/admin_lights_go_test.go.txt:109-124`);
+   the README freezes that a row may repeat its detail href
+   (`acceptance/drafts/README.md:67`).
+3. **Token replay only from the same client** — the replay now comes from
+   `bare`, a second cookie-less client
+   (`acceptance/drafts/admin_auth_go_test.go.txt:72,131-134`).
+4. **Asset numbers not unique per test** — `uniqAsset` appends a per-test tag
+   (`admin-walk.spec.ts.txt:98-104`) and every numbered create uses one
+   (`:218`, `:372`, `:462`, `:511`); the values remain within
+   `^[A-Za-z0-9-]{1,32}$` and keep the `GP-017`/`GP-018` prefixes.
+5. **Low-accuracy test only proved button state** — it now completes a real
+   save at 80 m after the save-anyway choice
+   (`admin-walk.spec.ts.txt:237-263`).
+6. **Preview assertion could pass on a CSS-stretched portrait** — it now
+   asserts `naturalWidth > naturalHeight`
+   (`admin-walk.spec.ts.txt:494-500`), matching the README's intrinsic-dims
+   clause (`acceptance/drafts/README.md:68`).
+7. **Numbered panel negatives unasserted** — `Save anyway` is asserted absent
+   inside `#dup-panel` and the `Cancel` link present
+   (`admin-walk.spec.ts.txt:389-390`).
+8. **e2e purity checked only GPS** — `hasAPP1` was added and both
+   `hasAPP1 === false` and `hasExifGps === false` are asserted
+   (`admin-walk.spec.ts.txt:479-481`; `acceptance/e2e/util/images.ts:22-36`).
+9. **Keyboard-movable pin never exercised** — the test focuses `#pin`,
+   presses `ArrowRight` three times, polls `#pin-pos` and saves the
+   keyboard-moved position (`admin-walk.spec.ts.txt:319-342`).
+10. **Handoff overstated what was proven** — the handoff now separates the
+    executed red-against-main run from the satisfiability walk
+    (`harness/handoffs/T-200.md`, "Would-fail reasoning — EXECUTED" vs
+    "SATISFIABILITY").
+11. **`admin.ts` cache-write fallback comment wrong** — the comment now states
+    the one-time-global consequence and `writeCache` surfaces the failure on
+    stderr (`acceptance/e2e/util/admin.ts:170-187`).
+12. **`TestA209` did not assert the `#rows` fragment root** —
+    `alReRowsRoot` is asserted on the page-2 fragment
+    (`admin_lights_go_test.go.txt:85,505-507`).
 
-`addLightFromForm` (`:158-164`) only opens `/admin/walk`, clicks
-`Add light here`, and fills the fields; its own comment (`:156-157`) says
-“the caller clicks `Confirm pin`”. Every other caller does so
-(`@A-206` at `:400`, `@A-208` at `:436`, `@A-203` at `:273`). `@A-205` does
-not: no POST `/admin/lights` ever happens, no `Saved` status appears, and the
-subsequent `#dup-panel` assertion at `:321` cannot be reached. On every
-project, against a fully compliant M2 build, this test fails at its first
-`Saved` assertion.
+The rerun-safety rewrite also holds up: `maxRedirects: 0` is on every
+`page.request.post` (`admin-walk.spec.ts.txt:153-159,555-568`), the logins use
+one session (`admin.ts:56-98`), and the cleanup sweeps by label
+(`admin-walk.spec.ts.txt:166-178`). No new test is skipped, disabled or
+narrowed, and no production code is touched.
 
-This is not a flaky wait or an extractor issue; the interaction that produces
-the number under test is absent. The handoff's claim
-(`harness/handoffs/T-200.md:18`) that `@A-205` “creates its own
-uniquely-numbered light, … clicks `Merge`” is false, and the handoff's
-would-fail analysis never walks this flow against a compliant build (the red
-run fails earlier, at login). This is the same class of unsatisfiable-oracle
-failure that blocked attempt 1.
+## Findings (none makes the oracle deterministically unsatisfiable)
 
-### 2. [High] Detail-link discovery assumes exactly one link per row; the frozen contract does not
+### 1. [Medium — flaky wait] `addLightFromForm` never waits for the geolocation fix
 
-`acceptance/drafts/admin_lights_go_test.go.txt:97-115`: `alReDetail` matches
-every `<a href="/admin/lights/N">…</a>` whose inner HTML contains the label,
-and `alDetailURL` fatals unless exactly one href is found (`:111`).
-`acceptance/drafts/admin-walk.spec.ts.txt:112-140`: `lightHrefsByLabel`
-collects every matching link, and `deleteAllByLabel` (`:142-164`) deletes each
-href.
+`addLightFromForm` opens `/admin/walk`, clicks `Add light here` and fills the
+form (`admin-walk.spec.ts.txt:182-196`) without waiting for `#walk-pos` or
+`#walk-accuracy`. Test 1 shows the intended wait
+(`admin-walk.spec.ts.txt:209-210`), but every caller of the helper does not:
 
-The README only freezes “the label text links to `/admin/lights/{id}`
-(accessible name contains the label)” (`acceptance/drafts/README.md:69`). A
-compliant row with a thumbnail link (alt = label) and a separate label link
-produces the same href twice. `alDetailURL` then fatals with two matches, and
-`deleteAllByLabel` posts the same delete twice — the second `POST …/delete`
-answers 404, so the cleanup `expect(res.status()).toBe(303)`
-(`admin-walk.spec.ts.txt:133-137`) fails. Either dedupe hrefs in both helpers
-or freeze “exactly one detail link per row”. As written, a plausible
-compliant rendering fails the oracle.
+- @A-208 creates its light this way and then asserts the detail's
+  `#light-pos` contains the default `42.7617`/`-71.0303`
+  (`admin-walk.spec.ts.txt:511-513,526-527`). If the first `watchPosition`
+  callback has not populated the hidden lat/lon before `Confirm pin`, the
+  POST carries empty/default coordinates and the create fails at the `Saved`
+  assertion.
+- @A-205's unnumbered half sets `context.setGeolocation` to `near` and
+  `near + 0.00004` and relies on the form submitting those coordinates
+  (`admin-walk.spec.ts.txt:410-426`). If the second submission reads a stale
+  position, the light is not within the 8 m radius and the expected
+  `#dup-panel` never appears.
+- @A-206's photo create uses the same helper (`:462-468`).
 
-### 3. [Medium] One-time-token replay is only tested from the same client
+This is a race, not a contract gap: adding
+`await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy \d+ m/)`
+(or a `#walk-pos` wait) before filling would make it deterministic. T-207
+rule 3 permits a mechanical flaky-wait fix, but the frozen oracle should not
+ship with this race; the handoff's satisfiability walk does not mention it.
 
-`acceptance/drafts/admin_auth_go_test.go.txt:122-126` replays the token with
-`browser`, the same cookie-jar client that performed the exchange. The README
-freezes “one-time, GLOBAL: replay from any client → 403”
-(`acceptance/drafts/README.md:79`), and the handoff says the holdout tests a
-fresh jar. The visible Go test would pass an implementation that scopes
-consumption to a client (e.g. a burned-token cookie); only the hidden holdout
-catches it. The already-created `bare` client (`:70`) is never used for the
-replay, so the visible oracle is weaker than the contract it claims to freeze.
+### 2. [Medium — flaky/oracle gap] The preview `naturalWidth` read happens before the image load
 
-### 4. [Medium] Asset numbers are unique per run+project, not per test — failures poison later tests
+@A-206 sets the file, asserts `#photo-preview` is visible and immediately reads
+`naturalWidth`/`naturalHeight` (`admin-walk.spec.ts.txt:494-500`). An `<img>`
+can be visible via its CSS box before the object URL/blob has loaded; the
+read then returns `0/0` and a compliant, correctly oriented preview fails on
+a correct screenshot. The test needs an `expect.poll`/wait for
+`naturalWidth > 0` before comparing the dimensions.
 
-`uniqAsset` (`admin-walk.spec.ts.txt:78`) yields
-`GP-017-<run>-<projectCode>`. `@A-202` (`:194`), `@A-205` (`:300`) and
-`@A-206` (`:388`) all use that same value. Pre-clean deletes by **label**
-(`:142-164`), not by asset. If `@A-202` creates its light and then fails
-before cleanup (`:201`), `@A-205`'s first create (once Finding 1 is fixed)
-sees a live numbered duplicate instead of saving; if `@A-205` leaves its
-light, `@A-206` inherits the collision. The handoff's “Each test is
-self-contained” (`harness/handoffs/T-200.md:18`) is therefore false. A
-per-test suffix (`…-<test>`) or cleanup by asset would make the tests
-independent.
+Secondarily, the README now freezes intrinsic dimensions as the proof
+(`acceptance/drafts/README.md:68`) but the WebKit project is part of the
+matrix. If a worker previews the raw file and WebKit reports the *unrotated*
+intrinsic size, the test fails on `iphone-16` while the rendered preview is
+correct. The worker can avoid this by previewing a processed image, but the
+contract does not say so. At minimum the wait above should be added; the
+WebKit assumption should be validated at activation (T-207) or the preview
+contract should state "processed or browser-oriented intrinsic dimensions".
 
-### 5. [Medium] `@A-202` low-accuracy test proves only button state, not the save gate
+### 3. [Medium-High — contract gap vs T-205] @A-204 expects a client-side bbox alert on geolocation change
 
-`acceptance/drafts/admin-walk.spec.ts.txt:217-219` asserts `Add light here` is
-disabled, clicks `Save anyway (low accuracy)`, and asserts the button becomes
-enabled. It never submits at accuracy 80 and never saves after choosing
-“anyway”. A UI that disables the button but still accepts a form submit, or
-shows the button without wiring it, passes. The contract
-(`acceptance/contract.json:48`) is “save gated at <=30m accuracy or explicit
-save-anyway”; the visible suite (the Go tests do not touch the UI gate) does
-not prove it. The test should attempt a save at 80 m and assert it is blocked,
-then choose save-anyway and assert a real save.
+The e2e test only changes the context geolocation outside the bbox and then
+expects `role=alert` containing `outside Groveland town bounds`
+(`admin-walk.spec.ts.txt:347-354`); it never submits the form. That requires
+the walk page to display the bbox alert on a position change.
 
-### 6. [Medium] `@A-206` preview assertion can pass with a CSS-stretched portrait
+T-205's packet only freezes the **server-side** 422 on POST
+(`harness/tasks/T-205.md:60-62`); its walk.js behaviour list has no bbox check
+(`harness/tasks/T-205.md:89-101`). A worker that implements exactly the packet
+(server-side validation only) fails @A-204, and the README's visual note says
+only "near the position readout; the form does NOT advance"
+(`acceptance/drafts/README.md:182-183`). The draft's test 5 wording in
+T-200.md:244 does require the alert on `setGeolocation`, so this is satisfiable
+by a worker who reads the draft, but it is an unreconciled contract gap like
+the three the README already lists. Add it to the README reconciliation table
+and the handoff's planner-ratify list (or make the e2e submit the form and
+assert the server 422). I do not block on it because the draft is the declared
+oracle and T-205 is instructed to read it, but it is the most likely
+activation-time surprise.
 
-`acceptance/drafts/admin-walk.spec.ts.txt:423-424` compares the rendered
-`boundingBox` width/height of `#photo-preview`. A portrait image displayed
-with `width: 100%` in a wide container is wider than tall **without** any EXIF
-correction, so the test can pass for the wrong reason. The README freezes
-that the preview renders EXIF orientation applied
-(`acceptance/drafts/README.md:66`). Assert the preview image's
-`naturalWidth > naturalHeight` (and/or its intrinsic dimensions) instead of
-only the CSS box.
+### 4. [Low-Medium — frozen-contract contradiction] README says empty token → 403; T-203 says no/blank token → 200
 
-### 7. [Low] `@A-205` numbered panel does not assert the negative half of the button contract
+`acceptance/drafts/README.md:82` freezes `wrong/empty token → 403` for
+`GET /admin/login`, but T-203's packet freezes `GET /admin/login`
+(no/blank token) → 200 (`harness/tasks/T-203.md:53-60`). The Go draft tests
+only no token → 200 and a wrong token → 403
+(`acceptance/drafts/admin_auth_go_test.go.txt:68-...`); the empty-token case is
+unasserted, so a worker following the README can implement 403 for `?token=`
+and still pass every drafted test, while a T-203-packet-compliant build returns
+200. Either reconcile the wording to T-203 or add the empty-token assertion so
+the oracle is unambiguous.
 
-`acceptance/drafts/admin-walk.spec.ts.txt:321-323` asserts `Merge` is visible
-but never asserts `Save anyway` is absent, nor that the cancel link exists.
-The README freezes the numbered panel as `Merge` + a cancel link, with
-`Save anyway` unnumbered-only (`acceptance/drafts/README.md:54`, `:58`). An
-implementation that also shows `Save anyway` on numbered is not caught by the
-e2e; the Go test catches the server's 422 but not the UI. Add
-`expect(panel.getByRole('button', { name: 'Save anyway' })).toHaveCount(0)`.
+### 5. [Low — assertion weaker than the README] The Go photo test does not assert the exact 800×600 output
 
-### 8. [Low] E2E photo purity checks only GPS, not any APP1/EXIF
+`TestA206PhotoPipeline` asserts only `w > h` and long edge ≤ 1600
+(`acceptance/drafts/admin_lights_go_test.go.txt:285-294`), while the fixture
+table freezes "processed output must be 800×600"
+(`acceptance/drafts/README.md:141`) and T-202's packet tests exact dims
+(`harness/tasks/T-202.md:83-86`). A pipeline that upscales the 600×800
+Orientation=6 fixture to 1600×1200 would satisfy the acceptance draft while
+violating the fixture table and T-202's "never upscales" rule. Add
+`w == 800 && h == 600` for this fixture (the failure text already says
+800×600).
 
-`acceptance/e2e/util/images.ts:22-55` returns `false` for an APP1 segment that
-has no GPS IFD. `acceptance/drafts/admin-walk.spec.ts.txt:422` only asserts
-`hasExifGps(bytes) === false`, so a served photo that retains EXIF orientation
-or other metadata (without GPS) passes the e2e. The README freezes “NO APP1
-segment (so no EXIF, no GPS)” (`acceptance/drafts/README.md:86`), and the Go
-test catches any APP1 (`admin_lights_go_test.go.txt:270`). The e2e
-assertion is weaker than the frozen contract; add an APP1-segment check or
-state that the Go test is the only proof.
+### 6. [Low — helper parser gap] `images.ts` `jpegSize` still lacks the Go twin's SOF length guard
 
-### 9. [Low] `@A-203` does not exercise the frozen keyboard-movable pin
+`jpegSize` checks `i + 9 > bytes.length` but not `next < i + 9` after the
+segment length is read (`acceptance/e2e/util/images.ts:95-100`), whereas
+`alJpegDims` checks `next < i+9` (`admin_lights_go_test.go.txt:791-821`). A
+malformed SOF with a declared length shorter than the minimal SOF can read the
+following bytes as width/height. Not reachable against a compliant re-encode,
+but the handoff's "mirrors the Go twin" claim is not exact and the helper is
+the byte-level proof for the e2e claim.
 
-`acceptance/drafts/admin-walk.spec.ts.txt:236-284` only drags with the mouse.
-The UI contract freezes `#pin` as “keyboard-movable”
-(`acceptance/drafts/README.md:52`). The holdout reportedly has a
-keyboard-moved pin, but the visible oracle does not; a worker could omit arrow
-key support and still pass the visible suite. Add an arrow-key nudge assertion.
+### 7. [Low — unasserted frozen cookie attribute] `Path=/` is not checked
 
-### 10. [Low] Handoff overstates what was proven; the red run cannot catch Finding 1
+The README freezes `Path=/` on `gl_session`
+(`acceptance/drafts/README.md:88`), but the Go auth draft only checks
+`HttpOnly` and `SameSite=Lax`
+(`acceptance/drafts/admin_auth_go_test.go.txt:116-124`). The T-203 packet does
+not require Path, so this is not a feature blocker; it is a one-line
+assertion if the README is the oracle.
 
-`harness/handoffs/T-200.md:18` claims every test is self-contained and
-describes `@A-205` as creating and merging lights; neither is true. The
-handoff's red-against-main run fails all admin tests at login, so it cannot
-distinguish a satisfiable draft from one that never submits its create. The
-holdout is unreadable from this sandbox, so the `holdout: PASS` claim is
-unverified. This is bookkeeping, but handoffs are evidence.
+### 8. [Low — rerun safety across invocations] @A-209's pre-clean matches only the current RUN label
 
-### 11. [Low] `admin.ts` cache-write fallback is not actually safe
+`@A-209`'s pre-clean is `deleteAllByLabel(page, baseLabel)` with
+`baseLabel = "Scroll lamp ${RUN}-${code}"`
+(`admin-walk.spec.ts.txt:538-540`). Seeds from a previous invocation carry a
+different `RUN`, so the pre-clean does not remove them. They ride the same
+fixed per-project longitude lane; the run-jittered base lat is on a
+`0.0001°` lattice (~11.1 m buckets), so when two runs draw the same bucket
+(~1/300 per project per run) every current seed collides with a leftover
+seed at the same coordinate and the seed POST returns 409 instead of 303.
+The handoff's "≈0.07% point-vs-point" count does not include this
+grid-vs-grid repeat, and the README's "can never fire across ... runs"
+(`acceptance/drafts/README.md:116-121`) is stronger than the code. Sweep a
+stable prefix (e.g. `Scroll lamp `) or all `Scroll lamp ${code}` labels to
+make the pagination test rerun-safe after a failed run.
 
-`acceptance/e2e/util/admin.ts:170-181` swallows `writeCache` failures and the
-comment says an unwritable worktree “simply forces the (one-time) exchange per
-invocation”. The token is one-time **global**; the second Playwright
-invocation (`a11y`) would try to exchange the already-consumed token and fail.
-The fallback should surface the error or the comment should state that the
-`make check` e2e→a11y sequence requires a writable cache path.
+### 9. [Low — whitespace-intolerant heading assertion] `>Lights<` can fail a compliant template
 
-### 12. [Low] `TestA209` does not assert the frozen `#rows` fragment root
+`TestA209Pagination` checks `strings.Contains(list, ">Lights<")`
+(`admin_lights_go_test.go.txt:477`), while the e2e uses
+`getByRole('heading', { name: 'Lights', exact: true })`
+(`admin-walk.spec.ts.txt:570`). A compliant template rendering
+`<h1>\n  Lights\n</h1>` fails the Go check; the auth regexes already tolerate
+`\s*` elsewhere. This is a T-207 mechanical fix if it bites, but it is a
+narrower oracle than the frozen heading contract.
 
-`acceptance/drafts/admin_lights_go_test.go.txt:448` onward checks the page-2
-fragment's contents but never asserts the root element id `rows`, although the
-README freezes “fragment root element id `rows`”
-(`acceptance/drafts/README.md:85`). The e2e may catch a bad root indirectly via
-HTMX, but the Go oracle is weaker than the contract.
+### 10. [Info — accepted residual] Jittered point-vs-point collisions
 
-## What is sound (checked)
+The handoff already discloses the ~1/90 000-per-pair jitter birthday for the
+unnumbered creates. It fails loudly (unexpected dup panel) and the pre-clean
+covers retries; I agree it is acceptable for an acceptance oracle. The
+pagination-lane repeat in finding 8 is the one that is not disclosed.
 
-- `testdata/schema.expected.sql` matches the packet's frozen block line for
-  line; the probe statement is copied verbatim from
-  `migrations/0001_init.sql:2-5`; no comments.
-- `testdata/photos/gen/main.go` is stdlib-only, deterministic, and
-  self-verifying; the APP1/TIFF layout, orientation fixtures, CRC-correct
-  pixel bomb, HEIC sniff box, 15 MB cap, and tiny fixtures check out
-  statically. The README's sha256 table is the documented protection.
-- The Go drafts spawn their own `bin/server` with `t.TempDir()` DBs, free
-  ports, `ErrUseLastResponse` clients, and context-bounded health waits; they
-  have no cross-test state. The e2e drafts now use per-run/per-project asset
-  numbers, jittered coordinates for unnumbered creates, pre/post cleanup,
-  `maxRedirects: 0` on every `page.request.post`, a self-contained `@A-206`,
-  `expect.poll` after the drag, and the link-or-button `Older` selector.
-- `acceptance/e2e/util/images.ts` now has the truncated-SOF guard the Go twin
-  has; the utils typecheck under the repo tsconfig and have no tests of their
-  own (per Deliverable 5).
-- The manifest adds the new acceptance files only; the pre-existing hashes are
-  unchanged; the ratchet is unchanged (drafts are inert). No
-  `t.Skip`/`test.skip`/`.only`/`.fixme`/TODO/FIXME is added; ownership is
-  respected; no app code is touched.
+## Checked and not found
 
-## Required before merge
+- **No weakened, deleted, skipped or narrowed test.** All changes are new
+  drafts/fixtures/utils. The attempt-3 edits strengthen the @A-205, @A-206,
+  @A-203, @A-201 and @A-209 assertions; nothing was removed. No
+  `t.Skip`/`test.skip`/`test.only`/`.fixme` appears in the diff.
+- **No mocks bypassing the behaviour.** The Go drafts spawn the real
+  `bin/server` with a fresh `t.TempDir()` DB and use real HTTP clients with
+  `ErrUseLastResponse`; the e2e drives a real browser. `loginAsAdmin` injects
+  the real session cookie obtained from the real one-time exchange; it does
+  not mock the server. The A-201 exchange/replay/cookie flags are asserted by
+  the Go draft against a fresh server.
+- **No fixture-value special-casing in production code.** No app code is
+  touched. The fixture names/labels in `testdata/photos/gen/main.go` are
+  test-data generation, and the `GP-017`/`GP-018` literals are confined to
+  the test drafts and their fixture generator, not production branches.
+- **No coverage theatre.** The positive and negative halves are both present:
+  the numbered panel asserts `Save anyway` absent, the unnumbered panel
+  asserts it present; the low-accuracy test completes a real save; the
+  duplicate tests assert "nothing saved" between 409 and the explicit choice;
+  the photo test asserts APP1/GPS absence and orientation, not just a 200.
+- **Schema oracle and fixtures.** `testdata/schema.expected.sql` matches the
+  packet's frozen product schema and copies the probe `CREATE TABLE` from
+  `migrations/0001_init.sql:2-5`; the generator is stdlib-only,
+  deterministic and self-verifying (APP1/TIFF layout, CRC-correct pixel
+  bomb, HEIC sniff box, 15 MB cap).
+- **Ownership/manifest.** Only owned paths are touched (`acceptance/**`,
+  `harness/protected.sha256`, `testdata/photos/**`,
+  `testdata/schema.expected.sql`, the handoff). The manifest adds exactly the
+  6 new acceptance files and leaves the pre-existing hashes unchanged; the
+  ratchet `{"go":51,"pw":32}` is correct for inert drafts.
 
-1. Fix Finding 1: add the missing `Confirm pin` click in `@A-205`'s first
-   create and re-walk the whole numbered → Merge → unnumbered → Save-anyway
-   flow against a compliant build.
-2. Resolve Finding 2: dedupe detail hrefs in both helpers or freeze exactly one
-   link per row in the README and the worker packet.
-3. Strengthen the visible oracles where noted (Findings 3–9), especially the
-   global replay and the `@A-202` save gate.
-4. Correct the handoff claims (Finding 10) and regenerate
-   `harness/protected.sha256` after any draft edit.
+## Verdict rationale
 
-VERDICT: BLOCK
+The attempt-2 blockers are fixed: the e2e oracle is self-consistent and
+rerun-safe under the real Playwright topology, the one-time token is consumed
+once and reused through a gitignored cache, the 303s are observable, the
+duplicate/merge/save-anyway flows are complete, and the photo and keyboard
+assertions are stronger than before. The remaining findings are robustness and
+contract-clarity items: two waits (`addLightFromForm`, preview image load), one
+unreconciled client-side bbox gap against T-205, one README empty-token
+contradiction, and several low-strength assertions. None of them is a
+deterministic unsatisfiable oracle against a build that follows the frozen
+draft, and the two waits are exactly the mechanical `expect.poll`/wait class
+T-207 rule 3 permits. I would expect the planner to ratify findings 3 and 4
+and T-207 to apply findings 1-2 and 5-9 without changing what the tests assert.
+
+VERDICT: PASS
