@@ -1,0 +1,1664 @@
+diff --git a/harness/handoffs/T-203.md b/harness/handoffs/T-203.md
+new file mode 100644
+index 0000000..1dc3051
+--- /dev/null
++++ b/harness/handoffs/T-203.md
+@@ -0,0 +1,151 @@
++# T-203 handoff — Admin auth: one-time token exchange, DB sessions, admin guard (A-201)
++
++**Status: complete.** Committed as `68121d9` on `task/T-203`; `make check-fast`
++green, `make e2e-task TASK=T-203` no-op green, real-binary smoke of the frozen
++exchange PASS. The claimed oracle (`acceptance/drafts/admin_auth_go_test.go.txt`)
++was run before implementation (FAIL as designed) and re-run after (still red at
++exactly one point that belongs to T-205 — details under "Oracle status").
++
++## Frozen API (T-205 compiles against this)
++
++```go
++// internal/web/session.go
++const SessionCookieName = "gl_session"            // frozen cookie name (A-201)
++func AdminOnly(next http.HandlerFunc) http.HandlerFunc
++```
++
++- `AdminOnly` wraps a handler: valid unexpired **admin-role** session → `next`;
++  otherwise full page → `302 Location: /admin/login`; any `HX-Request` header
++  → `401` + `HX-Redirect: /admin/login` + **empty body**. Wrap EVERY
++  `/admin*` route with it (including `GET /admin`, `/admin/walk`,
++  `/admin/lights/{id}`, `/admin/rows`, the POST routes).
++- Cookie value format (pinned by `TestSessionValueRoundTrip`):
++  `base64url(sessionID) + "." + hex(HMAC-SHA256(SessionKey, sessionID))`.
++  `SessionCookieName` cookie: `Path=/; Max-Age=86400; HttpOnly; SameSite=Lax`,
++  `Secure` exactly in prod.
++- Login routes already registered in `init()` (do NOT re-register):
++  `GET /admin/login`, `POST /admin/login`.
++
++```go
++// internal/store (methods on *DB, hand-written database/sql — NOT sqlc)
++func (db *DB) EnsureAdminUser(ctx) (UserID, error)          // idempotent, handle "admin", role "admin"
++func (db *DB) ConsumeAdminToken(ctx, token []byte) error     // one-time via login_tokens; replay → ErrTokenReused (wrapped)
++func (db *DB) CreateSession(ctx, userID UserID, role string) (string, error) // 32 rand bytes, base64url id, +24h
++func (db *DB) SessionValid(ctx, id string) (UserID, string, bool, error)
++func (db *DB) DeleteSession(ctx, id string) error            // idempotent
++type UserID int64
++var ErrTokenReused, ErrBadCredentials error                  // detect via errors.Is
++var Now func() time.Time                                     // auth slice clock (see deviations)
++```
++
++`SessionValid` contract: missing/empty id → `(0, "", false, nil)` (the
++everyday anonymous case); expired → `(0, "", false, err)` wrapping
++`ErrBadCredentials`; DB failure → wrapped `%w`. Callers branch on `ok` only;
++`AdminOnly` fails closed (redirect/401) on any `!ok` and sweeps expired rows
++via `DeleteSession`.
++
++New files (all inside owns): `internal/store/{user,session}.go`,
++`internal/store/{user,session}_test.go`, `internal/web/{auth,session}.go`,
++`internal/web/{auth,session}_test.go`. No other file touched; no new
++dependencies; no "Phase N"/TODO/FIXME markers; token/cookie values never
++logged.
++
++## What changed where
++
++| File | Change |
++|---|---|
++| `internal/store/user.go` | `UserID`, `ErrTokenReused`, `EnsureAdminUser` (INSERT … ON CONFLICT(handle) DO NOTHING then SELECT), `ConsumeAdminToken` (token_hash = hex(sha256(token)); INSERT stamps used_at=now, expires_at=now+24h; on PK conflict SELECT used_at → `ErrTokenReused` or defensive first-use UPDATE; every other failure wrapped `%w`). |
++| `internal/store/session.go` | `Now` clock, `ErrBadCredentials`, `CreateSession` (crypto/rand 32 bytes → base64url id, RFC3339 stamps, expires now+24h), `SessionValid` (missing/expired/DB-error triage above), `DeleteSession`. |
++| `internal/store/*_test.go` | Real temp-file DB via `openFresh` (migrations applied): admin idempotency, consume-once + replay sentinel + row contents (email/expiry/used_at exactly at the injected clock) + per-token independence + closed-DB `%w` error, session round-trip, FK refusal, timestamp pins, expiry boundary (−1s valid, exactly 24h rejected wrapping `ErrBadCredentials`, +1h rejected). Clock swap helper restores via `t.Cleanup`. |
++| `internal/web/auth.go` | Routes `GET|POST /admin/login`; `loginForm` boundary parse (handlers never touch form/query again); POST CSRF-verified like every POST (`VerifyCSRF`, 403 on error); blank token (GET or POST) → 200 form; `tokenMatches` constant-time compare (see deviations); consume → `EnsureAdminUser` → `CreateSession(role "admin")` → `setSessionCookie` → `302 /admin`; replay → 403; store errors → logged 500. Minimal inline login page with exactly the frozen strings (`Admin login`, `Token`, `input name="token"`, `Sign in`), buffered render, `text/html; charset=utf-8`. T-205 replaces the markup via `pages/admin-login.html` — keep these strings byte-for-byte. |
++| `internal/web/session.go` | `SessionCookieName`, cookie codec (`sessionValue`/`sessionIDOf`, constant-time sig compare), `setSessionCookie` (frozen attribute set; `//nolint:gosec` with reason, same door as csrf.go), `AdminOnly`, `validAdminSession` (fail-closed; nil store → refusal; expired → sweep + refusal; role must be `admin`). |
++| `internal/web/*_test.go` | Full-chain httptest against `New(cfg, log, realTempStore)`: exchange 302/Location/cookie-attrs-parsed-exactly + value verifies to a live admin session; wrong 403 (no cookies set); replay from a cookie-less client 403; blank/no token 200 with the four frozen regexes; POST variants (valid csrf 302, mismatch 403, missing 403, blank 200 form); prod cookie Secure; guard table (anon 302, anon HTMX 401+HX-Redirect+empty body, admin cookie passes, admin HTMX passes, tampered sig 302, expired via injected `store.Now` + row swept, user-role rejected, wrong-key rejected, garbage rejected); cookie codec round-trip + six malformed inputs. |
++
++## Spec deviations / reconciliations (for reviewer + planner)
++
++1. **ADMIN_TOKEN encoding (the important one).** `config.Load()` stores the
++   base64-**decoded** bytes in `Cfg.AdminToken`, but the operator — and the
++   frozen A-201 oracle, `.env.test`, `scripts/*`, the Playwright webServer and
++   `acceptance/e2e/util/admin.ts` — submit the **env value verbatim**
++   (`dGVzdC1hZG1pbi10b2tlbi0zMi1ieXRl`). A literal compare against
++   `Cfg.AdminToken` alone 403s the oracle's valid-token step. My real-binary
++   smoke caught exactly this (403 instead of 302). Resolved inside my owns:
++   `tokenMatches` constant-time-compares the submission against
++   `Cfg.AdminToken` **and** its deterministic `base64.StdEncoding` — two
++   encodings of one secret, so the accepted credential set does not widen and
++   knowledge is equivalent. Consumption always uses the canonical config
++   bytes, so every accepted encoding burns the **same** `login_tokens` row
++   (pinned by "either accepted encoding burns the same one-time row").
++   `internal/config` and the oracle are untouched. If the planner prefers
++   ADMIN_TOKEN to stay raw in config, that is a one-line config change and
++   `tokenMatches` degrades harmlessly (the encoded compare then accepts only
++   the secret's own base64, i.e. the same value).
++2. **Store clock exported as `Now`** (packet said package-level lowercase
++   `now`). Store-local lowercase would be unreachable from package web, yet
++   the packet requires the web-level case "expired session rejected (injected
++   clock)". Exported `store.Now` serves both package's tests; production never
++   mutates it; every swap restores via `t.Cleanup`.
++3. **Cookie value = `base64url(id) + "." + hex(HMAC)`** implemented exactly as
++   the packet words it (`base64url(id)`, i.e. the 43-char id is encoded
++   again). The draft only checks the `gl_session=` prefix, so either reading
++   is oracle-compatible; the test pins the implemented one.
++4. **POST with blank token → 200 form** (uniform with the frozen GET blank
++   case: empty = "nothing entered", not "wrong value"); POST missing/mismatched
++   CSRF → 403. The draft freezes only the GET paths; POST rows are pinned by
++   my tests for T-205's form work.
++5. **Makefile variable**: `make e2e-task T=…` (AGENTS.md spelling) hits the
++   target's usage error (exit 2) — the Makefile's variable is `TASK`. Use
++   `make e2e-task TASK=T-203`.
++
++## Oracle status (A-201)
++
++- **Before implementation** (exact draft bytes, compiled via a temporary
++  `go test -overlay` mount into `acceptance/go` — `acceptance/` itself never
++  touched; helper files deleted after): `--- FAIL: TestA201AdminLogin …
++  GET /admin without session: status 404, want 302`, exit 1. Confirms the
++  claimed spec fails first, as the draft header states.
++- **After implementation**: the draft still fails at that same first
++  assertion (`404` on `GET /admin`) — `GET /admin` **route registration is
++  T-205's** (`internal/web/admin*.go`; T-205 "wraps every admin route with
++  `AdminOnly`"). This is the by-design red the draft header documents. Every
++  T-203-owned clause of the oracle is verified independently: login page
++  markup, wrong 403, blank 200, valid 302 + exact cookie attributes
++  (`Path=/`, `Max-Age=86400`, `SameSite=Lax`, `HttpOnly`), global one-time
++  replay 403 from a second cookie-less client — all against the **real
++  spawned binary** (smoke, below) — and the guard clauses (302 / 401 +
++  `HX-Redirect` / authenticated pass) via the `AdminOnly` full-chain unit
++  tests, which is the only way to exercise them before T-205 registers the
++  routes. T-207's rename will go green once T-205 lands.
++
++## Verification log (commands → exit codes)
++
++| Command | Result |
++|---|---|
++| `go test -tags acceptance -count=1 -overlay=… ./acceptance/go -run TestA201AdminLogin` (pre-implementation) | exit 1 — FAIL at `/admin` 404 (expected first-failure proof) |
++| `go build ./... && go vet ./internal/store/ ./internal/web/` | exit 0 |
++| `go test ./internal/store/ ./internal/web/ -count=1` (first run) | exit 1 — two test bugs fixed (newCSRFToken 2-value return; round-trip assertion), then exit 0 |
++| `make build` + `go run ./internal/zz-a201-baseline/smoke` (real spawned binary, `.env.test` secrets) | first run FAIL: valid token 403 → exposed the base64 deviation; after `tokenMatches`: **SMOKE PASS**, exit 0 (healthy → frozen form → wrong 403 → blank 200 → valid 302 + exact attrs → replay 403 → `/admin` still 404 pre-T-205) |
++| `go test -tags acceptance … -run TestA201AdminLogin` (post-implementation) | exit 1 — FAIL at `/admin` 404 only (T-205's wiring; see Oracle status) |
++| `git -C … clean -fd -- internal/zz-a201-baseline` | scratch overlay/smoke removed; `git status --porcelain` shows only my 8 files |
++| `make check-fast` | exit 2 (gofmt) → `gofmt -w` fixed; exit 2 (cyclop on 3 flow-table tests) → tables split into smaller named tests; final run **exit 0** (fmt-check, vet, lint 0 issues, `go test -race -count=1 -shuffle=on ./...` all ok) |
++| `go test ./internal/web/... ./internal/store/... -count=1` | exit 0 |
++| `make e2e-task TASK=T-203` | exit 0 — "e2e-task: grep @A-201", no active specs (inert drafts; expected no-op) |
++| `git commit -m "feat(web): …"` | first attempt exit 1 (commit-msg hook: comma in scope); compliant message committed: `68121d9`, gitleaks/gofmt/conventional hooks green |
++| `grep -rnE 'TODO|FIXME|panic\(|Phase [0-9]|console\.log'` over my 8 files | no matches |
++
++## Open issues
++
++1. **For T-205**: register every `/admin*` route wrapped in `AdminOnly`; keep
++   the login-page strings (`Admin login`, `Token`, `Sign in`,
++   `input name="token"`) exactly; the inline page in `auth.go` is replaced by
++   `pages/admin-login.html`. Note the two operator-facing token encodings
++   both log in (they are one secret); no action needed, just do not "fix" the
++   second compare away.
++2. **For the planner** (deviation 1): decide whether ADMIN_TOKEN should stay
++   raw in `config` (current code needs no change either way; the draft passes
++   against both).
++3. `node_modules` (symlink into the main checkout) is untracked in this
++   worktree — pre-existing from the worktree setup, present at session start,
++   left untouched.
++4. Expired-session sweep (`DeleteSession` on the expired path) is best-effort
++   housekeeping; failures are logged and never affect the refusal.
+diff --git a/internal/store/session.go b/internal/store/session.go
+new file mode 100644
+index 0000000..ba9452a
+--- /dev/null
++++ b/internal/store/session.go
+@@ -0,0 +1,103 @@
++package store
++
++// DB-backed admin sessions (A-201): a session is a 32-byte random id stored
++// in the sessions table; the browser carries an HMAC-signed cookie over that
++// id (internal/web/session.go). The auth slice's clock is the package-level
++// Now var, injectable so the expiry boundaries are testable from this
++// package's unit tests and from the web package's session tests.
++
++import (
++	"context"
++	"crypto/rand"
++	"database/sql"
++	"encoding/base64"
++	"errors"
++	"fmt"
++	"time"
++)
++
++// Now is the auth slice's clock: every created_at/expires_at stamp and every
++// expiry check in the session and token code reads it. It always returns
++// UTC. Production never touches the var; tests swap it (with a cleanup
++// restore) to walk the expiry boundary deterministically.
++var Now = func() time.Time { return time.Now().UTC() }
++
++// sessionTTL is both the sessions row lifetime and the gl_session cookie
++// Max-Age the contract freezes (24 h, Max-Age=86400).
++const sessionTTL = 24 * time.Hour
++
++// sessionIDBytes is the entropy of a session id: 32 crypto/rand bytes,
++// base64url-encoded without padding (43 characters).
++const sessionIDBytes = 32
++
++// ErrBadCredentials reports presented-but-stale credentials: a session whose
++// row exists yet has passed its expires_at. A session id with no row at all
++// is the everyday anonymous case and is reported through the ok flag only.
++// Callers treat any ok=false as not authenticated; the sentinel exists so
++// the stale-credential case stays distinguishable in logs and tests.
++var ErrBadCredentials = errors.New("store: bad credentials")
++
++// CreateSession mints a session for userID: 32 crypto/rand bytes as
++// base64url id, stored with created_at now and expires_at now+24h
++// (RFC3339). The id is returned for cookie signing. An unknown userID fails
++// on the schema's foreign key.
++func (db *DB) CreateSession(ctx context.Context, userID UserID, role string) (string, error) {
++	raw := make([]byte, sessionIDBytes)
++	if _, err := rand.Read(raw); err != nil {
++		return "", fmt.Errorf("store: create session: %w", err)
++	}
++	id := base64.RawURLEncoding.EncodeToString(raw)
++	stamp := Now()
++	if _, err := db.sql.ExecContext(ctx, `
++		INSERT INTO sessions (id, user_id, role, created_at, expires_at)
++		VALUES (?, ?, ?, ?, ?)`,
++		id, int64(userID), role,
++		stamp.Format(time.RFC3339),
++		stamp.Add(sessionTTL).Format(time.RFC3339)); err != nil {
++		return "", fmt.Errorf("store: create session: %w", err)
++	}
++	return id, nil
++}
++
++// SessionValid reports whether id names an existing, unexpired session and
++// returns its user and role. A missing (or empty) id is (0, "", false, nil) —
++// the anonymous caller. An expired session is (0, "", false, err) with
++// ErrBadCredentials wrapped, so callers that only branch on ok stay correct
++// while logs and tests can still tell staleness from absence. Any other
++// error is a database failure, wrapped with %w.
++func (db *DB) SessionValid(ctx context.Context, id string) (UserID, string, bool, error) {
++	if id == "" {
++		return 0, "", false, nil
++	}
++	var (
++		userID    int64
++		role      string
++		expiresAt string
++	)
++	err := db.sql.QueryRowContext(ctx,
++		`SELECT user_id, role, expires_at FROM sessions WHERE id = ?`, id).
++		Scan(&userID, &role, &expiresAt)
++	if errors.Is(err, sql.ErrNoRows) {
++		return 0, "", false, nil
++	}
++	if err != nil {
++		return 0, "", false, fmt.Errorf("store: session valid: %w", err)
++	}
++	exp, err := time.Parse(time.RFC3339, expiresAt)
++	if err != nil {
++		return 0, "", false, fmt.Errorf("store: session valid: expires_at %q: %w", expiresAt, err)
++	}
++	if !Now().Before(exp) {
++		return 0, "", false, fmt.Errorf("store: session valid: %w", ErrBadCredentials)
++	}
++	return UserID(userID), role, true, nil
++}
++
++// DeleteSession removes a session row. Deleting an unknown id is a no-op, so
++// cleanup paths are idempotent.
++func (db *DB) DeleteSession(ctx context.Context, id string) error {
++	if _, err := db.sql.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id); err != nil {
++		return fmt.Errorf("store: delete session: %w", err)
++	}
++	return nil
++}
+diff --git a/internal/store/session_test.go b/internal/store/session_test.go
+new file mode 100644
+index 0000000..7decbbd
+--- /dev/null
++++ b/internal/store/session_test.go
+@@ -0,0 +1,218 @@
++package store
++
++import (
++	"context"
++	"encoding/base64"
++	"errors"
++	"testing"
++	"time"
++)
++
++// clockBase is the fixed instant the injected-clock tests walk around.
++var clockBase = time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
++
++// setClock swaps the auth slice's clock for a fixed one and restores the
++// real clock on cleanup, so no test can leave a frozen clock behind.
++func setClock(t *testing.T, at time.Time) {
++	t.Helper()
++	prev := Now
++	Now = func() time.Time { return at }
++	t.Cleanup(func() { Now = prev })
++}
++
++// TestCreateSessionRoundTrip covers the session lifecycle as a table of
++// flows; case names are the assertions.
++func TestCreateSessionRoundTrip(t *testing.T) {
++	tests := []struct {
++		name string
++		run  func(t *testing.T)
++	}{
++		{"created session validates with its user and role", func(t *testing.T) {
++			db, _ := openFresh(t)
++			ctx := context.Background()
++			uid, err := db.EnsureAdminUser(ctx)
++			if err != nil {
++				t.Fatalf("EnsureAdminUser: %v", err)
++			}
++			id, err := db.CreateSession(ctx, uid, "admin")
++			if err != nil {
++				t.Fatalf("CreateSession: %v", err)
++			}
++			gotUID, gotRole, ok, err := db.SessionValid(ctx, id)
++			if err != nil {
++				t.Fatalf("SessionValid: %v", err)
++			}
++			if !ok {
++				t.Fatal("SessionValid = false for a freshly created session")
++			}
++			if gotUID != uid {
++				t.Fatalf("SessionValid user = %d, want %d", gotUID, uid)
++			}
++			if gotRole != "admin" {
++				t.Fatalf("SessionValid role = %q, want admin", gotRole)
++			}
++		}},
++		{"session id is 32 random bytes base64url and unique per create", func(t *testing.T) {
++			db, _ := openFresh(t)
++			ctx := context.Background()
++			uid, err := db.EnsureAdminUser(ctx)
++			if err != nil {
++				t.Fatalf("EnsureAdminUser: %v", err)
++			}
++			a, err := db.CreateSession(ctx, uid, "admin")
++			if err != nil {
++				t.Fatalf("CreateSession: %v", err)
++			}
++			b, err := db.CreateSession(ctx, uid, "admin")
++			if err != nil {
++				t.Fatalf("CreateSession #2: %v", err)
++			}
++			if a == b {
++				t.Fatal("two creates returned the same session id")
++			}
++			raw, err := base64.RawURLEncoding.DecodeString(a)
++			if err != nil {
++				t.Fatalf("session id not base64url: %v", err)
++			}
++			if len(raw) != sessionIDBytes {
++				t.Fatalf("session id carries %d bytes, want %d", len(raw), sessionIDBytes)
++			}
++		}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, tc.run)
++	}
++}
++
++// TestCreateSessionTimestamps pins the stored stamps against the injected
++// clock: created_at now, expires_at now+24h (the frozen session lifetime).
++func TestCreateSessionTimestamps(t *testing.T) {
++	db, _ := openFresh(t)
++	setClock(t, clockBase)
++	ctx := context.Background()
++	uid, err := db.EnsureAdminUser(ctx)
++	if err != nil {
++		t.Fatalf("EnsureAdminUser: %v", err)
++	}
++	id, err := db.CreateSession(ctx, uid, "admin")
++	if err != nil {
++		t.Fatalf("CreateSession: %v", err)
++	}
++	var createdAt, expiresAt string
++	if err := db.sql.QueryRowContext(ctx,
++		`SELECT created_at, expires_at FROM sessions WHERE id = ?`, id).
++		Scan(&createdAt, &expiresAt); err != nil {
++		t.Fatalf("select session row: %v", err)
++	}
++	if createdAt != clockBase.Format(time.RFC3339) {
++		t.Fatalf("created_at = %q, want %q", createdAt, clockBase.Format(time.RFC3339))
++	}
++	if expiresAt != clockBase.Add(sessionTTL).Format(time.RFC3339) {
++		t.Fatalf("expires_at = %q, want %q", expiresAt, clockBase.Add(sessionTTL).Format(time.RFC3339))
++	}
++}
++
++// TestSessionRejectionPaths covers the not-valid paths and the delete
++// lifecycle; case names are the assertions.
++func TestSessionRejectionPaths(t *testing.T) {
++	tests := []struct {
++		name string
++		run  func(t *testing.T)
++	}{
++		{"unknown id is not valid and carries no error", func(t *testing.T) {
++			db, _ := openFresh(t)
++			_, _, ok, err := db.SessionValid(context.Background(), "no-such-session")
++			if err != nil {
++				t.Fatalf("SessionValid: %v", err)
++			}
++			if ok {
++				t.Fatal("SessionValid = true for an unknown id")
++			}
++		}},
++		{"empty id is not valid and carries no error", func(t *testing.T) {
++			db, _ := openFresh(t)
++			_, _, ok, err := db.SessionValid(context.Background(), "")
++			if err != nil {
++				t.Fatalf("SessionValid: %v", err)
++			}
++			if ok {
++				t.Fatal("SessionValid = true for an empty id")
++			}
++		}},
++		{"delete removes the session and is idempotent", func(t *testing.T) {
++			db, _ := openFresh(t)
++			ctx := context.Background()
++			uid, err := db.EnsureAdminUser(ctx)
++			if err != nil {
++				t.Fatalf("EnsureAdminUser: %v", err)
++			}
++			id, err := db.CreateSession(ctx, uid, "admin")
++			if err != nil {
++				t.Fatalf("CreateSession: %v", err)
++			}
++			if err := db.DeleteSession(ctx, id); err != nil {
++				t.Fatalf("DeleteSession: %v", err)
++			}
++			if _, _, ok, _ := db.SessionValid(ctx, id); ok {
++				t.Fatal("SessionValid = true after DeleteSession")
++			}
++			if err := db.DeleteSession(ctx, id); err != nil {
++				t.Fatalf("DeleteSession (again): %v", err)
++			}
++		}},
++		{"foreign key refuses a session for an unknown user", func(t *testing.T) {
++			db, _ := openFresh(t)
++			_, err := db.CreateSession(context.Background(), UserID(9999), "admin")
++			if err == nil {
++				t.Fatal("CreateSession for unknown user succeeded, want an FK error")
++			}
++		}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, tc.run)
++	}
++}
++
++// TestSessionExpiryBoundary walks the frozen 24h expiry with the injected
++// clock: valid up to expires_at-1s, rejected from expires_at onwards.
++func TestSessionExpiryBoundary(t *testing.T) {
++	tests := []struct {
++		name    string
++		offset  time.Duration
++		wantOK  bool
++		wantErr error // non-nil when the rejection must carry this sentinel
++	}{
++		{"valid just before expiry", sessionTTL - time.Second, true, nil},
++		{"invalid exactly at expiry", sessionTTL, false, ErrBadCredentials},
++		{"invalid after expiry", sessionTTL + time.Hour, false, ErrBadCredentials},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			db, _ := openFresh(t)
++			setClock(t, clockBase)
++			ctx := context.Background()
++			uid, err := db.EnsureAdminUser(ctx)
++			if err != nil {
++				t.Fatalf("EnsureAdminUser: %v", err)
++			}
++			id, err := db.CreateSession(ctx, uid, "admin")
++			if err != nil {
++				t.Fatalf("CreateSession: %v", err)
++			}
++			setClock(t, clockBase.Add(tc.offset))
++			_, _, ok, err := db.SessionValid(ctx, id)
++			if ok != tc.wantOK {
++				t.Fatalf("SessionValid ok = %v, want %v", ok, tc.wantOK)
++			}
++			if tc.wantErr == nil {
++				if err != nil {
++					t.Fatalf("SessionValid err = %v, want nil", err)
++				}
++				return
++			}
++			if !errors.Is(err, tc.wantErr) {
++				t.Fatalf("SessionValid err = %v, want it to wrap %v", err, tc.wantErr)
++			}
++		})
++	}
++}
+diff --git a/internal/store/user.go b/internal/store/user.go
+new file mode 100644
+index 0000000..2585c24
+--- /dev/null
++++ b/internal/store/user.go
+@@ -0,0 +1,108 @@
++package store
++
++// Admin identity and the one-time ADMIN_TOKEN exchange (A-201). The login
++// flow (internal/web/auth.go) first compares the presented token against the
++// configured ADMIN_TOKEN, then consumes it here: the login_tokens row is the
++// global, server-side one-time record, so a replay from any client is
++// refused even with a fresh cookie jar.
++
++import (
++	"context"
++	"crypto/sha256"
++	"database/sql"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"time"
++)
++
++// UserID identifies one row of the users table (typed so a session or photo
++// reference can never be confused with another id at compile time).
++type UserID int64
++
++const (
++	// adminHandle is the single admin account's handle. The town has one
++	// admin; the row is created lazily on first token exchange.
++	adminHandle = "admin"
++
++	// adminEmail is the contact recorded on the admin user row and on every
++	// consumed login token row (login_tokens.email is NOT NULL).
++	adminEmail = "admin"
++)
++
++// loginTokenTTL is how long a consumed token row stays recorded (the row is
++// the replay record, so expiry only bounds housekeeping, not the one-time
++// rule: a consumed token never validates again regardless of age).
++const loginTokenTTL = 24 * time.Hour
++
++// ErrTokenReused reports a replayed one-time login token: the token_hash row
++// already exists with used_at set. Callers answer 403 without revealing
++// whether the presented token was otherwise correct.
++var ErrTokenReused = errors.New("store: login token already used")
++
++// EnsureAdminUser idempotently ensures the admin account exists and returns
++// its id: INSERT ... ON CONFLICT(handle) DO NOTHING followed by the SELECT,
++// so the first exchange creates the row and every later call returns the
++// same id.
++func (db *DB) EnsureAdminUser(ctx context.Context) (UserID, error) {
++	if _, err := db.sql.ExecContext(ctx, `
++		INSERT INTO users (handle, email, role, created_at)
++		VALUES (?, ?, 'admin', ?)
++		ON CONFLICT(handle) DO NOTHING`,
++		adminHandle, adminEmail, Now().Format(time.RFC3339)); err != nil {
++		return 0, fmt.Errorf("store: ensure admin user: %w", err)
++	}
++	var id int64
++	if err := db.sql.QueryRowContext(ctx,
++		`SELECT id FROM users WHERE handle = ?`, adminHandle).Scan(&id); err != nil {
++		return 0, fmt.Errorf("store: ensure admin user: select: %w", err)
++	}
++	return UserID(id), nil
++}
++
++// ConsumeAdminToken records the one-time use of the admin login token. The
++// first call inserts the login_tokens row (token_hash = hex(sha256(token)),
++// email admin, expires_at now+24h, used_at now) and succeeds; a second call
++// for the same token finds used_at set and wraps ErrTokenReused. Any other
++// database failure is wrapped with %w. Consumption is global and permanent:
++// it does not depend on which client presents the token and does not lapse
++// when the row's expires_at passes.
++func (db *DB) ConsumeAdminToken(ctx context.Context, token []byte) error {
++	sum := sha256.Sum256(token)
++	tokenHash := hex.EncodeToString(sum[:])
++	stamp := Now()
++	_, err := db.sql.ExecContext(ctx, `
++		INSERT INTO login_tokens (token_hash, email, expires_at, used_at)
++		VALUES (?, ?, ?, ?)`,
++		tokenHash, adminEmail,
++		stamp.Add(loginTokenTTL).Format(time.RFC3339),
++		stamp.Format(time.RFC3339))
++	if err == nil {
++		return nil
++	}
++	// The INSERT can only conflict on the token_hash primary key: the token
++	// was consumed before. Confirm through the stored row so a driver-level
++	// failure is never misread as a replay (and vice versa).
++	var usedAt sql.NullString
++	qerr := db.sql.QueryRowContext(ctx,
++		`SELECT used_at FROM login_tokens WHERE token_hash = ?`, tokenHash).Scan(&usedAt)
++	switch {
++	case qerr == nil && usedAt.Valid:
++		return fmt.Errorf("store: consume admin token: %w", ErrTokenReused)
++	case qerr == nil:
++		// A row exists but was never marked used — unreachable through this
++		// API (used_at is stamped at insert time). Consume it now so the
++		// first use still wins exactly once.
++		if _, uerr := db.sql.ExecContext(ctx,
++			`UPDATE login_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL`,
++			stamp.Format(time.RFC3339), tokenHash); uerr != nil {
++			return fmt.Errorf("store: consume admin token: %w", uerr)
++		}
++		return nil
++	case errors.Is(qerr, sql.ErrNoRows):
++		// The INSERT failed without storing anything: a real database error.
++		return fmt.Errorf("store: consume admin token: %w", err)
++	default:
++		return fmt.Errorf("store: consume admin token: %w", qerr)
++	}
++}
+diff --git a/internal/store/user_test.go b/internal/store/user_test.go
+new file mode 100644
+index 0000000..6d2072d
+--- /dev/null
++++ b/internal/store/user_test.go
+@@ -0,0 +1,149 @@
++package store
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"testing"
++	"time"
++)
++
++// TestEnsureAdminUser covers the idempotent admin-account creation; case
++// names are the assertions.
++func TestEnsureAdminUser(t *testing.T) {
++	tests := []struct {
++		name string
++		run  func(t *testing.T)
++	}{
++		{"first call creates the admin row", func(t *testing.T) {
++			db, _ := openFresh(t)
++			id, err := db.EnsureAdminUser(context.Background())
++			if err != nil {
++				t.Fatalf("EnsureAdminUser: %v", err)
++			}
++			if id <= 0 {
++				t.Fatalf("EnsureAdminUser id = %d, want > 0", id)
++			}
++			var handle, email, role string
++			if err := db.sql.QueryRowContext(context.Background(),
++				`SELECT handle, email, role FROM users WHERE id = ?`, int64(id)).
++				Scan(&handle, &email, &role); err != nil {
++				t.Fatalf("select admin row: %v", err)
++			}
++			if handle != adminHandle || email != adminEmail || role != "admin" {
++				t.Fatalf("admin row = (%q, %q, %q), want (%q, %q, admin)",
++					handle, email, role, adminHandle, adminEmail)
++			}
++		}},
++		{"second call is idempotent and returns the same id", func(t *testing.T) {
++			db, _ := openFresh(t)
++			ctx := context.Background()
++			first, err := db.EnsureAdminUser(ctx)
++			if err != nil {
++				t.Fatalf("EnsureAdminUser #1: %v", err)
++			}
++			second, err := db.EnsureAdminUser(ctx)
++			if err != nil {
++				t.Fatalf("EnsureAdminUser #2: %v", err)
++			}
++			if first != second {
++				t.Fatalf("EnsureAdminUser ids differ: %d then %d", first, second)
++			}
++			var n int
++			if err := db.sql.QueryRowContext(ctx,
++				`SELECT count(*) FROM users WHERE handle = ?`, adminHandle).Scan(&n); err != nil {
++				t.Fatalf("count users: %v", err)
++			}
++			if n != 1 {
++				t.Fatalf("users with handle %q = %d, want exactly 1", adminHandle, n)
++			}
++		}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, tc.run)
++	}
++}
++
++// TestConsumeAdminToken covers the one-time token exchange; case names are
++// the assertions.
++func TestConsumeAdminToken(t *testing.T) {
++	tests := []struct {
++		name string
++		run  func(t *testing.T)
++	}{
++		{"first use succeeds", func(t *testing.T) {
++			db, _ := openFresh(t)
++			if err := db.ConsumeAdminToken(context.Background(), []byte("the-admin-token")); err != nil {
++				t.Fatalf("ConsumeAdminToken: %v", err)
++			}
++		}},
++		{"second use wraps ErrTokenReused", func(t *testing.T) {
++			db, _ := openFresh(t)
++			ctx := context.Background()
++			token := []byte("the-admin-token")
++			if err := db.ConsumeAdminToken(ctx, token); err != nil {
++				t.Fatalf("first ConsumeAdminToken: %v", err)
++			}
++			err := db.ConsumeAdminToken(ctx, token)
++			if !errors.Is(err, ErrTokenReused) {
++				t.Fatalf("second ConsumeAdminToken err = %v, want it to wrap ErrTokenReused", err)
++			}
++		}},
++		{"stored row records email, 24h expiry and the use stamp", func(t *testing.T) {
++			db, _ := openFresh(t)
++			setClock(t, clockBase)
++			token := []byte("the-admin-token")
++			if err := db.ConsumeAdminToken(context.Background(), token); err != nil {
++				t.Fatalf("ConsumeAdminToken: %v", err)
++			}
++			var email, expiresAt, usedAt string
++			if err := db.sql.QueryRowContext(context.Background(),
++				`SELECT email, expires_at, used_at FROM login_tokens WHERE token_hash = ?`,
++				tokenHashOf(token)).Scan(&email, &expiresAt, &usedAt); err != nil {
++				t.Fatalf("select login_tokens row: %v", err)
++			}
++			if email != adminEmail {
++				t.Fatalf("email = %q, want %q", email, adminEmail)
++			}
++			if expiresAt != clockBase.Add(loginTokenTTL).Format(time.RFC3339) {
++				t.Fatalf("expires_at = %q, want %q", expiresAt, clockBase.Add(loginTokenTTL).Format(time.RFC3339))
++			}
++			if usedAt != clockBase.Format(time.RFC3339) {
++				t.Fatalf("used_at = %q, want %q", usedAt, clockBase.Format(time.RFC3339))
++			}
++		}},
++		{"a different token value is independent", func(t *testing.T) {
++			db, _ := openFresh(t)
++			ctx := context.Background()
++			if err := db.ConsumeAdminToken(ctx, []byte("token-a")); err != nil {
++				t.Fatalf("ConsumeAdminToken A: %v", err)
++			}
++			if err := db.ConsumeAdminToken(ctx, []byte("token-b")); err != nil {
++				t.Fatalf("ConsumeAdminToken B: %v", err)
++			}
++		}},
++		{"database errors wrap the driver error", func(t *testing.T) {
++			db, _ := openFresh(t)
++			if err := db.Close(); err != nil {
++				t.Fatalf("Close: %v", err)
++			}
++			err := db.ConsumeAdminToken(context.Background(), []byte("the-admin-token"))
++			if err == nil {
++				t.Fatal("ConsumeAdminToken on a closed DB succeeded, want an error")
++			}
++			if errors.Is(err, ErrTokenReused) {
++				t.Fatalf("database error misreported as a replay: %v", err)
++			}
++		}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, tc.run)
++	}
++}
++
++// tokenHashOf mirrors ConsumeAdminToken's hash derivation for test queries.
++func tokenHashOf(token []byte) string {
++	sum := sha256.Sum256(token)
++	return hex.EncodeToString(sum[:])
++}
+diff --git a/internal/web/auth.go b/internal/web/auth.go
+new file mode 100644
+index 0000000..921402f
+--- /dev/null
++++ b/internal/web/auth.go
+@@ -0,0 +1,179 @@
++package web
++
++// Admin login: one-time ADMIN_TOKEN exchange for an admin session (A-201).
++// The frozen flow (acceptance/drafts/admin_auth_go_test.go.txt):
++//
++//	GET  /admin/login                  -> 200 form page (no/blank token)
++//	GET  /admin/login?token=<wrong>    -> 403
++//	GET  /admin/login?token=<valid>    -> 302 /admin + gl_session cookie
++//	GET  (replay, any client)          -> 403 (consumption is server-side)
++//	POST /admin/login                  -> the same exchange, CSRF-verified
++//
++// auth.go owns the routes and the exchange; session.go owns the cookie and
++// the AdminOnly guard. The page below is the minimal contract markup only;
++// the template pipeline render is T-205's (pages/admin-login.html, replacing
++// this inline page WITHOUT changing the frozen strings).
++
++import (
++	"bytes"
++	"crypto/subtle"
++	"encoding/base64"
++	"errors"
++	"html/template"
++	"net/http"
++
++	"github.com/amscotti/groveland-lights/internal/store"
++)
++
++func init() {
++	register(route{pattern: "GET /admin/login", handler: adminLoginGet})
++	register(route{pattern: "POST /admin/login", handler: adminLoginPost})
++}
++
++// loginForm is one login request parsed at the boundary; the handlers below
++// consult only these typed fields and never touch the form or query again.
++type loginForm struct {
++	Token     string // the submitted (or queried) admin token
++	CSRFToken string // POST only: the double-submit csrf_token field
++}
++
++// parseLoginGet lifts the GET query into a loginForm.
++func parseLoginGet(r *http.Request) loginForm {
++	return loginForm{Token: r.URL.Query().Get("token")}
++}
++
++// parseLoginPost parses the POST form exactly once and lifts it into a
++// loginForm.
++func parseLoginPost(r *http.Request) (loginForm, error) {
++	if err := r.ParseForm(); err != nil {
++		return loginForm{}, err
++	}
++	return loginForm{
++		Token:     r.PostForm.Get("token"),
++		CSRFToken: r.PostForm.Get(CSRFTokenName),
++	}, nil
++}
++
++func adminLoginGet(w http.ResponseWriter, r *http.Request) {
++	s := serverFrom(r.Context())
++	s.adminLogin(w, r, parseLoginGet(r))
++}
++
++func adminLoginPost(w http.ResponseWriter, r *http.Request) {
++	s := serverFrom(r.Context())
++	form, err := parseLoginPost(r)
++	if err != nil {
++		s.Log.Error("admin login: parse", "err", err)
++		http.Error(w, "bad request", http.StatusBadRequest)
++		return
++	}
++	if err := VerifyCSRF(r, form.CSRFToken); err != nil {
++		http.Error(w, "forbidden", http.StatusForbidden)
++		return
++	}
++	s.adminLogin(w, r, form)
++}
++
++// tokenMatches reports whether the submitted token is the configured admin
++// credential in either of its two operator-facing forms. ADMIN_TOKEN is
++// provisioned as base64 (docs/PLAN.md env table), and config.Load stores the
++// DECODED bytes in Cfg.AdminToken — while the operator and the frozen A-201
++// flow present the env value verbatim, i.e. the base64 encoding of exactly
++// those bytes. Both strings therefore denote one and the same secret, so
++// both encodings are accepted; that widens nothing (anyone who can compute
++// the encoding already knows the secret). Both comparisons run
++// unconditionally and constant-time.
++func tokenMatches(submitted string, admin []byte) bool {
++	encoded := base64.StdEncoding.EncodeToString(admin)
++	mDecoded := subtle.ConstantTimeCompare([]byte(submitted), admin)
++	mEncoded := subtle.ConstantTimeCompare([]byte(submitted), []byte(encoded))
++	return mDecoded == 1 || mEncoded == 1
++}
++
++// adminLogin runs the shared exchange for a parsed form. A blank token
++// renders the form page (the contract's no/blank -> 200); a wrong token is a
++// uniform 403; a valid one is consumed globally and exchanged for an admin
++// session cookie with a 302 to /admin. The token value is never logged.
++func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request, form loginForm) {
++	if form.Token == "" {
++		s.renderLoginPage(w)
++		return
++	}
++	if s.Store == nil {
++		s.Log.Error("admin login: store not wired")
++		http.Error(w, "internal error", http.StatusInternalServerError)
++		return
++	}
++	// Uniform constant-time comparison against the configured ADMIN_TOKEN
++	// (in either operator-facing encoding; see tokenMatches). On success the
++	// canonical config bytes are what gets consumed below, so every accepted
++	// encoding burns the same one-time row.
++	if !tokenMatches(form.Token, s.Cfg.AdminToken) {
++		s.Log.Info("admin login: token rejected")
++		http.Error(w, "forbidden", http.StatusForbidden)
++		return
++	}
++	if err := s.Store.ConsumeAdminToken(r.Context(), s.Cfg.AdminToken); err != nil {
++		if errors.Is(err, store.ErrTokenReused) {
++			s.Log.Info("admin login: token replay refused")
++			http.Error(w, "forbidden", http.StatusForbidden)
++			return
++		}
++		s.Log.Error("admin login: consume token", "err", err)
++		http.Error(w, "internal error", http.StatusInternalServerError)
++		return
++	}
++	uid, err := s.Store.EnsureAdminUser(r.Context())
++	if err != nil {
++		s.Log.Error("admin login: ensure admin user", "err", err)
++		http.Error(w, "internal error", http.StatusInternalServerError)
++		return
++	}
++	sid, err := s.Store.CreateSession(r.Context(), uid, "admin")
++	if err != nil {
++		s.Log.Error("admin login: create session", "err", err)
++		http.Error(w, "internal error", http.StatusInternalServerError)
++		return
++	}
++	setSessionCookie(s.Cfg, w, sid)
++	s.Log.Info("admin login: session issued", "user_id", int64(uid))
++	http.Redirect(w, r, "/admin", http.StatusFound)
++}
++
++// loginPageTmpl is the minimal login page: exactly the frozen contract
++// markup (heading "Admin login", label "Token" over input name "token",
++// button "Sign in"). T-205 replaces it with pages/admin-login.html through
++// the template pipeline, keeping these strings byte-for-byte.
++var loginPageTmpl = template.Must(template.New("admin-login").Parse(`<!doctype html>
++<html lang="en">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width, initial-scale=1">
++<title>Admin login — Groveland Lights</title>
++</head>
++<body>
++<main>
++<h1>Admin login</h1>
++<form method="get" action="/admin/login">
++<label for="token">Token</label>
++<input id="token" name="token" type="password" autocomplete="off" required>
++<button type="submit">Sign in</button>
++</form>
++</main>
++</body>
++</html>
++`))
++
++// renderLoginPage answers 200 with the frozen login form. The template is
++// static (no data), so it is rendered into a buffer: a failure can never
++// half-write the response.
++func (s *Server) renderLoginPage(w http.ResponseWriter) {
++	var buf bytes.Buffer
++	if err := loginPageTmpl.Execute(&buf, nil); err != nil {
++		s.Log.Error("admin login: render", "err", err)
++		http.Error(w, "internal error", http.StatusInternalServerError)
++		return
++	}
++	w.Header().Set("Content-Type", "text/html; charset=utf-8")
++	_, _ = w.Write(buf.Bytes())
++}
+diff --git a/internal/web/auth_test.go b/internal/web/auth_test.go
+new file mode 100644
+index 0000000..d50cec7
+--- /dev/null
++++ b/internal/web/auth_test.go
+@@ -0,0 +1,353 @@
++package web
++
++import (
++	"context"
++	"encoding/base64"
++	"io"
++	"log/slog"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"path/filepath"
++	"regexp"
++	"strings"
++	"testing"
++
++	"github.com/amscotti/groveland-lights/internal/config"
++	"github.com/amscotti/groveland-lights/internal/store"
++)
++
++// authAdminToken is the ADMIN_TOKEN the auth tests configure; the frozen
++// exchange compares every submission against exactly this value.
++const authAdminToken = "baseline-test-admin-token"
++
++// authSessionKey is the signing key for the auth tests' cookies (32 bytes).
++var authSessionKey = []byte("0123456789abcdef0123456789abcdef")
++
++// The frozen login-page markup (mirrors the acceptance draft's regexes).
++var (
++	authReHeading = regexp.MustCompile(`<h1[^>]*>\s*Admin login\s*</h1>`)
++	authReLabel   = regexp.MustCompile(`<label[^>]*>\s*Token\s*</label>`)
++	authReInput   = regexp.MustCompile(`<input[^>]*name="token"[^>]*>`)
++	authReButton  = regexp.MustCompile(`<button[^>]*>\s*Sign in\s*</button>`)
++)
++
++// newAuthServer builds a Server wired to a real temp-file store (migrations
++// applied by store.Open) with a known ADMIN_TOKEN and signing key, exactly
++// the way main wires web.New(cfg, log, db).
++func newAuthServer(t *testing.T, env config.Env) (*Server, *store.DB) {
++	t.Helper()
++	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "auth.db"))
++	if err != nil {
++		t.Fatalf("store.Open: %v", err)
++	}
++	t.Cleanup(func() { _ = db.Close() })
++	cfg := testConfig(env)
++	cfg.AdminToken = []byte(authAdminToken)
++	cfg.SessionKey = authSessionKey
++	s, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), db)
++	if err != nil {
++		t.Fatalf("New: %v", err)
++	}
++	return s, db
++}
++
++// authGet runs a GET through the full middleware chain and returns the
++// recorder (redirects stay observable: ServeHTTP never follows them).
++func authGet(t *testing.T, s *Server, target string, hx bool) *httptest.ResponseRecorder {
++	t.Helper()
++	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
++	if hx {
++		req.Header.Set("HX-Request", "true")
++	}
++	rec := httptest.NewRecorder()
++	s.Handler().ServeHTTP(rec, req)
++	return rec
++}
++
++// authPostForm runs a urlencoded POST through the full middleware chain,
++// optionally carrying the csrf_token cookie.
++func authPostForm(t *testing.T, s *Server, target, csrfCookie string, form url.Values) *httptest.ResponseRecorder {
++	t.Helper()
++	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, target, strings.NewReader(form.Encode()))
++	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++	if csrfCookie != "" {
++		req.AddCookie(&http.Cookie{Name: CSRFTokenName, Value: csrfCookie})
++	}
++	rec := httptest.NewRecorder()
++	s.Handler().ServeHTTP(rec, req)
++	return rec
++}
++
++// sessionCookieOf extracts the gl_session cookie from a response, failing
++// the test when it is absent.
++func sessionCookieOf(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
++	t.Helper()
++	res := rec.Result()
++	defer func() { _ = res.Body.Close() }()
++	for _, c := range res.Cookies() {
++		if c.Name == SessionCookieName {
++			return c
++		}
++	}
++	t.Fatalf("response set no %s cookie; Set-Cookie: %v", SessionCookieName, res.Header.Values("Set-Cookie"))
++	return nil // unreachable
++}
++
++// assertLoginMarkup fails unless the body carries all four frozen elements.
++func assertLoginMarkup(t *testing.T, body string) {
++	t.Helper()
++	for _, re := range []*regexp.Regexp{authReHeading, authReLabel, authReInput, authReButton} {
++		if !re.MatchString(body) {
++			t.Errorf("login page missing the frozen %q element; body:\n%s", re.String(), body)
++		}
++	}
++}
++
++// assertFrozenCookieFlags checks the exact attribute set the A-201 draft
++// parses and compares: Path=/, Max-Age=86400, HttpOnly, SameSite=Lax, with
++// Secure exactly in prod.
++func assertFrozenCookieFlags(t *testing.T, c *http.Cookie, env config.Env) {
++	t.Helper()
++	if c.Path != "/" {
++		t.Errorf("cookie Path = %q, want exactly \"/\"", c.Path)
++	}
++	if c.MaxAge != 86400 {
++		t.Errorf("cookie Max-Age = %d, want 86400 (24 h)", c.MaxAge)
++	}
++	if !c.HttpOnly {
++		t.Error("cookie lacks the HttpOnly flag")
++	}
++	if c.SameSite != http.SameSiteLaxMode {
++		t.Errorf("cookie SameSite = %v, want Lax", c.SameSite)
++	}
++	if want := env == config.EnvProd; c.Secure != want {
++		t.Errorf("cookie Secure = %v, want %v (env %s)", c.Secure, want, env)
++	}
++}
++
++// assertRedirectToLogin asserts the full-page guard refusal: 302 with
++// Location /admin/login and the guarded handler's body never written.
++func assertRedirectToLogin(t *testing.T, rec *httptest.ResponseRecorder) {
++	t.Helper()
++	if rec.Code != http.StatusFound {
++		t.Fatalf("guard status = %d, want 302; body:\n%s", rec.Code, rec.Body.String())
++	}
++	if loc := rec.Header().Get("Location"); loc != "/admin/login" {
++		t.Fatalf("guard Location = %q, want %q", loc, "/admin/login")
++	}
++	if strings.Contains(rec.Body.String(), "admin-ok") {
++		t.Fatal("guarded handler ran despite the refusal")
++	}
++}
++
++// mustCSRFToken mints a CSRF token for the POST tests, failing on error.
++func mustCSRFToken(t *testing.T) string {
++	t.Helper()
++	tok, err := newCSRFToken()
++	if err != nil {
++		t.Fatalf("newCSRFToken: %v", err)
++	}
++	return tok
++}
++
++// TestAdminLoginExchange covers the frozen one-time exchange happy path:
++// the valid token mints a live admin session and redirects.
++func TestAdminLoginExchange(t *testing.T) {
++	tests := []struct {
++		name string
++		run  func(t *testing.T)
++	}{
++		{"valid token first use sets session and redirects", func(t *testing.T) {
++			s, db := newAuthServer(t, config.EnvTest)
++			rec := authGet(t, s, "/admin/login?token="+authAdminToken, false)
++			if rec.Code != http.StatusFound {
++				t.Fatalf("status = %d, want 302; body:\n%s", rec.Code, rec.Body.String())
++			}
++			if loc := rec.Header().Get("Location"); loc != "/admin" {
++				t.Fatalf("Location = %q, want %q", loc, "/admin")
++			}
++			c := sessionCookieOf(t, rec)
++			assertFrozenCookieFlags(t, c, config.EnvTest)
++			// The cookie value must verify and name a live admin session.
++			id, ok := sessionIDOf(authSessionKey, c.Value)
++			if !ok {
++				t.Fatalf("minted cookie value %q does not verify", c.Value)
++			}
++			uid, role, valid, err := db.SessionValid(context.Background(), id)
++			if err != nil || !valid {
++				t.Fatalf("minted session %q not valid: ok=%v err=%v", id, valid, err)
++			}
++			if role != "admin" {
++				t.Fatalf("minted session role = %q, want admin", role)
++			}
++			if uid <= 0 {
++				t.Fatalf("minted session user id = %d, want > 0", uid)
++			}
++		}},
++		{"prod minted cookie is Secure", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvProd)
++			rec := authGet(t, s, "/admin/login?token="+authAdminToken, false)
++			if rec.Code != http.StatusFound {
++				t.Fatalf("status = %d, want 302", rec.Code)
++			}
++			assertFrozenCookieFlags(t, sessionCookieOf(t, rec), config.EnvProd)
++		}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, tc.run)
++	}
++}
++
++// TestAdminLoginRejections covers the refusal paths of the exchange; case
++// names are the assertions.
++func TestAdminLoginRejections(t *testing.T) {
++	tests := []struct {
++		name string
++		run  func(t *testing.T)
++	}{
++		{"wrong token 403", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			rec := authGet(t, s, "/admin/login?token=definitely-not-the-token", false)
++			if rec.Code != http.StatusForbidden {
++				t.Fatalf("status = %d, want 403; body:\n%s", rec.Code, rec.Body.String())
++			}
++			// A refusal must not mint a session or set any cookie.
++			res := rec.Result()
++			defer func() { _ = res.Body.Close() }()
++			if n := len(res.Cookies()); n != 0 {
++				t.Errorf("wrong-token 403 set %d cookie(s), want 0", n)
++			}
++		}},
++		{"replayed token 403 from a fresh cookie-less client", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			first := authGet(t, s, "/admin/login?token="+authAdminToken, false)
++			if first.Code != http.StatusFound {
++				t.Fatalf("first exchange status = %d, want 302", first.Code)
++			}
++			// A brand-new request with NO cookies: the one-time property is
++			// server-side (login_tokens), so a fresh client must not help.
++			second := authGet(t, s, "/admin/login?token="+authAdminToken, false)
++			if second.Code != http.StatusForbidden {
++				t.Fatalf("replay status = %d, want 403; body:\n%s", second.Code, second.Body.String())
++			}
++			res := second.Result()
++			defer func() { _ = res.Body.Close() }()
++			if n := len(res.Cookies()); n != 0 {
++				t.Errorf("replay 403 set %d cookie(s), want 0", n)
++			}
++		}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, tc.run)
++	}
++}
++
++// TestAdminLoginTokenEncodings pins the ADMIN_TOKEN encoding reconciliation:
++// config.Load stores the DECODED bytes of the base64-provisioned env value,
++// while the operator and the A-201 oracle submit the env value verbatim.
++// Both strings denote one secret, so both must exchange (and burn the same
++// one-time row).
++func TestAdminLoginTokenEncodings(t *testing.T) {
++	tests := []struct {
++		name string
++		run  func(t *testing.T)
++	}{
++		{"base64 env-value form of the token is accepted", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			envForm := base64.StdEncoding.EncodeToString([]byte(authAdminToken))
++			rec := authGet(t, s, "/admin/login?token="+envForm, false)
++			if rec.Code != http.StatusFound {
++				t.Fatalf("status = %d, want 302; body:\n%s", rec.Code, rec.Body.String())
++			}
++			if loc := rec.Header().Get("Location"); loc != "/admin" {
++				t.Fatalf("Location = %q, want %q", loc, "/admin")
++			}
++			assertFrozenCookieFlags(t, sessionCookieOf(t, rec), config.EnvTest)
++		}},
++		{"either accepted encoding burns the same one-time row", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			envForm := base64.StdEncoding.EncodeToString([]byte(authAdminToken))
++			// First use via the env-value form.
++			first := authGet(t, s, "/admin/login?token="+envForm, false)
++			if first.Code != http.StatusFound {
++				t.Fatalf("env-form exchange status = %d, want 302", first.Code)
++			}
++			// The decoded form denotes the same consumed secret: refused.
++			decoded := authGet(t, s, "/admin/login?token="+authAdminToken, false)
++			if decoded.Code != http.StatusForbidden {
++				t.Fatalf("decoded-form after consume: status = %d, want 403", decoded.Code)
++			}
++			// The env-value replay: refused too.
++			replay := authGet(t, s, "/admin/login?token="+envForm, false)
++			if replay.Code != http.StatusForbidden {
++				t.Fatalf("env-form replay: status = %d, want 403", replay.Code)
++			}
++		}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, tc.run)
++	}
++}
++
++// TestAdminLoginForm covers the form page and the CSRF-verified POST
++// variant of the exchange; case names are the assertions.
++func TestAdminLoginForm(t *testing.T) {
++	tests := []struct {
++		name string
++		run  func(t *testing.T)
++	}{
++		{"no or blank token renders the frozen form", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			for _, target := range []string{"/admin/login", "/admin/login?token="} {
++				rec := authGet(t, s, target, false)
++				if rec.Code != http.StatusOK {
++					t.Errorf("GET %s: status = %d, want 200", target, rec.Code)
++				}
++				assertLoginMarkup(t, rec.Body.String())
++			}
++		}},
++		{"valid POST exchange with matching csrf", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			ct := mustCSRFToken(t)
++			form := url.Values{"token": {authAdminToken}, CSRFTokenName: {ct}}
++			rec := authPostForm(t, s, "/admin/login", ct, form)
++			if rec.Code != http.StatusFound {
++				t.Fatalf("status = %d, want 302; body:\n%s", rec.Code, rec.Body.String())
++			}
++			if loc := rec.Header().Get("Location"); loc != "/admin" {
++				t.Fatalf("Location = %q, want %q", loc, "/admin")
++			}
++			assertFrozenCookieFlags(t, sessionCookieOf(t, rec), config.EnvTest)
++		}},
++		{"POST with mismatched csrf 403", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			form := url.Values{"token": {authAdminToken}, CSRFTokenName: {mustCSRFToken(t)}}
++			rec := authPostForm(t, s, "/admin/login", mustCSRFToken(t), form)
++			if rec.Code != http.StatusForbidden {
++				t.Fatalf("status = %d, want 403; body:\n%s", rec.Code, rec.Body.String())
++			}
++		}},
++		{"POST without csrf 403", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			form := url.Values{"token": {authAdminToken}}
++			rec := authPostForm(t, s, "/admin/login", "", form)
++			if rec.Code != http.StatusForbidden {
++				t.Fatalf("status = %d, want 403; body:\n%s", rec.Code, rec.Body.String())
++			}
++		}},
++		{"POST blank token renders the form again", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			ct := mustCSRFToken(t)
++			form := url.Values{"token": {""}, CSRFTokenName: {ct}}
++			rec := authPostForm(t, s, "/admin/login", ct, form)
++			if rec.Code != http.StatusOK {
++				t.Fatalf("status = %d, want 200 (the form page); body:\n%s", rec.Code, rec.Body.String())
++			}
++			assertLoginMarkup(t, rec.Body.String())
++		}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, tc.run)
++	}
++}
+diff --git a/internal/web/session.go b/internal/web/session.go
+new file mode 100644
+index 0000000..b245f85
+--- /dev/null
++++ b/internal/web/session.go
+@@ -0,0 +1,135 @@
++package web
++
++// Admin session cookie and guard (A-201). auth.go exchanges the one-time
++// ADMIN_TOKEN for a session; this file owns the gl_session cookie format and
++// the AdminOnly wrapper that T-205 puts around every /admin route. The
++// cookie value is base64url(session id) + "." + hex(HMAC-SHA256(SessionKey,
++// id)): the HMAC makes the value unforgeable, so a cookie alone never
++// unlocks anything without its live sessions row.
++
++import (
++	"crypto/hmac"
++	"crypto/sha256"
++	"crypto/subtle"
++	"encoding/base64"
++	"encoding/hex"
++	"errors"
++	"net/http"
++	"strings"
++	"time"
++
++	"github.com/amscotti/groveland-lights/internal/config"
++	"github.com/amscotti/groveland-lights/internal/store"
++)
++
++// SessionCookieName is the admin session cookie, frozen by the A-201
++// contract ("gl_session").
++const SessionCookieName = "gl_session"
++
++// sessionCookieTTL is the cookie Max-Age and matches the store-side session
++// lifetime: the contract freezes Max-Age=86400 (24 h).
++const sessionCookieTTL = 24 * time.Hour
++
++// sessionValue encodes id for the cookie: base64url(id) + "." +
++// hex(HMAC-SHA256(key, id)).
++func sessionValue(key []byte, id string) string {
++	mac := hmac.New(sha256.New, key)
++	_, _ = mac.Write([]byte(id))
++	return base64.RawURLEncoding.EncodeToString([]byte(id)) + "." + hex.EncodeToString(mac.Sum(nil))
++}
++
++// sessionIDOf verifies a sessionValue-encoded cookie and returns the session
++// id it carries. Any structural defect or signature mismatch (compared
++// constant-time) yields ok=false.
++func sessionIDOf(key []byte, value string) (id string, ok bool) {
++	encoded, sig, found := strings.Cut(value, ".")
++	if !found {
++		return "", false
++	}
++	raw, err := base64.RawURLEncoding.DecodeString(encoded)
++	if err != nil || len(raw) == 0 {
++		return "", false
++	}
++	id = string(raw)
++	mac := hmac.New(sha256.New, key)
++	_, _ = mac.Write([]byte(id))
++	if subtle.ConstantTimeCompare([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) != 1 {
++		return "", false
++	}
++	return id, true
++}
++
++// setSessionCookie sets the admin session cookie for id on the response:
++// Path=/, HttpOnly, SameSite=Lax, Max-Age 86400, Secure exactly in prod
++// (frozen attribute set; the A-201 draft parses and compares them exactly).
++func setSessionCookie(cfg config.Config, w http.ResponseWriter, id string) {
++	http.SetCookie(w, &http.Cookie{ //nolint:gosec // Secure comes from cfg.IsProd(); dev/test intentionally serve without TLS (same door as csrf.go)
++		Name:     SessionCookieName,
++		Value:    sessionValue(cfg.SessionKey, id),
++		Path:     "/",
++		MaxAge:   int(sessionCookieTTL.Seconds()),
++		HttpOnly: true,
++		SameSite: http.SameSiteLaxMode,
++		Secure:   cfg.IsProd(),
++	})
++}
++
++// AdminOnly guards an admin handler: a request carrying a cookie that
++// verifies against a live, unexpired, admin-role session passes through;
++// everyone else is bounced to the login page — a 302 for full-page
++// navigations, 401 with HX-Redirect: /admin/login and an empty body for
++// HTMX fragment requests (frozen contract A-201). T-205 wraps every /admin
++// route with this.
++func AdminOnly(next http.HandlerFunc) http.HandlerFunc {
++	return func(w http.ResponseWriter, r *http.Request) {
++		s := serverFrom(r.Context())
++		if !s.validAdminSession(r) {
++			if r.Header.Get("HX-Request") != "" {
++				w.Header().Set("HX-Redirect", "/admin/login")
++				w.WriteHeader(http.StatusUnauthorized)
++				return
++			}
++			http.Redirect(w, r, "/admin/login", http.StatusFound)
++			return
++		}
++		next(w, r)
++	}
++}
++
++// validAdminSession verifies the gl_session cookie end to end: structure and
++// signature, live store row, expiry and admin role. Any failure refuses; the
++// reason goes to the log, never to the response — and neither the token nor
++// any credential value is ever logged.
++func (s *Server) validAdminSession(r *http.Request) bool {
++	c, err := r.Cookie(SessionCookieName)
++	if err != nil || c.Value == "" {
++		return false
++	}
++	id, ok := sessionIDOf(s.Cfg.SessionKey, c.Value)
++	if !ok {
++		s.Log.Info("admin session: cookie signature rejected")
++		return false
++	}
++	if s.Store == nil {
++		s.Log.Error("admin session: store not wired")
++		return false
++	}
++	_, role, valid, err := s.Store.SessionValid(r.Context(), id)
++	if err != nil {
++		if errors.Is(err, store.ErrBadCredentials) {
++			// Expired: best-effort cleanup of the stale row so expired
++			// sessions do not accumulate, then the ordinary refusal path.
++			if derr := s.Store.DeleteSession(r.Context(), id); derr != nil {
++				s.Log.Error("admin session: expire cleanup", "err", derr)
++			}
++			s.Log.Info("admin session: expired session refused")
++			return false
++		}
++		s.Log.Error("admin session: lookup failed", "err", err)
++		return false // fail closed
++	}
++	if !valid {
++		return false
++	}
++	return role == "admin"
++}
+diff --git a/internal/web/session_test.go b/internal/web/session_test.go
+new file mode 100644
+index 0000000..0776fc1
+--- /dev/null
++++ b/internal/web/session_test.go
+@@ -0,0 +1,214 @@
++package web
++
++import (
++	"context"
++	"encoding/base64"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/amscotti/groveland-lights/internal/config"
++	"github.com/amscotti/groveland-lights/internal/store"
++)
++
++// guardedStub is the handler AdminOnly protects in these tests; it writes a
++// marker body so every case can tell "passed through" from "refused".
++func guardedStub(w http.ResponseWriter, r *http.Request) {
++	_, _ = w.Write([]byte("admin-ok"))
++}
++
++// guardedGet builds a GET /admin request carrying the given cookie value
++// ("" = no cookie) and optionally the HTMX header, then runs the guard.
++func guardedGet(s *Server, cookieValue string, hx bool) *httptest.ResponseRecorder {
++	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/admin", nil)
++	if cookieValue != "" {
++		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: cookieValue})
++	}
++	if hx {
++		req.Header.Set("HX-Request", "true")
++	}
++	rec := httptest.NewRecorder()
++	AdminOnly(guardedStub)(rec, req.WithContext(context.WithValue(req.Context(), ctxServer, s)))
++	return rec
++}
++
++// adminCookie exchanges the test ADMIN_TOKEN through the full chain and
++// returns the minted gl_session cookie (and the session id it carries).
++func adminCookie(t *testing.T, s *Server) (*http.Cookie, string) {
++	t.Helper()
++	rec := authGet(t, s, "/admin/login?token="+authAdminToken, false)
++	if rec.Code != http.StatusFound {
++		t.Fatalf("token exchange status = %d, want 302; body:\n%s", rec.Code, rec.Body.String())
++	}
++	c := sessionCookieOf(t, rec)
++	id, ok := sessionIDOf(authSessionKey, c.Value)
++	if !ok {
++		t.Fatalf("minted cookie value %q does not verify", c.Value)
++	}
++	return c, id
++}
++
++// TestAdminOnlyGuard covers the guard as a table of flows; case names are
++// the assertions.
++func TestAdminOnlyGuard(t *testing.T) {
++	tests := []struct {
++		name string
++		run  func(t *testing.T)
++	}{
++		{"anon full page redirected to login", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			assertRedirectToLogin(t, guardedGet(s, "", false))
++		}},
++		{"anon HTMX gets 401 plus HX-Redirect", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			rec := guardedGet(s, "", true)
++			if rec.Code != http.StatusUnauthorized {
++				t.Fatalf("status = %d, want 401; body:\n%s", rec.Code, rec.Body.String())
++			}
++			if loc := rec.Header().Get("HX-Redirect"); loc != "/admin/login" {
++				t.Fatalf("HX-Redirect = %q, want %q", loc, "/admin/login")
++			}
++			if rec.Body.Len() != 0 {
++				t.Fatalf("401 body = %q, want empty", rec.Body.String())
++			}
++			if strings.Contains(rec.Body.String(), "admin-ok") {
++				t.Fatal("guarded handler ran despite the refusal")
++			}
++		}},
++		{"admin cookie passes AdminOnly", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			c, _ := adminCookie(t, s)
++			rec := guardedGet(s, c.Value, false)
++			if rec.Code != http.StatusOK {
++				t.Fatalf("status = %d, want 200; body:\n%s", rec.Code, rec.Body.String())
++			}
++			if rec.Body.String() != "admin-ok" {
++				t.Fatalf("guarded handler did not run; body = %q", rec.Body.String())
++			}
++		}},
++		{"admin HTMX with a valid cookie passes too", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			c, _ := adminCookie(t, s)
++			rec := guardedGet(s, c.Value, true)
++			if rec.Code != http.StatusOK {
++				t.Fatalf("status = %d, want 200; body:\n%s", rec.Code, rec.Body.String())
++			}
++		}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, tc.run)
++	}
++}
++
++// TestAdminOnlyGuardRefusals covers every rejection path of the guard; case
++// names are the assertions.
++func TestAdminOnlyGuardRefusals(t *testing.T) {
++	tests := []struct {
++		name string
++		run  func(t *testing.T)
++	}{
++		{"tampered cookie signature rejected", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			c, _ := adminCookie(t, s)
++			tampered := c.Value[:len(c.Value)-1]
++			if c.Value[len(c.Value)-1] == 'a' {
++				tampered += "b"
++			} else {
++				tampered += "a"
++			}
++			assertRedirectToLogin(t, guardedGet(s, tampered, false))
++		}},
++		{"expired session rejected (injected clock)", func(t *testing.T) {
++			s, db := newAuthServer(t, config.EnvTest)
++			c, id := adminCookie(t, s)
++			// Push the auth slice's clock past the session's 24 h lifetime;
++			// restored on cleanup so no other test sees a shifted clock.
++			prev := store.Now
++			store.Now = func() time.Time { return prev().Add(25 * time.Hour) }
++			t.Cleanup(func() { store.Now = prev })
++
++			assertRedirectToLogin(t, guardedGet(s, c.Value, false))
++			// The expired row was swept: no row answers for the id any more
++			// (missing sessions carry a nil error, unlike expired ones).
++			_, _, ok, err := db.SessionValid(context.Background(), id)
++			if ok || err != nil {
++				t.Fatalf("expired session row survived: ok=%v err=%v", ok, err)
++			}
++		}},
++		{"user-role session rejected", func(t *testing.T) {
++			s, db := newAuthServer(t, config.EnvTest)
++			ctx := context.Background()
++			uid, err := db.EnsureAdminUser(ctx)
++			if err != nil {
++				t.Fatalf("EnsureAdminUser: %v", err)
++			}
++			sid, err := db.CreateSession(ctx, uid, "user")
++			if err != nil {
++				t.Fatalf("CreateSession: %v", err)
++			}
++			assertRedirectToLogin(t, guardedGet(s, sessionValue(authSessionKey, sid), false))
++		}},
++		{"cookie signed with another key rejected", func(t *testing.T) {
++			s, db := newAuthServer(t, config.EnvTest)
++			ctx := context.Background()
++			uid, err := db.EnsureAdminUser(ctx)
++			if err != nil {
++				t.Fatalf("EnsureAdminUser: %v", err)
++			}
++			sid, err := db.CreateSession(ctx, uid, "admin")
++			if err != nil {
++				t.Fatalf("CreateSession: %v", err)
++			}
++			otherKey := []byte("99999999999999999999999999999999")
++			assertRedirectToLogin(t, guardedGet(s, sessionValue(otherKey, sid), false))
++		}},
++		{"structurally invalid cookie rejected", func(t *testing.T) {
++			s, _ := newAuthServer(t, config.EnvTest)
++			assertRedirectToLogin(t, guardedGet(s, "garbage", false))
++		}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, tc.run)
++	}
++}
++
++// TestSessionValueRoundTrip pins the cookie codec directly: the exact
++// structure the guard parses.
++func TestSessionValueRoundTrip(t *testing.T) {
++	id := "MgisOMh2YRG2S9YRShtazoR-Ci1Q8WfJmmvKlj7C_5g"
++	value := sessionValue(authSessionKey, id)
++	encoded, sig, found := strings.Cut(value, ".")
++	// The frozen format is base64url(id) + "." + hex(HMAC-SHA256(key, id)):
++	// the id is encoded AGAIN for the cookie, and the codec must invert it.
++	if !found || encoded != base64.RawURLEncoding.EncodeToString([]byte(id)) {
++		t.Fatalf("sessionValue = %q, want <base64url(id)>.<signature>", value)
++	}
++	if len(sig) != 64 {
++		t.Fatalf("signature = %q (%d chars), want 64 hex chars", sig, len(sig))
++	}
++	got, ok := sessionIDOf(authSessionKey, value)
++	if !ok || got != id {
++		t.Fatalf("sessionIDOf = (%q, %v), want (%q, true)", got, ok, id)
++	}
++
++	tests := []struct {
++		name  string
++		value string
++	}{
++		{"missing dot rejected", id},
++		{"undecodable id part rejected", "###.deadbeef"},
++		{"empty id part rejected", ".deadbeef"},
++		{"wrong signature rejected", id + ".00000000000000000000000000000000"},
++		{"signature part missing rejected", id + "."},
++		{"empty value rejected", ""},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			if got, ok := sessionIDOf(authSessionKey, tc.value); ok {
++				t.Fatalf("sessionIDOf accepted %q as %q", tc.value, got)
++			}
++		})
++	}
++}
