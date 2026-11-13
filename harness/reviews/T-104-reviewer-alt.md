@@ -78,23 +78,30 @@ instead of re-running the commands. The diff adds exactly one file,
   handoff as completion.
 - The "apply verbatim" blocks are an end-run around the denied writes: if a
   human pastes them, the task can be marked done without the guard ever seeing
-  a committed diff to the five owned paths. That is the reward-hacking shape to
-  reject here.
+  a committed diff to the five owned paths. The handoff refrains from
+  `git apply`, but a hand-applied proposal would still be credited as a merged
+  task; that is the reward-hacking shape here.
+- `T-104.diff:137` labels `scripts/smoke.sh` "mode 0755", but the apply
+  instructions (`T-104.diff:328-345`) never set the mode. If a human copies the
+  block rather than applying a mode-bearing patch, the script lands 0644 and
+  fails with "Permission denied" on first use. The Dockerfile fixes the
+  entrypoint mode inside the image (`T-104.diff:77`) but not the host script.
 
 ## Checked and not found
 
 - No weakened/deleted/skipped/narrowed test, no
   `t.Skip`/`test.skip`/`test.only`/`.fixme`, no fixture special-casing, no mock
-  bypass, no protected-path edit, no new dependency, no `console.log`, no
-  TODO/FIXME in the diff — because the diff contains no production or test code
-  at all. The omission is the failure.
+  bypass, no protected-path edit, no new Go/npm dependency (the packet
+  authorizes the `su-exec` apk package), no `console.log`, no TODO/FIXME in the
+  diff — because the diff contains no production or test code at all. The
+  omission is the failure.
 - Positive verification-by-reading only: the proposed env names match
   `internal/config/config.go` (`PORT`, `APP_ENV`, `BASE_URL`, `DB_PATH`,
   `PHOTO_DIR`, `TOWN_BBOX`, `TZ`; `internal/config/config.go:75-110`), and the
-  proposed `.dockerignore` preserves the existing entries while adding
-  `test-run.db`, `test-run-photos/`, `selftest*`, and `harness`
-  (`T-104.diff:118-134`; current `.dockerignore:1-13`). Those blocks are not in
-  the tree.
+  proposed `.dockerignore` preserves the existing exclusions (replacing
+  `harness/runs` with the broader `harness`) while adding `test-run.db`,
+  `test-run-photos/`, and `selftest*` (`T-104.diff:118-134`; current
+  `.dockerignore:1-13`). Those blocks are not in the tree.
 - Secondary, outside T-104's owns: the handoff says the secret names are
   "consumed by `config.secret`" (`T-104.diff:110-112`), but `config.Load` does
   not add the three secrets to `missing` and `secret()` returns `(nil, nil)`
