@@ -1,141 +1,196 @@
 # T-208 reviewer — store onto Server + /probe fragment Content-Type
 
-Artifact: `harness/reviews/T-208.diff` (branch diff vs main) + handoff
-`harness/handoffs/T-208.md`. Packet: `harness/tasks/T-208.md`.
+Basis: the attached diff (`harness/reviews/T-208.diff`), packet
+`harness/tasks/T-208.md`, judge finding `harness/findings/judge-M1.md` (Gap b,
+lines 80-87 and path-to-done item 4 at 113-114), the active frozen oracles
+(`acceptance/go/probe_test.go`, `acceptance/e2e/probe.spec.ts`), the pre-change
+main sources, and the handoff added by the diff.
 
-Method note: reviewer shell access was unavailable in this session, so runtime
-claims (test exits, `make check`) are cross-checked statically — every
-load-bearing factual claim in the handoff that has a pointable referent in the
-tree was verified by reading it (details below). The worktree `../wt/T-208` is
-outside this session's permitted root; main-tree files match the diff's
-"before" state exactly (spot-verified `internal/web/web.go`, `probe.go`,
-`probe_test.go`, `web_test.go`, `cmd/server/main.go`, `boot_test.go`).
+Method note: shell execution was denied in this session, so runtime claims
+(test exit codes, `make check`) are cross-checked statically. Every
+load-bearing claim with a pointable referent was verified by reading the tree:
+the diff's "before" side matches main exactly on all six code files
+(`internal/web/web.go:28-44`, `internal/web/probe.go:1-189`,
+`internal/web/probe_test.go:1-39+`, `internal/web/web_test.go:28-35`,
+`cmd/server/main.go:46-53`, `cmd/server/boot_test.go:1-9`).
 
-## Packet compliance
+## Deliverable 1 — store onto Server: complete and correct
 
-**Deliverable 1 (store onto Server)** — delivered:
-- `Server.Store *store.DB` exported field with nil-semantics doc comment
-  (diff, internal/web/web.go:30-40); `SetProbeStore`/`probeStore`/
-  `errProbeStoreUnset` fully deleted — grep of the diff confirms removal and
-  no remaining caller anywhere in `cmd/`, `internal/` (only historical
-  reviews/handoffs mention the name).
+- `Server.Store *store.DB` exported field with nil-semantics doc (diff,
+  internal/web/web.go); `SetProbeStore`/`probeStore`/`errProbeStoreUnset`
+  fully deleted — the only call sites on main were `cmd/server/main.go:49`,
+  `internal/web/probe.go` itself and `internal/web/probe_test.go:36-37,181`,
+  all rewritten by the diff; no remaining reference anywhere in `cmd/` or
+  `internal/`.
 - nil store → 500 with the exact packet-mandated message
-  `probe: store not wired` (diff, internal/web/probe.go:26-27,57-71).
+  `probe: store not wired` (diff, internal/web/probe.go
+  `errProbeStoreNotWired`, `probeCount`, `probeInc`).
 - `cmd/server/main.go`: `web.SetProbeStore(db)` dropped, `web.New(cfg,
-  logger, db)` in its place; boot order unchanged otherwise. boot_test.go is
-  comment-only (correct — those tests spawn the binary black-box; no
-  signature in use).
+  logger, db)` in its place; boot order otherwise unchanged. `boot_test.go`
+  is comment-only — correct, because those tests spawn `bin/server`
+  black-box (imports at cmd/server/boot_test.go:21-38 include no
+  `internal/web`; no signature in use).
 - `web_test.go` `newTestServer` passes nil; probe tests open a real temp
-  store via `store.Open(ctx, t.TempDir()/probe.db)` per packet:44-46.
-- Owns compliance: branch touches only `cmd/server/**`, `web.go`,
-  `web_test.go`, `probe.go`, `probe_test.go` + the handoff file (explicitly
-  allowed, cmd/harness/guard.go:139). Guard mechanics verified:
-  `exitOwnership = 4` (guard.go:17), check over the branch diff
-  (guard.go:92,138-159), glob semantics per globmatch.go:13-19 —
-  `internal/web/probe*.go` does not cover `middleware_logging_test.go`.
+  store via `store.Open(ctx, filepath.Join(t.TempDir(), "probe.db"))` per
+  packet:44-46. The global-mutation hazard of the old
+  `t.Cleanup(SetProbeStore(nil))` is gone — each test now gets a genuinely
+  separate server+store (net test-isolation improvement).
 
-**Deliverable 2 (Content-Type)** — delivered exactly as specified:
-- Header set in `probeGet` and the HTMX branch of `probePost` only (packet
-  explicitly forbids touching `renderPartial`/templates.go — respected);
-  const `probeContentType`; no-JS 303 branch untouched.
-- Ordering is safe: `renderPartial` buffers (internal/web/probe.go:56-67 on
-  main, unchanged), so on render failure nothing has been written and
-  `http.Error` overwrites the header with its own `text/plain` 500 — the
-  handoff's "error responses unchanged" claim is correct Go semantics.
-- Table test `TestProbeFragmentContentType` (probe_test.go, new): two rows
-  (GET /probe; HTMX POST /probe with minted token via cookie jar), asserting
-  the header **exactly** `text/html; charset=utf-8` as packet:54-56 demands.
-- The wire-level design is the right one and the handoff's reasoning is
-  technically sound: `httptest.ResponseRecorder` never sniffs (sniffing
-  lives in net/http's chunkWriter), so only `httptest.NewServer` reproduces
-  the defect; and the partial starts `<h2>Probe</h2>`
-  (web/templates/partials/probe.html:1) — `<H2` is indeed absent from Go's
-  `htmlSig` sniff list (which has `<H1`, not `<H2`), so the pre-fix
-  text/plain sniff claim is credible, as is the recorded red/green
-  reproduction.
-- No frozen contract conflicts: grep of `acceptance/` shows no assertion on
-  /probe's Content-Type and no reference to `SetProbeStore`/`web.New`
-  (acceptance spawns the binary) — A-103/104/105 staying green is plausible.
+## Deviation: `New` is variadic — real, forced, disclosed; planner item
 
-## Architecture
+Packet:36-38 freezes `New(cfg, log, db *store.DB)`; delivered is
+`db ...*store.DB` (diff, internal/web/web.go). I verified each leg of the
+forcing constraint independently:
+
+- `internal/web/middleware_logging_test.go:29` calls
+  `New(testConfig(env), slog.New(h))` — 2 args, the only other `New(` call
+  site in the package besides `web_test.go:30` and `main.go:51`.
+- That file is not covered by `owns`: `internal/web/probe*.go` covers
+  `probe.go`/`probe_test.go` only (`*` does not cross `/`,
+  cmd/harness/globmatch.go:10-12); `middleware_logging_test.go` shares no
+  prefix with `probe*`.
+- A fixed-arity 3-param `New` therefore cannot compile the branch without
+  editing an unowned file, which the guard mechanically rejects
+  (cmd/harness/guard.go:153-155, exit 4 — the packet's own retry context
+  records exactly this failure from attempt 1). The packet is
+  self-contradictory as written.
+- The frozen downstream contract survives: `harness/state.md:20-22` freezes
+  the call form "`New(cfg,log,db)` + `s.Store`", which the variadic satisfies
+  for T-203/T-205/T-206; `SetProbeStore` is gone; misuse fails loudly
+  (nil store → logged 500, tested) rather than silently.
+
+This is a planner-ratification item, not a worker defect: the honest
+alternative was a `BLOCKED` handoff, and the chosen compromise is fully
+disclosed with a one-line remediation (extend owns next time the signature
+moves). Residual cost: the compiler no longer enforces the store argument —
+worth recording, not worth blocking correct, fully-tested work.
+
+## Deliverable 2 — Content-Type fix: correct, at the right layer, tested at the wire
+
+- Header set exactly where the packet demands (probeGet; HTMX branch of
+  probePost only — packet:52-53 forbids touching `renderPartial`/
+  templates.go, respected); const `probeContentType`; no-JS 303 branch
+  untouched; `probeFragment` (home mount) correctly untouched — the page
+  starts `<!doctype html>` and sniffs text/html.
+- Ordering is safe Go semantics: `renderPartial` buffers (probe.go:56-67 on
+  main, unchanged), so on render failure nothing is written and `http.Error`
+  overrides the header with its own `text/plain` 500 — the handoff's "error
+  responses unchanged" claim is accurate.
+- The defect mechanism is real: the partial starts `<h2>Probe</h2>`
+  (web/templates/partials/probe.html:1); Go's `http.DetectContentType` HTML
+  signatures include `<H1` but not `<H2`, so pre-fix the wire response was
+  sniffed `text/plain; charset=utf-8` under the global nosniff
+  (internal/web/web.go:95) — exactly judge-M1 Gap (b). Matches the recorded
+  red/green reproduction.
+- New test `TestProbeFragmentContentType`: table of two rows (GET /probe;
+  HTMX POST /probe with a token minted through the real CSRF flow — cookie
+  jar + `probeReToken`, whose regex matches the template's hidden input at
+  web/templates/partials/probe.html:4), over `httptest.NewServer` +
+  `s.Handler()` so the real middleware chain (incl. nosniff) and real
+  sniffing are in play, asserting the header **exactly**
+  `text/html; charset=utf-8` per packet:54-56. The recorder-based rows
+  elsewhere could never see this defect; the wire-level design is the right
+  one and the test genuinely fails pre-fix. Compile-checked statically:
+  `strings` (probe_test.go:12) and `store` (:16) already imported; diff adds
+  only `net/http/cookiejar`.
+
+## Frozen oracles: no conflict
+
+- `acceptance/go/probe_test.go` spawns the binary and asserts body regexes
+  (probeReCount/probeReInput), never Content-Type and never
+  `SetProbeStore`/`web.New` — unaffected by the refactor.
+- `acceptance/e2e/probe.spec.ts` exercises the home page (HTMX swap +
+  server-rendered no-JS section) and never navigates directly to `/probe`,
+  so making the direct-visit fragment render as HTML cannot break it.
+- A-103/A-104/A-105 behaviour preserved; the HTMX/#map contract test in
+  acceptance/go/m1_guards_test.go is untouched and the probe partial still
+  targets `#probe` (never `#map`).
+
+## Protected paths, ownership, rules
+
+- Code paths in the diff are exactly `cmd/server/{main,boot_test}.go`,
+  `internal/web/{web,web_test,probe,probe_test}.go` + the handoff — all
+  inside owns ∪ the allowed handoff (guard.go:139).
+- The `harness/tasks/graph.json` hunk in the diff is NOT a worker violation:
+  it is scheduler-owned and explicitly exempt from both protected-path and
+  ownership checks (cmd/harness/guard.go:121-125 and 146-148), and
+  `finalizeMerge` restores main's copy before merging (cmd/harness/gate.go:
+  122-126) — branch content is never authoritative. Its diff base
+  (`attempts: 1`) no longer matches main (`attempts: 2`, status review),
+  which corroborates the handoff's scheduler-race narrative; the handoff's
+  predicted rebase conflict and its resolution (take main's version) match
+  the gate's actual behavior.
+- No dependency change (cookiejar is stdlib; `allow_deps: []` respected);
+  no TODO/FIXME/`panic("not implemented")`/nolint-without-reason in added
+  lines (scan.go:24-31 exempts tests/handoff anyway; the non-test additions
+  in probe.go/web.go/main.go are clean); no "Phase N" strings in code; no
+  skip/only markers; ratchet only grows (`TestProbeFragmentContentType`
+  added, no test deleted — "store unset answers 500" is renamed, same
+  assertion shape).
+
+## Architecture & security
 
 - Ownership map (docs/spec/architecture.md:15-25) respected: store access
-  stays `internal/web` → `internal/store`; the change *removes* a
-  package-global mutable pointer, which is a net improvement (kills hidden
-  process state and the old tests' `t.Cleanup(SetProbeStore(nil))` mutation
-  of shared globals — the new nil-store subtest builds a genuinely separate
-  server).
-- HTMX/#map rule untouched; the `fragment has no html/body and no id="map"`
-  subtest is retained.
-- Parse-don't-validate preserved: `parseProbePost` unchanged; no
-  `r.FormValue` reads added. The single audited `template.HTML` door
-  (`probeFragment`) and its nolint reasons are untouched.
-- No new deps (stdlib `net/http/cookiejar` only), no TODO/FIXME, no
-  "Phase N" strings in code, no skip markers, no `console.log`.
+  stays `internal/web` → `internal/store`; the change *removes* hidden
+  package-global mutable state. Parse-don't-validate intact
+  (`parseProbePost` unchanged, no `r.FormValue` added). The single audited
+  `template.HTML` door (`probeFragment`) and its nolint reasons untouched.
+- CSRF matrix retained in full (missing/tampered → 403 with count unchanged,
+  both still asserted); no new `template.HTML` conversions; no SQL, path,
+  upload or secret surface touched; the header fix makes the declared type
+  match the actual escaped, server-rendered content under nosniff — the
+  correct security direction.
 
-## Security
+## Findings (non-blocking)
 
-CSRF matrix retained in full (missing/tampered → 403 with count unchanged);
-no new `template.HTML` conversions; no SQL, path, or upload surface touched;
-error paths log the error and emit generic text (no secret leakage); the
-header fix makes the declared type match actual content under global
-`nosniff` — the correct direction. Nothing adversarial introduced.
-
-## Findings
-
-1. **Spec deviation, disclosed: `New` is variadic, not fixed-arity.**
-   Packet:36-38 says the signature "becomes `New(cfg, log, db *store.DB)`";
-   delivered is `db ...*store.DB` (diff, internal/web/web.go:41-52). The
-   forcing constraint is real — I verified each leg:
-   internal/web/middleware_logging_test.go:29 calls `New(testConfig(env),
-   slog.New(h))` (2 args, fixed); that file is not covered by T-208's owns
-   (globmatch.go:13-19); and a fixed 3-param `New` cannot compile that call.
-   Attempt 1's edit of the file was correctly rejected by the guard
-   (guard.go:153-155, exit 4 — the packet's own retry context confirms).
-   The delivered signature preserves every downstream-frozen element:
-   `New(cfg, log, db)` compiles and is what main.go uses; `s.Store` is the
-   access path; harness/state.md:20-22 records the freeze as the *call form*
-   "`New(cfg,log,db)` + `s.Store`", which the variadic satisfies for
-   T-203/T-205/T-206 (state.md:26-28). Residual cost: a caller that omits
-   the store (or passes extras, silently ignored past the first) gets no
-   compile error — the packet's compile-time guarantee becomes a loud,
-   tested runtime 500. This is a planner-ratification item, not a worker
-   defect: the packet is unsatisfiable as literally written, the honest
-   alternative was a `BLOCKED` handoff, and the chosen compromise is fully
-   documented with a one-line remediation (extend owns next time the
-   signature moves). Accepted here; the planner should either ratify the
-   variadic or schedule the fixed-arity change with `middleware_logging_test.go`
-   in owns.
-
-2. **Handoff overstatement (minor):** "every store-backed test call[s] it
-   exactly as the packet freezes: `New(cfg, log, db)`" — no unit test passes
-   a live store through the constructor; probe tests assign `s.Store = db`
-   after a nil-store `New` (diff, probe_test.go `newProbeServer`). The
-   constructor-with-store path is exercised only by the smoke suite
-   (black-box spawn). Behaviourally equivalent (`New` just copies `db[0]`),
-   but if this file is touched again a one-row unit test
-   (`New(cfg, log, db)` → `s.Store == db`) would close the gap.
-
-3. **Nits:** `newTestServer` passes an explicit `nil` third arg that the
-   variadic makes unnecessary (harmless; documents intent). "store failure
-   answers 500" closes the DB that cleanup will close again (pre-existing
-   pattern, error ignored). Neither matters.
-
-4. **Handoff open issues verified:** `make e2e-task T=` usage-branch exit 2
-   is consistent with a `TASK`-variable Makefile; the `node_modules` symlink
+1. **Variadic `New` (see above)** — planner must ratify or schedule the
+   fixed-arity change with `internal/web/middleware_logging_test.go` (or
+   `internal/web/**`) in owns. Disclosed by the handoff with remediation.
+2. **Handoff overstatement (minor):** "Production and every store-backed
+   test call it exactly as the packet freezes: `New(cfg, log, db)`" — no
+   unit test passes a live store through the constructor; `newProbeServer`
+   assigns `s.Store = db` after a nil-store `New`. The positive
+   constructor-with-store branch is unit-untested; it is covered end-to-end
+   by the smoke suite and the acceptance spawn suites (a wiring regression
+   500s there), but a one-row `New(cfg, log, db)` → `s.Store == db` unit
+   test would close the gap cheaply.
+3. **Nil-store 500 row is panic-equivalent:** the subtest asserts only
+   `rec.Code == 500`; if the `s.Store == nil` guard were deleted,
+   `s.Store.ProbeCount` would nil-deref (`store.DB` fields are pointers,
+   internal/store/store.go:20-22), `withRecover` would answer the same 500,
+   and the row would still pass. Pre-existing assertion weakness carried
+   over from main's "store unset" row (not a weakening); a direct unit
+   assertion on `errProbeStoreNotWired` or the log line would pin the
+   packet's error message.
+4. **POST-row redirect robustness:** the wire-level POST client follows
+   redirects; a regression to 303 on the HTMX path would follow to `/`
+   (which sniffs text/html) and the row would pass. Mitigated today by
+   `TestProbePost`'s recorder rows pinning the fragment response;
+   `CheckRedirect: http.ErrUseLastResponse` (the pattern
+   acceptance/go/probe_test.go:177-183 already uses) would harden it.
+5. **Comment nit:** probeGet's new comment calls the fragment "a full HTML
+   document" — it is not (TestProbeGet asserts no html/body); the intended
+   meaning is that the response body is nothing but the fragment.
+6. **Handoff open issues verified true:** `make e2e-task T=` exits 2 because
+   the Makefile variable is `TASK` (Makefile:8,113); `node_modules` symlink
    whitelist is real (cmd/harness/ratchet.go:128); `renderPage`'s missing
-   Content-Type is correctly left alone (templates.go not owned; page starts
-   `<!doctype html>`, which sniffs as text/html).
+   Content-Type is correctly left alone (templates.go unowned; page sniffs
+   text/html from the doctype); `max_attempts: 3` (harness/policy.json:31)
+   matches "attempt 3 of 3"; the ff-only refusal message in the packet's
+   retry context matches gate.go:130-131 verbatim and `commitHarnessState`
+   exists as described (cmd/harness/sched.go:106,158-161).
 
 ## Verdict rationale
 
 Both deliverables are semantically complete and correct against the packet;
-the test additions genuinely exercise the fixed behaviour at the level where
-the defect lived; owns, protected paths, deps, and marker rules are all
-respected; every checkable factual claim in the handoff verified true. The
-single deviation (variadic `New`) is real but was mechanically forced by the
-protected guard against a self-contradictory packet, preserves every frozen
-downstream contract, fails loudly on misuse, and is disclosed with a
-remediation path — flag for planner ratification, not grounds to block.
+the header fix is implemented at exactly the layer the packet specifies and
+tested at the wire level where the defect actually lived, with a credible
+red/green mechanism; no frozen oracle is weakened, narrowed or in conflict;
+owns, protected paths, deps and marker rules are all respected (the graph.json
+hunk is a guard-exempt scheduler artifact); and every checkable factual claim
+in the handoff verified true, including its own deviation disclosure. The
+findings above are test-strength gaps and a disclosed, mechanically forced
+API-shape compromise for the planner to ratify — none is a correctness,
+security or test-integrity defect.
 
 VERDICT: PASS
