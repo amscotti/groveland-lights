@@ -9,6 +9,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -804,6 +805,70 @@ func TestAdminDuplicateMergePhoto(t *testing.T) {
 			t.Errorf("photo %s status = %d, want 200", src, served.Code)
 		}
 	}
+}
+
+// TestMergeAttachPhotoBranches covers the auxiliary merge write's edge paths:
+// the unhappy configurations are refused before touching SQLite, an unknown or
+// soft-deleted light wraps ErrNotFound, and a canceled context surfaces a DB
+// error rather than masquerading as a vanished row.
+func TestMergeAttachPhotoBranches(t *testing.T) {
+	s, session := newAdminServer(t)
+	csrf := adminCSRF(t)
+	ctx := context.Background()
+
+	t.Run("unset DB_PATH refuses", func(t *testing.T) {
+		empty := *s
+		empty.Cfg.DBPath = ""
+		if err := empty.attachPhoto(ctx, 1, 1); err == nil {
+			t.Fatal("attachPhoto with no DB_PATH succeeded")
+		} else if errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("misconfigured DB_PATH = %v, want a config error not ErrNotFound", err)
+		}
+	})
+	t.Run("ambiguous DB_PATH refuses", func(t *testing.T) {
+		for _, bad := range []string{"/tmp/a?b.db", "/tmp/a#b.db", "/tmp/a%b.db"} {
+			amb := *s
+			amb.Cfg.DBPath = bad
+			if err := amb.attachPhoto(ctx, 1, 1); !errors.Is(err, errMergeDBPath) {
+				t.Errorf("attachPhoto(%q) = %v, want errMergeDBPath", bad, err)
+			}
+		}
+	})
+	t.Run("unknown light wraps ErrNotFound", func(t *testing.T) {
+		if err := s.attachPhoto(ctx, store.LightID(9_999_999), store.PhotoID(1)); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("attachPhoto(missing) = %v, want ErrNotFound", err)
+		}
+	})
+	t.Run("soft-deleted light wraps ErrNotFound", func(t *testing.T) {
+		createLight(t, s, session, csrf, map[string]string{
+			"label": "Deleted merge target", "kind": "park", "lat": "42.7617", "lon": "-71.0303",
+		})
+		list := adminGet(t, s, "/admin", session, false).Body.String()
+		detailURL := regexp.MustCompile(`href="(/admin/lights/\d+)"`).FindStringSubmatch(list)[1]
+		var id int64
+		if _, err := fmt.Sscanf(detailURL, "/admin/lights/%d", &id); err != nil {
+			t.Fatalf("parse detail url %q: %v", detailURL, err)
+		}
+		del := adminPostMultipart(t, s, detailURL+"/delete",
+			map[string]string{CSRFTokenName: csrf}, "", "", nil, session, csrf, false)
+		if del.Code != http.StatusSeeOther {
+			t.Fatalf("delete status = %d, want 303", del.Code)
+		}
+		if err := s.attachPhoto(ctx, store.LightID(id), store.PhotoID(1)); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("attachPhoto(deleted) = %v, want ErrNotFound", err)
+		}
+	})
+	t.Run("canceled context is a DB error, not ErrNotFound", func(t *testing.T) {
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+		err := s.attachPhoto(canceled, 1, 1)
+		if err == nil {
+			t.Fatal("attachPhoto with a canceled context succeeded")
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("canceled context = %v, want a DB error not ErrNotFound", err)
+		}
+	})
 }
 
 func TestAdminDuplicateUnnumbered(t *testing.T) {
