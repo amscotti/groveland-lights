@@ -52,7 +52,7 @@ contract failure. The server-side 422 is independently asserted in
 heading, `Merge`, the absence of `Save anyway` in the numbered case and the
 presence of the `Cancel` link. It never checks that the panel shows the
 existing light's label, asset number and distance (README visual note
-`acceptance/drafts/README.md:118-125`), nor that `Cancel` closes the panel or
+`acceptance/drafts/README.md:204-210`), nor that `Cancel` closes the panel or
 leaves the light untouched. The packet test 6 only freezes "`#dup-panel`
 appears with `Merge` and `Save anyway`" (`harness/tasks/T-200.md:245-246`), so
 this is coverage, not a broken oracle. The Go draft independently checks the
@@ -91,7 +91,7 @@ keep the claim local and self-contained.
 The README's frozen button/label table only freezes the walk/duplicate buttons
 (`acceptance/drafts/README.md:70-72`); the edit note only says "with `Save
 changes`" and "`Delete light` is a visually destructive (red) action"
-(`acceptance/drafts/README.md:133-136`). A compliant implementation that
+(`acceptance/drafts/README.md:216-220`). A compliant implementation that
 renders these as links (or link-styled controls) would fail. The packet's test
 8 uses backticked strings without a role (`harness/tasks/T-200.md:251-252`), so
 the oracle should either freeze the roles in the README or use a
@@ -146,7 +146,7 @@ fine. If an operator changes `TEST_PORT` between the two invocations while the
 same `./test-run.db` persists, the cached (still valid) session is rejected
 because its origin string no longer matches, the token is already consumed, and
 the helper fails; the README's `rm -f test-run.db*` fix is documented
-(`acceptance/drafts/README.md:160-165`), but the origin check could instead
+(`acceptance/drafts/README.md:149-151`), but the origin check could instead
 accept the same DB/port-independent path. This is an operational edge, not a
 test-integrity failure.
 
