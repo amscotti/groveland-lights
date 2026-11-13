@@ -204,7 +204,8 @@ No test-integrity impact; noted only because the path is outside T-200's packet
   HEIC `ftyp` box, 15 MB cap), and the README records every fixture's sha256.
   The pixel bomb, HEIC sniff, text-as-jpg and oversize fixtures are the right
   shapes for the A-206/A-207 assertions.
-- **Ownership/manifest.** Only owned paths are touched (`acceptance/**`,
+- **Ownership/manifest.** Apart from the scheduler-owned `graph.json` flip noted
+  in finding 11, only owned paths are touched (`acceptance/**`,
   `testdata/photos/**`, `testdata/schema.expected.sql`,
   `harness/protected.sha256`, handoff). The manifest adds the six new
   `acceptance/**` files in hash order and leaves the nine pre-existing entries
