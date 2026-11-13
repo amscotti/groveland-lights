@@ -107,7 +107,9 @@ func TestStaticServed(t *testing.T) {
 }
 
 // TestRenderAll renders every template with fixture data and writes snapshots to
-// testdata/rendered for html-validate (Makefile templates-check target).
+// testdata/rendered for html-validate (Makefile templates-check target). Each
+// page renders with its own fixture data (admin pages get their own view
+// structs, not homeData).
 func TestRenderAll(t *testing.T) {
 	s := newTestServer(t, config.EnvTest)
 	outDir := filepath.Join("..", "..", "testdata", "rendered")
@@ -117,9 +119,61 @@ func TestRenderAll(t *testing.T) {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	fixtures := map[string]any{
+		"pages/index.html": homeData{Title: "Groveland Lights", TestEnv: false, EnvLabel: "prod"},
+		"pages/admin-login.html": pageData{
+			Title: "Admin login", TestEnv: false,
+		},
+		"pages/admin-walk.html": walkPageData{
+			pageData:  pageData{Title: "Walk the town", TestEnv: false},
+			CSRFToken: "fixture-csrf-token",
+			BBox:      "42.7,-71.09,42.82,-70.96",
+			Values:    walkValues{Kind: "park", Lat: "42.7617", Lon: "-71.0303"},
+		},
+		"pages/admin-list.html": listData{
+			pageData: pageData{Title: "Lights", TestEnv: false},
+			Rows: []rowView{
+				{
+					DetailURL: "/admin/lights/4",
+					ImgSrc:    "/photos/2026/01/fixture.jpg",
+					ImgAlt:    "GP-017 Ball field lamp",
+					AssetNo:   "GP-017",
+					Label:     "Ball field lamp",
+					Status:    "unknown",
+				},
+				{
+					DetailURL: "/admin/lights/5",
+					ImgSrc:    photoPlaceholder,
+					ImgAlt:    "Path light",
+					Label:     "Path light",
+					Status:    "on",
+				},
+			},
+			Page:      1,
+			OlderPage: 2,
+			HasOlder:  true,
+		},
+		"pages/admin-detail.html": detailData{
+			pageData:  pageData{Title: "Ball field lamp", TestEnv: false},
+			DetailURL: "/admin/lights/4",
+			Label:     "Ball field lamp",
+			AssetNo:   "GP-017",
+			Kind:      "park",
+			Status:    "unknown",
+			Pos:       "42.761700, -71.030300",
+			Accuracy:  "12",
+			PhotoSrc:  "/photos/2026/01/fixture.jpg",
+			CSRFToken: "fixture-csrf-token",
+		},
+	}
 	for name := range s.tpl.pages {
+		fixture, ok := fixtures[name]
+		if !ok {
+			t.Errorf("no render fixture for page %s (add one to the fixtures map)", name)
+			continue
+		}
 		rec := httptest.NewRecorder()
-		s.tpl.renderPage(rec, filepath.Base(name), homeData{Title: "Groveland Lights", TestEnv: false, EnvLabel: "prod"})
+		s.tpl.renderPage(rec, filepath.Base(name), fixture)
 		out := filepath.Join(outDir, strings.TrimPrefix(name, "pages/"))
 		// Trim template-induced trailing whitespace before validating: the
 		// conditional tags leave indented blank lines, which html-validate

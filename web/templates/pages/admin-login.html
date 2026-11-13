@@ -1,0 +1,12 @@
+{{define "content"}}
+<section id="admin-login">
+  <article class="login-card">
+    <h1>Admin login</h1>
+    <form method="get" action="/admin/login">
+      <label for="token">Token</label>
+      <input id="token" name="token" type="password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+    </form>
+  </article>
+</section>
+{{end}}

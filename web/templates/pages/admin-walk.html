@@ -1,0 +1,64 @@
+{{define "content"}}
+<section id="walk" data-bbox="{{.BBox}}">
+  <h1>Walk the town</h1>
+  <p id="walk-readout">
+    <span id="walk-pos">waiting for a position…</span>
+    <span id="walk-accuracy">accuracy pending…</span>
+  </p>
+  <p role="alert" id="walk-alert" hidden></p>
+  <svg id="pinpad" viewBox="0 0 200 200" width="100%" role="group" aria-label="Pin pad spanning 50 metres: drag the pin, or focus it and use the arrow keys to nudge by one metre">
+    <rect x="1" y="1" width="198" height="198" rx="6" fill="#f4f5f6" stroke="#9aa2ab" stroke-width="1" aria-hidden="true"></rect>
+    <path d="M50 2V198M100 2V198M150 2V198M2 50H198M2 100H198M2 150H198" stroke="#dde1e6" stroke-width="1" fill="none" aria-hidden="true"></path>
+    <text x="6" y="14" font-size="9" fill="#5b6470" aria-hidden="true">±25 m</text>
+    <g id="pin" role="button" tabindex="0" aria-label="position pin" transform="translate(100 100)">
+      <circle cx="0" cy="0" r="11" fill="#0b5c8f" stroke="#ffffff" stroke-width="2"></circle>
+      <circle cx="0" cy="0" r="3.5" fill="#ffffff"></circle>
+    </g>
+  </svg>
+  <p id="pin-pos">waiting for a position…</p>
+  <div id="manual-pos" hidden>
+    <p>Type the position by hand, then add the light:</p>
+    <label for="manual-lat">Latitude</label>
+    <input id="manual-lat" type="number" step="0.000001" min="-90" max="90" inputmode="decimal">
+    <label for="manual-lon">Longitude</label>
+    <input id="manual-lon" type="number" step="0.000001" min="-180" max="180" inputmode="decimal">
+  </div>
+  <div class="grid" id="walk-actions">
+    <button type="button" id="add-light">Add light here</button>
+    <button type="button" id="save-lowacc" hidden>Save anyway (low accuracy)</button>
+  </div>
+  <section id="add-form" hidden>
+    <h2>New light at the pin</h2>
+    <form id="walk-form" method="post" action="/admin/lights" enctype="multipart/form-data" hx-post="/admin/lights" hx-target="#dup-slot" hx-swap="innerHTML" hx-encoding="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <input type="hidden" id="hidden-lat" name="lat" value="{{.Values.Lat}}">
+      <input type="hidden" id="hidden-lon" name="lon" value="{{.Values.Lon}}">
+      <input type="hidden" id="hidden-accuracy" name="accuracy_m" value="{{.Values.AccuracyM}}">
+      <div id="dup-slot">{{if .Alert}}<div role="alert">{{.Alert}}</div>{{end}}{{if .Dup}}<article id="dup-panel"><!-- sync: partials/admin-dup.html -->
+        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M12 2 23 21H1Z" fill="#b45309"></path><rect x="11" y="9" width="2" height="6" fill="#ffffff"></rect><rect x="11" y="17" width="2" height="2" fill="#ffffff"></rect></svg>
+        <h2>Possible duplicate</h2>
+        <p>An existing light looks the same: <strong>{{.Dup.Label}}</strong>{{if .Dup.AssetNo}} (asset number {{.Dup.AssetNo}}){{end}}, about {{.Dup.Distance}} from this position.</p>
+        <p class="dup-actions">
+          <button type="submit" name="dup_choice" value="merge">Merge</button>
+          {{if not .Dup.Numbered}}<button type="submit" name="dup_choice" value="save">Save anyway</button>
+          {{else}}<a href="/admin/walk">Cancel</a>{{end}}
+        </p>
+      </article><!-- end sync -->{{end}}</div>
+      <label for="walk-label">Label</label>
+      <input id="walk-label" name="label" type="text" maxlength="120" value="{{.Values.Label}}" required>
+      <label for="walk-asset">Asset number</label>
+      <input id="walk-asset" name="asset_no" type="text" maxlength="32" value="{{.Values.AssetNo}}" autocomplete="off">
+      <label for="walk-kind">Kind</label>
+      <select id="walk-kind" name="kind">
+        <option value="park"{{if eq .Values.Kind "park"}} selected{{end}}>Park</option>
+        <option value="building"{{if eq .Values.Kind "building"}} selected{{end}}>Building</option>
+      </select>
+      <label for="walk-photo">Photo</label>
+      <input id="walk-photo" name="photo" type="file" accept="image/jpeg,image/png,image/webp">
+      <div id="photo-preview-slot"></div>
+      <button type="submit" id="confirm-pin">Confirm pin</button>
+    </form>
+  </section>
+  <script type="module" src="/static/js/walk.js"></script>
+</section>
+{{end}}

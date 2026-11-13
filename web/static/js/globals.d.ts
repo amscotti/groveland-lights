@@ -1,7 +1,12 @@
 // Global browser APIs provided by vendored libraries and test hooks.
 declare global {
   interface Window {
-    htmx?: { config: { allowEval: boolean } };
+    htmx?: {
+      config: {
+        allowEval: boolean;
+        responseHandling?: Array<{ code: string; swap: boolean; error?: boolean }>;
+      };
+    };
     Alpine?: { data: (name: string, factory: () => Record<string, unknown>) => void };
     __glMapInits?: number;
     __map?: unknown;
