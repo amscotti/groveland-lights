@@ -305,7 +305,7 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "running",
+      "status": "review",
       "attempts": 1,
       "budget": {
         "steps": 200,
@@ -334,7 +334,7 @@
       "allow_deps": [
         "golang.org/x/image"
       ],
-      "status": "review",
+      "status": "done",
       "attempts": 0,
       "budget": {
         "steps": 200,
