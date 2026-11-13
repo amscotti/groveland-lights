@@ -54,7 +54,6 @@ type walkSubmission struct {
 	LonRaw    string
 	AccRaw    string
 	DupRaw    string
-	HTMX      bool
 
 	Label     string
 	AssetNo   *string
@@ -92,7 +91,6 @@ func parseWalkSubmission(r *http.Request) (walkSubmission, *badSubmission) {
 		LonRaw:    val("lon"),
 		AccRaw:    val("accuracy_m"),
 		DupRaw:    val("dup_choice"),
-		HTMX:      r.Header.Get("HX-Request") != "",
 	}, nil
 }
 
@@ -370,7 +368,7 @@ func (s *Server) respondDuplicate(w http.ResponseWriter, r *http.Request, sub wa
 		Numbered: decision.Numbered,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if sub.HTMX {
+	if r.Header.Get("HX-Request") != "" {
 		w.WriteHeader(http.StatusConflict)
 		if err := s.tpl.renderPartial(w, "partials/admin-dup.html", view); err != nil {
 			s.Log.Error("admin create: dup render", "err", err)
