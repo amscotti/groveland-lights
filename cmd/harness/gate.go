@@ -119,6 +119,14 @@ func gateChecks(root, wt string, pol Policy) error {
 
 // finalizeMerge: ff-only merge, push, progress log, worktree removal.
 func finalizeMerge(root, wt string, t *Task) error {
+	// graph.json is scheduler-owned: restore main's authoritative copy on the
+	// branch so the merge cannot regress task status/attempts.
+	if _, err := gitOut(wt, "checkout", "main", "--", "harness/tasks/graph.json"); err == nil {
+		if out := gitOut2(wt, "status", "--porcelain"); strings.Contains(out, "graph.json") {
+			_, _ = gitOut(wt, "add", "harness/tasks/graph.json")
+			_, _ = gitOut(wt, "commit", "-m", "chore(harness): keep scheduler graph state on merge")
+		}
+	}
 	if _, err := gitOut(root, "merge", "--ff-only", "task/"+t.ID); err != nil {
 		return fmt.Errorf("ff-only merge refused (diverged?): %w", err)
 	}

@@ -114,9 +114,15 @@ func guardTask(root, wt string, t *Task, pol Policy) int {
 	return 0
 }
 
-// checkProtectedPaths is check 1.
+// checkProtectedPaths is check 1. harness/tasks/graph.json is exempt for all
+// tasks: it is scheduler-owned (status/attempts flip on main while branches
+// live, so branch diffs pick up spurious divergence), and the gate restores
+// main's copy before merging — branch content is never authoritative.
 func checkProtectedPaths(changed []string, t *Task, pol Policy) (int, bool) {
 	for _, p := range changed {
+		if p == "harness/tasks/graph.json" {
+			continue
+		}
 		if pat, hit := protectedMatch(pol.Protected, p); hit {
 			if t.Type == "acceptance" && acceptanceAllowed(p) {
 				continue
@@ -137,6 +143,9 @@ func checkOwnership(changed []string, t *Task) (int, bool) {
 		allowed = append(allowed, "harness/.ratchet.json")
 	}
 	for _, p := range changed {
+		if p == "harness/tasks/graph.json" {
+			continue // scheduler-owned; see checkProtectedPaths
+		}
 		if !ownsCovered(allowed, p) {
 			fmt.Fprintf(os.Stderr, "ERROR: out of ownership: %s not covered by owns of %s\n", p, t.ID)
 			return exitOwnership, false
