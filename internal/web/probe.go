@@ -1,0 +1,170 @@
+// Probe feature: a global, SQLite-backed counter exposed as an HTMX fragment
+// at /probe and mounted on the home page inside <section id="probe">. It is
+// the M1 vertical slice through the whole stack: the store opened at boot,
+// double-submit CSRF, an HTMX partial and a no-JS form fallback (303 back to
+// the home page).
+//
+// SCAFFOLD: the store reaches these handlers through a package-level pointer
+// (SetProbeStore, called by main before web.New) because web.go — where a
+// store field on Server would live — is not owned by this file. Refactor
+// point: move the store onto Server (and render the home mount's live
+// fragment server-side with it) once web.go ownership allows; nothing else
+// here would change.
+package web
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"path/filepath"
+
+	"github.com/amscotti/groveland-lights/internal/store"
+)
+
+// probeStore is the process-wide store used by the probe handlers. It is nil
+// until SetProbeStore wires it at boot; while nil, every probe route answers
+// 500 (a boot-ordering bug, logged as such).
+var probeStore *store.DB
+
+// SetProbeStore wires the store the probe handlers read and increment
+// through. Call it once at boot, before web.New.
+func SetProbeStore(db *store.DB) { probeStore = db }
+
+// errProbeStoreUnset reports a probe request served before SetProbeStore.
+var errProbeStoreUnset = errors.New("probe: store not wired (SetProbeStore was not called)")
+
+func init() {
+	register(route{pattern: "GET /probe", handler: probeGet})
+	register(route{pattern: "POST /probe", handler: probePost})
+}
+
+// probeData renders partials/probe.html: the current counter value and the
+// CSRF token the increment form submits.
+type probeData struct {
+	Count     int64
+	CSRFToken string
+}
+
+// renderPartial executes a bare partial (no base.html wrapper) — the HTMX
+// fragment contract depends on it. It mirrors renderPage for the partials
+// map; like renderPage it buffers, so a failing template never writes a
+// half-rendered fragment to the response.
+func (t *templates) renderPartial(w io.Writer, name string, data any) error {
+	tpl, ok := t.partials[filepath.ToSlash(name)]
+	if !ok {
+		return fmt.Errorf("unknown partial %s", name)
+	}
+	var buf bytes.Buffer
+	if err := tpl.Execute(&buf, data); err != nil {
+		return err
+	}
+	_, err := w.Write(buf.Bytes())
+	return err
+}
+
+// probeCount reads the counter through the wired store, collapsing the unset
+// case into an error so handlers keep a single failure path.
+func probeCount(ctx context.Context) (int64, error) {
+	if probeStore == nil {
+		return 0, errProbeStoreUnset
+	}
+	return probeStore.ProbeCount(ctx)
+}
+
+// probeInc increments the counter through the wired store, collapsing the
+// unset case into an error so handlers keep a single failure path.
+func probeInc(ctx context.Context) (int64, error) {
+	if probeStore == nil {
+		return 0, errProbeStoreUnset
+	}
+	return probeStore.ProbeInc(ctx)
+}
+
+// probeGet renders the probe fragment: heading, current count and the
+// CSRF-protected increment form. HTMX fetches it (hx-trigger="load" on the
+// home mount, hx-post on the form) and swaps it into <section id="probe">.
+func probeGet(w http.ResponseWriter, r *http.Request) {
+	s := serverFrom(r.Context())
+	n, err := probeCount(r.Context())
+	if err != nil {
+		s.Log.Error("probe: count", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	token := IssueCSRFToken(w, r)
+	if token == "" {
+		return // IssueCSRFToken could not mint a token and answered 500.
+	}
+	data := probeData{Count: n, CSRFToken: token}
+	if err := s.tpl.renderPartial(w, "partials/probe.html", data); err != nil {
+		s.Log.Error("probe: render", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
+// probeSubmission is a POST /probe body parsed once, at the boundary. After
+// parseProbePost returns, handlers consult only these typed fields.
+type probeSubmission struct {
+	CSRFToken string // submitted csrf_token form value
+	HTMX      bool   // HX-Request header present (HTMX flow) or absent (no-JS form submit)
+}
+
+// parseProbePost parses the request form exactly once and lifts it into a
+// typed struct; it is the only code in this feature that touches the form.
+func parseProbePost(r *http.Request) (probeSubmission, error) {
+	if err := r.ParseForm(); err != nil {
+		return probeSubmission{}, err
+	}
+	return probeSubmission{
+		CSRFToken: r.PostForm.Get(CSRFTokenName),
+		HTMX:      r.Header.Get("HX-Request") != "",
+	}, nil
+}
+
+// probePost verifies the CSRF pair, increments the counter and answers with
+// the re-rendered fragment (HTMX) or a 303 back to the home page (no-JS
+// submit). Rejected tokens leave the counter untouched.
+func probePost(w http.ResponseWriter, r *http.Request) {
+	s := serverFrom(r.Context())
+
+	form, err := parseProbePost(r)
+	if err != nil {
+		s.Log.Error("probe: parse", "err", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	// Uniform rejection per the CSRF contract: missing, malformed and
+	// mismatched tokens are indistinguishable. No increment happens here.
+	if err := VerifyCSRF(r, form.CSRFToken); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	n, err := probeInc(r.Context())
+	if err != nil {
+		s.Log.Error("probe: inc", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if !form.HTMX {
+		// No-JS submit: the counter is already incremented; send the browser
+		// back to the home page, which shows the new count on its next render.
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	token := IssueCSRFToken(w, r)
+	if token == "" {
+		return // IssueCSRFToken could not mint a token and answered 500.
+	}
+	data := probeData{Count: n, CSRFToken: token}
+	if err := s.tpl.renderPartial(w, "partials/probe.html", data); err != nil {
+		s.Log.Error("probe: render", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}

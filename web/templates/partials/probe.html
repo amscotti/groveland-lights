@@ -1,0 +1,6 @@
+<h2>Probe</h2>
+<p>Count: <span id="probe-count">{{.Count}}</span></p>
+<form action="/probe" method="post" hx-post="/probe" hx-target="#probe" hx-swap="innerHTML">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <button type="submit">Increment counter</button>
+</form>
