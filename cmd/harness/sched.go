@@ -146,12 +146,18 @@ func commitHarnessState(root string) error {
 }
 
 // spawnTask runs one task through worker -> guard -> check-fast -> reviews -> gate.
+// A rework reuses the existing worktree (the agent's uncommitted work survives).
 func spawnTask(root string, pol Policy, t *Task, wg *sync.WaitGroup) error {
 	wt := filepath.Join(filepath.Dir(root), "wt", t.ID)
 	if _, err := os.Stat(wt); err == nil {
-		return fmt.Errorf("worktree %s already exists", wt)
-	}
-	if out, err := gitOut(root, "worktree", "add", wt, "-b", "task/"+t.ID, "main"); err != nil {
+		if out, err2 := gitOut(wt, "rev-parse", "--abbrev-ref", "HEAD"); err2 == nil && strings.TrimSpace(out) == "task/"+t.ID {
+			// Reuse for rework: reset the branch tip to main only if there are
+			// no commits (nothing to lose); otherwise keep the branch as-is.
+			progress(root, "reuse_worktree "+t.ID)
+		} else {
+			return fmt.Errorf("worktree %s exists but not on task branch", wt)
+		}
+	} else if out, err := gitOut(root, "worktree", "add", wt, "-b", "task/"+t.ID, "main"); err != nil {
 		return fmt.Errorf("worktree add: %w: %s", err, out)
 	}
 	linkNodeModules(root, wt)
@@ -300,9 +306,21 @@ func reworkOrBlock(root string, pol Policy, t *Task, reason string) {
 		}
 	} else {
 		tk.Status = StatusRework
+		appendRetryContext(root, tk.ID, reason)
 		progress(root, "rework "+tk.ID+" attempt="+fmt.Sprint(tk.Attempts)+" "+reason)
 	}
 	_ = saveGraph(root, g)
+}
+
+// appendRetryContext tells the next attempt WHY the previous one failed.
+func appendRetryContext(root, id, reason string) {
+	pkt := filepath.Join(root, "harness", "tasks", id+".md")
+	fh, err := os.OpenFile(pkt, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer func() { _ = fh.Close() }()
+	fmt.Fprintf(fh, "\n\n## Retry context (attempt failed — read this)\n\nThe previous attempt failed for this reason: %s\nFix it and finish. Your earlier work may already be in the worktree uncommitted — verify, complete the required steps (including `git add` + `git commit -m \"...\"`), and write the handoff.\n", reason)
 }
 
 func appendFindings(root, id string, roles []string, verdicts map[string]string) {

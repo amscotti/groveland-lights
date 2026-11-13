@@ -20,11 +20,19 @@ permissions:
   - { action: "shell",    resource: "git rebase*",          effect: "allow" }
   - { action: "shell",    resource: "git add *",            effect: "allow" }
   - { action: "shell",    resource: "git commit -m *",      effect: "allow" }
-  - { action: "shell",    resource: "git rebase --continue*", effect: "allow" }
+  - { action: "shell",    resource: "pwd",                  effect: "allow" }
+  - { action: "shell",    resource: "ls*",                  effect: "allow" }
+  - { action: "shell",    resource: "echo*",                effect: "allow" }
+  - { action: "shell",    resource: "make *",               effect: "allow" }
+  - { action: "shell",    resource: "make run*",            effect: "deny"  }
+  - { action: "shell",    resource: "make plan*",           effect: "deny"  }
+  - { action: "shell",    resource: "make stop*",           effect: "deny"  }
+  - { action: "shell",    resource: "make status*",         effect: "deny"  }
+  - { action: "shell",    resource: "make selftest*",       effect: "deny"  }
+  - { action: "shell",    resource: "go *",                 effect: "allow" }
+  - { action: "shell",    resource: "go run ./cmd/harness*", effect: "deny" }
+  - { action: "shell",    resource: "npx playwright *",     effect: "allow" }
   - { action: "shell",    resource: "*--no-verify*",        effect: "deny"  }
-  - { action: "shell",    resource: "make check-fast*",     effect: "allow" }
-  - { action: "shell",    resource: "go test *",            effect: "allow" }
-  - { action: "shell",    resource: "go build *",           effect: "allow" }
   - { action: "subagent", resource: "*",                    effect: "deny"  }
   - { action: "execute",  resource: "*",                    effect: "deny"  }
   - { action: "external_directory", resource: "*",          effect: "deny"  }

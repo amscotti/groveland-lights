@@ -12,14 +12,22 @@ permissions:
   - { action: "edit",     resource: "harness/protected.sha256",       effect: "allow" }
   - { action: "edit",     resource: "testdata/**",                    effect: "allow" }
   - { action: "edit",     resource: "harness/handoffs/**",            effect: "allow" }
-  - { action: "shell",    resource: "make check-fast*",               effect: "allow" }
-  - { action: "shell",    resource: "make e2e-task*",                 effect: "allow" }
-  - { action: "shell",    resource: "make protect*",                  effect: "allow" }
-  - { action: "shell",    resource: "go test *",                      effect: "allow" }
-  - { action: "shell",    resource: "go build *",                     effect: "allow" }
-  - { action: "shell",    resource: "npx playwright test --list*",    effect: "allow" }
-  - { action: "shell",    resource: "npx playwright test --update-snapshots*", effect: "allow" }
-  - { action: "shell",    resource: "npx playwright test *",          effect: "allow" }
+  - { action: "shell",    resource: "pwd",                   effect: "allow" }
+  - { action: "shell",    resource: "ls*",                   effect: "allow" }
+  - { action: "shell",    resource: "echo*",                 effect: "allow" }
+  - { action: "shell",    resource: "mkdir*",                effect: "allow" }
+  - { action: "shell",    resource: "make *",                effect: "allow" }
+  - { action: "shell",    resource: "make run*",             effect: "deny"  }
+  - { action: "shell",    resource: "make plan*",            effect: "deny"  }
+  - { action: "shell",    resource: "make stop*",            effect: "deny"  }
+  - { action: "shell",    resource: "make status*",          effect: "deny"  }
+  - { action: "shell",    resource: "make selftest*",        effect: "deny"  }
+  - { action: "shell",    resource: "go *",                  effect: "allow" }
+  - { action: "shell",    resource: "go run ./cmd/harness*", effect: "deny"  }
+  - { action: "shell",    resource: "gofmt *",               effect: "allow" }
+  - { action: "shell",    resource: "npx playwright *",      effect: "allow" }
+  - { action: "shell",    resource: "npx tsc *",             effect: "allow" }
+  - { action: "shell",    resource: "npx html-validate *",   effect: "allow" }
   - { action: "shell",    resource: "git status*",                    effect: "allow" }
   - { action: "shell",    resource: "git diff*",                      effect: "allow" }
   - { action: "shell",    resource: "git log*",                       effect: "allow" }

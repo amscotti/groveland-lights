@@ -41,11 +41,12 @@
       ],
       "ui": false,
       "allow_deps": [],
+      "status": "rework",
+      "attempts": 1,
       "budget": {
         "steps": 200,
         "wall_min": 90
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-101",
@@ -74,11 +75,12 @@
         "modernc.org/memory",
         "modernc.org/gc/v3"
       ],
+      "status": "ready",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 90
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-102",
@@ -99,11 +101,12 @@
       ],
       "ui": false,
       "allow_deps": [],
+      "status": "ready",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 60
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-103",
@@ -126,11 +129,12 @@
       ],
       "ui": false,
       "allow_deps": [],
+      "status": "ready",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 90
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-104",
@@ -151,11 +155,12 @@
       "claims": [],
       "ui": false,
       "allow_deps": [],
+      "status": "ready",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 60
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-105",
@@ -179,11 +184,12 @@
       ],
       "ui": false,
       "allow_deps": [],
+      "status": "ready",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 90
-      },
-      "status": "ready"
+      }
     }
   ]
 }
