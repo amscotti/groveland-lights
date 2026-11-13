@@ -1,0 +1,546 @@
+diff --git a/harness/handoffs/T-204.md b/harness/handoffs/T-204.md
+new file mode 100644
+index 0000000..d55548a
+--- /dev/null
++++ b/harness/handoffs/T-204.md
+@@ -0,0 +1,85 @@
++# T-204 — internal/geo: DistanceM + duplicate-proximity classification (A-204/A-205)
++
++Status: DONE. Committed as `c103e4d` on `task/T-204` (lefthook pre-commit: gitleaks ✔, gofmt ✔; commit-msg: conventional ✔). Worktree clean except the pre-existing untracked `node_modules` entry that was already present on the branch before this task (not in `owns`; untouched).
++
++## What changed
++
++New package `internal/geo` (only `internal/geo/**` touched, per `owns`; no new dependencies — `allow_deps: []` respected, go.mod/go.sum untouched):
++
++- `internal/geo/geo.go` — package `geo`: `Point{Lat, Lon float64}`, `DistanceM(a, b Point) float64` (plain Haversine, `2R·asin(√s)` with the `s>1` ulp clamp so antipodal pairs degrade to exactly `πR` instead of NaN), constants `NumberedRadiusM = 25.0`, `UnnumberedRadiusM = 8.0`, unexported `meanEarthRadiusM`.
++- `internal/geo/duplicate.go` — `Candidate{LightID, AssetNo, Point}`, `DupDecision{Numbered, ExistingID, DistanceM}`, `ClassifyDuplicate(newAssetNo, newPt, existing) (DupDecision, bool)`.
++- `internal/geo/geo_test.go` — hand-computed distance table + seeded property loops.
++- `internal/geo/duplicate_test.go` — assertion-named classify table + frozen-threshold pin.
++
++## Frozen API for T-205 (consume exactly this)
++
++```go
++package geo // github.com/amscotti/groveland-lights/internal/geo
++
++const (
++    NumberedRadiusM   = 25.0 // sizes the near-candidate query window ONLY
++    UnnumberedRadiusM = 8.0  // hard "possible duplicate" radius, unnumbered
++)
++
++type Point struct{ Lat, Lon float64 }
++func DistanceM(a, b Point) float64
++
++type Candidate struct {
++    LightID int64
++    AssetNo string // "" when the existing fixture is unnumbered
++    Point   Point
++}
++type DupDecision struct {
++    Numbered   bool
++    ExistingID int64
++    DistanceM  float64
++}
++func ClassifyDuplicate(newAssetNo string, newPt Point, existing []Candidate) (DupDecision, bool)
++```
++
++### Semantics T-205 must build against (frozen reconciliation, matches `acceptance/drafts/README.md`)
++
++- **Earth radius constant: 6371008.8 m** (IUGG mean). 1° of latitude = `R·π/180` = **111195.0802 m**; the test helper uses this exact reduction (pure-latitude haversine is exactly `R·Δφ` at any latitude).
++- **Numbered duplicate is distance-independent**: any candidate whose non-empty `AssetNo` equals the new non-empty asset_no → `{Numbered: true, ExistingID, DistanceM}, true`. First match in slice order wins (the unique index + asset_no lookup are expected to feed the window; 25 m only bounds the SQL query, never the decision).
++- **Unnumbered duplicate** requires BOTH sides unnumbered (`newAssetNo == ""` AND `candidate.AssetNo == ""`) AND `DistanceM ≤ UnnumberedRadiusM` (inclusive at 8.0). Nearest qualifying candidate is reported; on an exact distance tie the earlier candidate wins.
++- **No cross-kind match**: numbered new fixture near unnumbered existing → no dup; unnumbered new fixture near numbered existing → no dup.
++- Empty candidate slice → `(DupDecision{}, false)` always.
++
++## How verified
++
++1. Claimed acceptance specs first, per AGENTS.md: `acceptance/contract.json` A-204/A-205 have **no active specs** — the M2 oracle lives as inert drafts (`acceptance/drafts/admin-walk.spec.ts.txt`, `admin_lights_go_test.go.txt`), activated only by T-207. `make e2e-task TASK=T-204` greps `@A-204|@A-205` → no tests found → exit 0 (expected no-op, exactly as the packet says). Confirmed no `A-204|A-205` references under `acceptance/e2e/`.
++2. `go test ./internal/geo/... -count=1 -race` → **ok, exit 0** (25/25 subtests: 7 distance-table cases, 4 property checks × 2000 seeded random triples + 729 nasty triples (poles/antipodes/dateline), 13 classify cases, threshold pin).
++3. `make check-fast` → **exit 0** (fmt-check ✔, `go vet ./...` ✔, `golangci-lint run ./...` → `0 issues.`, `go test -race -count=1 -shuffle=on ./...` all packages ok).
++4. `make e2e-task TASK=T-204` re-run after implementation → **exit 0** (still no active specs; UI work belongs to T-205, activation to T-207).
++
++### Commands + exit codes
++
++| Command | Exit |
++|---|---|
++| `make build` (needed once: Playwright webServer wants `bin/server`) | 0 |
++| `make e2e-task TASK=T-204` (before implementation) | 0 (no-op, as predicted) |
++| `go test ./internal/geo/... -count=1 -race` | 0 |
++| `make check-fast` | 0 |
++| `make e2e-task TASK=T-204` (after implementation) | 0 |
++| `git commit` (c103e4d) | 0 |
++
++### Test values are hand-computed, not self-generated
++
++Table expectations derive from independent closed forms — pure-latitude `R·Δφ` (111195.080 m/deg), pure-longitude `R·Δλ·cos φ` with `cos(42.76°) = 0.7342040` (verified via two independent identities), Groveland diagonal 689.745 m from the exact haversine terms, antipodes `πR` = 20015114.442 m — all at the packet's 0.5 m tolerance. Classify fixtures place points via `m / metresPerDegLat` along a meridian (construction error ~µm, tolerances 0.05 m at street scale).
++
++## Notable findings / open issues
++
++1. **Haversine precision envelope near the antipodes (documented in `TestDistanceMProperties`)**: plain Haversine loses `~√(machine-eps)·R` precision when the `sin²` terms sum to ≈1, i.e. metre-scale error for near-antipodal legs (observed 0.048 m on a pole/antipode/dateline triple). The triangle-inequality property therefore uses a 2 m slack **only** when a leg exceeds 1.9e7 m; ordinary triples keep a 1e-6 m slack and the property is asserted for every triple (nothing skipped). Irrelevant to the 8 m decision at town scale (bbox rejects far positions first). If metre-exact antipodal distances ever matter, the complementary-angle form `π/2 − asin(√(1−s))` for `s > 0.5` recovers ~20× (Sterbenz-exact `1−s`) — deliberately NOT implemented now; the packet freezes the plain Haversine form.
++2. **A-205 contract wording vs frozen reconciliation**: the contract sentence "same asset_no within 25m" is satisfied by the reconciliation in `acceptance/drafts/README.md` ("same non-empty asset_no anywhere → numbered duplicate; 25 m only bounds the candidate window"), which the packet's own test ("same asset_no anywhere is numbered duplicate", distance 2 km) freezes. Implemented per the packet/drafts, not the contract shorthand.
++3. **Exact-8.0 m boundary** is inclusive (`d ≤ UnnumberedRadiusM`) per the API doc ("within"), but no test constructs exactly 8.000000 m (not robustly expressible in hand-chosen degrees); 7.9 m in / 8.1 m out bracket it. T-205's HTTP-side behaviour (409 + panel) should not depend on sub-mm boundary behaviour.
++4. Pre-existing untracked `node_modules` on the branch (a file, not the gitignored `node_modules/` directory pattern — worth a chore task if the gate's dirty check ever counts untracked paths). Not touched here.
++5. `internal/geo` currently has no consumers — T-205 wires it into the create handler (`config.BBox.Contains` stays the bbox half; do NOT ask geo for bbox logic).
++
++## Handoff checklist
++
++- [x] Only `internal/geo/**` modified
++- [x] No new dependencies (`go.mod`/`go.sum` untouched)
++- [x] No `Phase N` strings, no TODO/FIXME, no skipped/weakened tests
++- [x] `acceptance/`, `harness/` (except this file), Makefile, golden files untouched
++- [x] Frozen API + constants pinned by tests (`TestThresholdsAreFrozen`)
++- [x] `make check-fast` green; `e2e-task` no-op green; committed; worktree clean of task artifacts
+diff --git a/internal/geo/duplicate.go b/internal/geo/duplicate.go
+new file mode 100644
+index 0000000..7428db2
+--- /dev/null
++++ b/internal/geo/duplicate.go
+@@ -0,0 +1,69 @@
++package geo
++
++// Candidate is one existing fixture offered for duplicate comparison. Callers
++// build the slice from the near-candidate query (NumberedRadiusM window plus
++// the asset_no lookup); this package only classifies.
++type Candidate struct {
++	LightID int64
++	AssetNo string // "" when the existing fixture is unnumbered
++	Point   Point
++}
++
++// DupDecision reports why a submission is a possible duplicate.
++type DupDecision struct {
++	Numbered   bool    // true: same non-empty asset_no as an existing light
++	ExistingID int64   // the light the submission collides with
++	DistanceM  float64 // metres between the submission and ExistingID's point
++}
++
++// ClassifyDuplicate returns (decision, true) when newAssetNo matches a
++// candidate's non-empty asset_no (Numbered), or when BOTH the new fixture is
++// unnumbered (newAssetNo == "") AND a candidate with empty AssetNo stands
++// within UnnumberedRadiusM. Otherwise (zero, false).
++//
++// Numbered matching is distance-independent: the unique index catches exact
++// asset_no reuse anywhere in town, so the first candidate in slice order with
++// an equal non-empty asset_no wins. The unnumbered rule reports the nearest
++// qualifying candidate; on an exact distance tie the earlier candidate wins.
++func ClassifyDuplicate(newAssetNo string, newPt Point, existing []Candidate) (DupDecision, bool) {
++	// Numbered: any candidate sharing the new non-empty asset_no is a
++	// duplicate regardless of distance (an empty newAssetNo must never match
++	// empty candidate asset numbers — that is the unnumbered rule below).
++	if newAssetNo != "" {
++		for _, c := range existing {
++			if c.AssetNo == newAssetNo {
++				return DupDecision{
++					Numbered:   true,
++					ExistingID: c.LightID,
++					DistanceM:  DistanceM(newPt, c.Point),
++				}, true
++			}
++		}
++		return DupDecision{}, false
++	}
++
++	// Unnumbered: both fixtures unnumbered AND standing within the radius.
++	// Strictly-less comparison keeps the earlier candidate on ties.
++	best := -1
++	var bestM float64
++	for i, c := range existing {
++		if c.AssetNo != "" {
++			continue
++		}
++		d := DistanceM(newPt, c.Point)
++		if d > UnnumberedRadiusM {
++			continue
++		}
++		if best < 0 || d < bestM {
++			best, bestM = i, d
++		}
++	}
++	if best < 0 {
++		return DupDecision{}, false
++	}
++	return DupDecision{
++		Numbered:   false,
++		ExistingID: existing[best].LightID,
++		DistanceM:  bestM,
++	}, true
++}
+diff --git a/internal/geo/duplicate_test.go b/internal/geo/duplicate_test.go
+new file mode 100644
+index 0000000..aef6c6d
+--- /dev/null
++++ b/internal/geo/duplicate_test.go
+@@ -0,0 +1,174 @@
++package geo
++
++import "testing"
++
++// metresPerDegLat = R*pi/180 for the frozen mean Earth radius: the exact
++// metres-per-degree factor for pure-latitude arcs at ANY latitude (the
++// haversine reduces to R*dLat_rad when the longitudes match).
++const metresPerDegLat = 111195.0802
++
++// northOf returns p moved m metres north along its meridian. Construction
++// error is micrometres, far inside the test tolerances.
++func northOf(p Point, m float64) Point {
++	return Point{Lat: p.Lat + m/metresPerDegLat, Lon: p.Lon}
++}
++
++// TestThresholdsAreFrozen pins the A-205 radii: bumping either constant is a
++// contract change and must fail this test loudly.
++func TestThresholdsAreFrozen(t *testing.T) {
++	if NumberedRadiusM != 25.0 {
++		t.Fatalf("NumberedRadiusM = %v, want 25.0 (sizes the near-candidate window)", NumberedRadiusM)
++	}
++	if UnnumberedRadiusM != 8.0 {
++		t.Fatalf("UnnumberedRadiusM = %v, want 8.0 (hard unnumbered duplicate radius)", UnnumberedRadiusM)
++	}
++}
++
++func TestClassifyDuplicate(t *testing.T) {
++	base := Point{Lat: 42.76, Lon: -71.03}
++	tests := []struct {
++		name       string
++		newAssetNo string
++		newPt      Point
++		existing   []Candidate
++		want       DupDecision
++		wantDup    bool
++		tolM       float64 // tolerance for want.DistanceM; unused when wantDup is false
++	}{
++		{
++			name:       "same asset_no anywhere is numbered duplicate",
++			newAssetNo: "GP-017",
++			newPt:      base,
++			existing:   []Candidate{{LightID: 1, AssetNo: "GP-017", Point: northOf(base, 2000)}},
++			want:       DupDecision{Numbered: true, ExistingID: 1, DistanceM: 2000},
++			wantDup:    true,
++			tolM:       0.5,
++		},
++		{
++			name:       "same asset_no nearby is still a numbered duplicate",
++			newAssetNo: "GP-017",
++			newPt:      base,
++			existing:   []Candidate{{LightID: 2, AssetNo: "GP-017", Point: northOf(base, 7.9)}},
++			want:       DupDecision{Numbered: true, ExistingID: 2, DistanceM: 7.9},
++			wantDup:    true,
++			tolM:       0.05,
++		},
++		{
++			name:       "first numbered match wins on slice order",
++			newAssetNo: "GP-017",
++			newPt:      base,
++			existing: []Candidate{
++				{LightID: 11, AssetNo: "GP-017", Point: northOf(base, 3000)},
++				{LightID: 12, AssetNo: "GP-017", Point: northOf(base, 20)},
++			},
++			want:    DupDecision{Numbered: true, ExistingID: 11, DistanceM: 3000},
++			wantDup: true,
++			tolM:    0.5,
++		},
++		{
++			name:       "numbered match wins over unnumbered proximity",
++			newAssetNo: "GP-017",
++			newPt:      base,
++			existing: []Candidate{
++				{LightID: 13, AssetNo: "", Point: northOf(base, 3)},
++				{LightID: 14, AssetNo: "GP-017", Point: northOf(base, 4000)},
++			},
++			want:    DupDecision{Numbered: true, ExistingID: 14, DistanceM: 4000},
++			wantDup: true,
++			tolM:    0.5,
++		},
++		{
++			name:       "different asset_no never matches",
++			newAssetNo: "GP-017",
++			newPt:      base,
++			existing:   []Candidate{{LightID: 19, AssetNo: "GP-018", Point: base}},
++			wantDup:    false,
++		},
++		{
++			name:       "numbered new fixture near unnumbered existing is NOT an unnumbered duplicate",
++			newAssetNo: "GP-017",
++			newPt:      base,
++			existing:   []Candidate{{LightID: 17, AssetNo: "", Point: base}},
++			wantDup:    false,
++		},
++		{
++			name:       "unnumbered within 8 m is a duplicate",
++			newAssetNo: "",
++			newPt:      base,
++			existing:   []Candidate{{LightID: 15, AssetNo: "", Point: northOf(base, 7.9)}},
++			want:       DupDecision{Numbered: false, ExistingID: 15, DistanceM: 7.9},
++			wantDup:    true,
++			tolM:       0.05,
++		},
++		{
++			name:       "unnumbered 8.1 m away is not a duplicate",
++			newAssetNo: "",
++			newPt:      base,
++			existing:   []Candidate{{LightID: 16, AssetNo: "", Point: northOf(base, 8.1)}},
++			wantDup:    false,
++		},
++		{
++			name:       "unnumbered new fixture near a numbered existing is not a duplicate",
++			newAssetNo: "",
++			newPt:      base,
++			existing:   []Candidate{{LightID: 18, AssetNo: "GP-030", Point: northOf(base, 3)}},
++			wantDup:    false,
++		},
++		{
++			name:       "empty candidate list never duplicates",
++			newAssetNo: "GP-017",
++			newPt:      base,
++			existing:   nil,
++			wantDup:    false,
++		},
++		{
++			name:       "empty candidate list never duplicates an unnumbered submission",
++			newAssetNo: "",
++			newPt:      base,
++			existing:   []Candidate{},
++			wantDup:    false,
++		},
++		{
++			name:       "nearest candidate inside the radius is reported",
++			newAssetNo: "",
++			newPt:      base,
++			existing: []Candidate{
++				{LightID: 5, AssetNo: "", Point: northOf(base, 6.9)},
++				{LightID: 6, AssetNo: "", Point: northOf(base, 3.1)},
++				{LightID: 7, AssetNo: "", Point: northOf(base, 7.9)},
++			},
++			want:    DupDecision{Numbered: false, ExistingID: 6, DistanceM: 3.1},
++			wantDup: true,
++			tolM:    0.05,
++		},
++		{
++			name:       "tie keeps the earlier candidate",
++			newAssetNo: "",
++			newPt:      base,
++			existing: []Candidate{
++				{LightID: 8, AssetNo: "", Point: northOf(base, 6.5)},
++				{LightID: 9, AssetNo: "", Point: northOf(base, 6.5)},
++			},
++			want:    DupDecision{Numbered: false, ExistingID: 8, DistanceM: 6.5},
++			wantDup: true,
++			tolM:    0.05,
++		},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			got, ok := ClassifyDuplicate(tt.newAssetNo, tt.newPt, tt.existing)
++			if ok != tt.wantDup {
++				t.Fatalf("ClassifyDuplicate(%q, %v, %d candidates) ok = %v, want %v (decision %+v)",
++					tt.newAssetNo, tt.newPt, len(tt.existing), ok, tt.wantDup, got)
++			}
++			if got.Numbered != tt.want.Numbered || got.ExistingID != tt.want.ExistingID {
++				t.Fatalf("ClassifyDuplicate(%q, %v, %d candidates) decision = %+v, want %+v",
++					tt.newAssetNo, tt.newPt, len(tt.existing), got, tt.want)
++			}
++			if tt.wantDup && !approxM(got.DistanceM, tt.want.DistanceM, tt.tolM) {
++				t.Fatalf("ClassifyDuplicate(%q, %v, %d candidates) DistanceM = %.4f, want %.3f (+/- %g m)",
++					tt.newAssetNo, tt.newPt, len(tt.existing), got.DistanceM, tt.want.DistanceM, tt.tolM)
++			}
++		})
++	}
++}
+diff --git a/internal/geo/geo.go b/internal/geo/geo.go
+new file mode 100644
+index 0000000..2d48c75
+--- /dev/null
++++ b/internal/geo/geo.go
+@@ -0,0 +1,45 @@
++// Package geo provides the metric half of the duplicate-detection rules for
++// new fixture submissions (A-204/A-205): great-circle distance and
++// duplicate-proximity classification. Pure geometry — no HTTP, no DB, no
++// dependencies. Bounding-box membership is config.BBox.Contains; handlers
++// call that directly and nothing here re-implements it.
++package geo
++
++import "math"
++
++// Duplicate thresholds (metres). NumberedRadiusM sizes the near-candidate
++// query; same-asset_no duplicates are caught by the unique index + lookup, so
++// the 25 m figure only bounds the candidate window. UnnumberedRadiusM is the
++// hard "possible duplicate" distance for unnumbered fixtures.
++const (
++	NumberedRadiusM   = 25.0
++	UnnumberedRadiusM = 8.0
++)
++
++// meanEarthRadiusM is the IUGG mean Earth radius in metres. Frozen so
++// distances are reproducible across releases and test expectations.
++const meanEarthRadiusM = 6371008.8
++
++// degToRad converts decimal degrees to radians.
++const degToRad = math.Pi / 180
++
++// Point is a latitude/longitude pair in decimal degrees (WGS84 degrees; the
++// spherical haversine model ignores the ellipsoid flattening, which is far
++// below the 8 m decision threshold's care factor).
++type Point struct{ Lat, Lon float64 }
++
++// DistanceM is the great-circle distance between two points in metres
++// (Haversine, mean Earth radius 6371008.8 m — freeze this constant).
++func DistanceM(a, b Point) float64 {
++	dLat := (b.Lat - a.Lat) * degToRad
++	dLon := (b.Lon - a.Lon) * degToRad
++	s := math.Sin(dLat/2)*math.Sin(dLat/2) +
++		math.Cos(a.Lat*degToRad)*math.Cos(b.Lat*degToRad)*math.Sin(dLon/2)*math.Sin(dLon/2)
++	// Near the antipodes the two terms sum to 1 and float rounding can
++	// overshoot by an ulp; clamp so Asin stays finite and the distance
++	// degrades to exactly half a great circle.
++	if s > 1 {
++		s = 1
++	}
++	return 2 * meanEarthRadiusM * math.Asin(math.Sqrt(s))
++}
+diff --git a/internal/geo/geo_test.go b/internal/geo/geo_test.go
+new file mode 100644
+index 0000000..7321bd6
+--- /dev/null
++++ b/internal/geo/geo_test.go
+@@ -0,0 +1,143 @@
++package geo
++
++import (
++	"math"
++	"math/rand"
++	"testing"
++)
++
++// approxM reports whether got is within tol metres of the hand-computed
++// reference want.
++func approxM(got, want, tol float64) bool {
++	return math.Abs(got-want) <= tol
++}
++
++// TestDistanceMTable checks DistanceM against hand-computed analytic values.
++// Reference derivations (mean Earth radius R = 6371008.8 m):
++//
++//	pure latitude: d = R * dLat_rad exactly (haversine reduces to R*dLat
++//	  when longitudes match), so one degree = R*pi/180 = 111195.080 m;
++//	pure longitude: d = R * dLon_rad * cos(lat); cos(42.76 deg) = 0.7342040;
++//	diagonal: Pythagoras on the exact haversine terms;
++//	antipodes: d = pi*R = 20015114.442 m (half a great circle).
++func TestDistanceMTable(t *testing.T) {
++	groveland := Point{Lat: 42.76, Lon: -71.03}
++	tests := []struct {
++		name string
++		a, b Point
++		want float64
++	}{
++		{
++			name: "one degree of latitude at the equator",
++			a:    Point{Lat: 0, Lon: 0},
++			b:    Point{Lat: 1, Lon: 0},
++			want: 111195.080,
++		},
++		{
++			name: "Groveland 0.001 deg north",
++			a:    groveland,
++			b:    Point{Lat: 42.7610, Lon: -71.03},
++			want: 111.195,
++		},
++		{
++			name: "Groveland 0.01 deg west",
++			a:    groveland,
++			b:    Point{Lat: 42.76, Lon: -71.04},
++			want: 816.399,
++		},
++		{
++			name: "Groveland diagonal 0.005 deg south and east",
++			a:    groveland,
++			b:    Point{Lat: 42.7550, Lon: -71.0250},
++			want: 689.745,
++		},
++		{
++			name: "antipodes on the equator",
++			a:    Point{Lat: 0, Lon: 0},
++			b:    Point{Lat: 0, Lon: 180},
++			want: 20015114.442,
++		},
++		{
++			name: "antipodes through Groveland",
++			a:    groveland,
++			b:    Point{Lat: -42.76, Lon: 108.97},
++			want: 20015114.442,
++		},
++		{
++			name: "identical points are zero metres apart",
++			a:    groveland,
++			b:    groveland,
++			want: 0,
++		},
++	}
++	const tolM = 0.5
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			got := DistanceM(tt.a, tt.b)
++			if !approxM(got, tt.want, tolM) {
++				t.Fatalf("DistanceM(%v, %v) = %.4f m, want %.3f m (+/- %g m)", tt.a, tt.b, got, tt.want, tolM)
++			}
++		})
++	}
++}
++
++// TestDistanceMProperties checks the metric laws over seeded random triples
++// plus a deterministic set of nasty points (poles, antipodes, dateline).
++// The properties hold exactly in mathematics; the slacks only absorb IEEE
++// rounding of the haversine evaluation:
++//
++//   - fpSlackM: ordinary sums round at ~1e-8 m;
++//   - antipodalSlackM: when a leg approaches the antipodes, the sin^2 terms
++//     sum to ~1 and plain haversine loses sqrt(machine-eps)*R precision —
++//     metre-scale (observed: 0.05 m on pole/antipode triples). The
++//     inequality still holds far inside this envelope.
++func TestDistanceMProperties(t *testing.T) {
++	rng := rand.New(rand.NewSource(204)) // fixed seed: failures reproduce
++	randPoint := func() Point {
++		return Point{Lat: rng.Float64()*180 - 90, Lon: rng.Float64()*360 - 180}
++	}
++	const (
++		loops           = 2000
++		fpSlackM        = 1e-6
++		antipodalZoneM  = 1.9e7 // legs beyond this run inside the antipodal zone
++		antipodalSlackM = 2.0
++	)
++	check := func(a, b, c Point) {
++		t.Helper()
++		ab, bc, ac := DistanceM(a, b), DistanceM(b, c), DistanceM(a, c)
++		if ab != DistanceM(b, a) {
++			t.Fatalf("DistanceM not symmetric: %v -> %v = %v, reversed = %v", a, b, ab, DistanceM(b, a))
++		}
++		if ab < 0 || bc < 0 || ac < 0 {
++			t.Fatalf("negative distance: ab=%v bc=%v ac=%v", ab, bc, ac)
++		}
++		slack := fpSlackM
++		if ab > antipodalZoneM || bc > antipodalZoneM || ac > antipodalZoneM {
++			slack = antipodalSlackM
++		}
++		if ac > ab+bc+slack {
++			t.Fatalf("triangle inequality violated: a=%v b=%v c=%v: ac=%v > ab+bc=%v (slack %v)", a, b, c, ac, ab+bc, slack)
++		}
++	}
++	for i := 0; i < loops; i++ {
++		check(randPoint(), randPoint(), randPoint())
++	}
++	nasty := []Point{
++		{Lat: 0, Lon: 0},
++		{Lat: 90, Lon: 0},
++		{Lat: -90, Lon: 0},
++		{Lat: 0, Lon: 180},
++		{Lat: 0, Lon: -180},
++		{Lat: 42.76, Lon: -71.03},
++		{Lat: -42.76, Lon: 108.97},
++		{Lat: 89.99999, Lon: 179.99999},
++		{Lat: -89.99999, Lon: -179.99999},
++	}
++	for _, a := range nasty {
++		for _, b := range nasty {
++			for _, c := range nasty {
++				check(a, b, c)
++			}
++		}
++	}
++}
