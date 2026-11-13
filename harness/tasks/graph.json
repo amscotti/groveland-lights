@@ -424,12 +424,13 @@
       ],
       "ui": true,
       "allow_deps": [],
-      "status": "ready",
+      "status": "blocked",
       "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 120
-      }
+      },
+      "findings": "feature task T-205 has no done acceptance task among its deps (contract-first rule)"
     },
     {
       "id": "T-206",
