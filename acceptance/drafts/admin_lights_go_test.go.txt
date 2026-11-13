@@ -80,6 +80,9 @@ var (
 	alReCSRF    = regexp.MustCompile(`<input[^>]*name="csrf_token"[^>]*>`)
 	alReValue   = regexp.MustCompile(`value="([^"]*)"`)
 	alRePhotoSw = regexp.MustCompile(`src="(/photos/[^"]+)"`)
+	// alReHeading matches the admin list heading, tolerating interior
+	// whitespace (the e2e twin uses an exact-accessible-name lookup).
+	alReHeading = regexp.MustCompile(`<h1[^>]*>\s*Lights\s*</h1>`)
 	// alReRowsRoot matches a rows fragment whose ROOT element carries
 	// id="rows" (the frozen selector the admin list swaps in).
 	alReRowsRoot = regexp.MustCompile(`\A\s*<[a-zA-Z][^>]*\bid="rows"`)
@@ -289,6 +292,12 @@ func TestA206PhotoPipeline(t *testing.T) {
 	if w > 1600 || h > 1600 {
 		t.Errorf("served photo is %dx%d; long edge must be <= 1600", w, h)
 	}
+	// T-202 freezes the exact processed dimensions for this fixture: the
+	// 600x800 Orientation=6 portrait serves as exactly 800x600 (orientation
+	// applied, no upscale, no extra downscale).
+	if w != 800 || h != 600 {
+		t.Errorf("served photo is %dx%d; want exactly 800x600 for the Orientation=6 fixture", w, h)
+	}
 	if w <= h {
 		t.Errorf("served photo is %dx%d; EXIF Orientation=6 must make it wider than tall (800x600)", w, h)
 	}
@@ -474,7 +483,7 @@ func TestA209Pagination(t *testing.T) {
 	}
 
 	list := alGet(t, c, s.baseURL+"/admin")
-	if !strings.Contains(list, ">Lights<") {
+	if !alReHeading.MatchString(list) {
 		t.Errorf("GET /admin: missing the \"Lights\" heading; body:\n%.400s", list)
 	}
 	for i := 6; i <= 55; i++ {

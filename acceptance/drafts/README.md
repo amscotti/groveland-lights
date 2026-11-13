@@ -43,6 +43,14 @@ T-203/T-205, which the server will be built to) is:
 3. **kind enum**: the create form offers `park|building` only (schema
    allows `street` too — reserved for the later street-light import; no M2
    test posts it).
+4. **Client-side bbox guard on the walk page**: T-200's packet test 5
+   freezes `setGeolocation` outside `TOWN_BBOX` → role=alert
+   `outside Groveland town bounds` **without submitting** (the alert appears
+   on the position update), while T-205's walk.js behaviour list only freezes
+   the server-side 422. The drafts are the oracle: walk.js mirrors the frozen
+   server message as a client-side pre-flight on each position update (same
+   string, role=alert, near the position readout). The server-side 422 is
+   independently asserted by the Go drafts.
 
 ## Frozen UI contract (workers build to this EXACTLY)
 
@@ -65,7 +73,7 @@ Additional selectors frozen by the drafts (needed by specific tests):
 | Element | Contract |
 |---|---|
 | `#manual-lat`, `#manual-lon` | number inputs, visible when geolocation is denied |
-| `#photo-preview` | in-form preview `img`; renders EXIF orientation applied — its INTRINSIC dimensions (`naturalWidth`/`naturalHeight`) must be wider than tall for the portrait fixtures; the CSS box is not the proof (a stretched portrait games it) |
+| `#photo-preview` | in-form preview `img`; renders EXIF orientation applied — its INTRINSIC dimensions (`naturalWidth`/`naturalHeight`) must be wider than tall for the portrait fixtures (a processed preview or the browser's EXIF-aware intrinsic sizing both qualify; the e2e waits for a decoded frame first — naturalWidth > 0); the CSS box is not the proof (a stretched portrait games it) |
 | `#light-pos` | admin detail coordinates as `lat, lon` at 6 decimal places |
 | login markup | `<h1>Admin login</h1>`, `<label ..>Token</label>` + `<input name="token">`, `<button>Sign in</button>` |
 | list row link | the label text links to `/admin/lights/{id}` (accessible name contains the label) |
@@ -79,14 +87,14 @@ Additional selectors frozen by the drafts (needed by specific tests):
 |---|---|
 | `GET /admin` (no session) | 302 → `/admin/login`; with `HX-Request: true` and no session: 401 + `HX-Redirect: /admin/login` |
 | `GET /admin/login` | 200 form page (see markup above) |
-| `GET /admin/login?token=X` | valid `ADMIN_TOKEN` → 302 → `/admin` + `Set-Cookie: gl_session=...` with `HttpOnly`, `SameSite=Lax`, `Path=/` (one-time, GLOBAL: replay from any client → 403); wrong/empty token → 403 |
+| `GET /admin/login?token=X` | valid `ADMIN_TOKEN` → 302 → `/admin` + `Set-Cookie: gl_session=...` with `HttpOnly`, `SameSite=Lax`, `Path=/` (one-time, GLOBAL: replay from any client → 403); wrong token → 403; missing/blank token → 200 (the form page — only a wrong value is refused) |
 | `POST /admin/lights` | multipart `csrf_token, label, kind(park\|building), lat, lon, asset_no? (^[A-Za-z0-9-]{1,32}$), photo?, accuracy_m?, dup_choice?("" \| merge \| save)`; success → role=status `Saved` for HX-Request, else 303 `Location: /admin`; duplicate → 409 body contains `Possible duplicate` (numbered+save → 422); outside `TOWN_BBOX` → 422 body contains `outside Groveland town bounds`; >15 MB → 413; wrong type / HEIC / >40 MP → 415 (HEIC body contains `please choose JPEG`) |
 | `GET /admin/lights/{id}` | 200 detail; photo referenced as `src="/photos/..."`; 404 after soft delete |
 | `POST /admin/lights/{id}` | edit (multipart `csrf_token` + changed fields; **unspecified fields keep values**) → 303 back to the detail |
 | `POST /admin/lights/{id}/delete` | soft delete (multipart `csrf_token`) → 303 `/admin` |
 | `GET /admin` | list: heading `Lights`, the 50 most recent lights, one `img alt` per row (alt format above; placeholder thumbnails for photo-less lights are fine) |
 | `GET /admin/rows?page=N` | HTMX rows fragment (root element id `rows`); without `HX-Request` → 303 → `/admin?page=N` |
-| `GET /photos/...` | served photo: `Content-Type: image/jpeg`, long edge ≤ 1600, NO APP1 segment at all — so no EXIF, no GPS (the Go draft byte-scans for APP1; the e2e draft asserts `hasAPP1 === false` as well as `hasExifGps === false`), EXIF orientation applied (a 600×800 Orientation=6 upload serves wider-than-tall) |
+| `GET /photos/...` | served photo: `Content-Type: image/jpeg`, long edge ≤ 1600, NO APP1 segment at all — so no EXIF, no GPS (the Go draft byte-scans for APP1; the e2e draft asserts `hasAPP1 === false` as well as `hasExifGps === false`), EXIF orientation applied (the 600×800 Orientation=6/8 fixtures serve as EXACTLY 800×600 — asserted by the Go drafts, matching the fixture table and T-202's no-upscale rule) |
 
 Duplicate radii (T-204): same non-empty asset_no anywhere → numbered
 duplicate; unnumbered within 8 m → unnumbered duplicate.
@@ -114,14 +122,24 @@ test, every project AND across the e2e → a11y invocations of `make check`;
   still matched by `img[alt^="GP-017"]`), so a failing test cannot poison a
   later test's asset number;
 - use per-run jittered coordinates (inside TOWN_BBOX) for every UNNUMBERED
-  create, so the 8 m duplicate radius can never fire across tests/projects/
-  runs; the pagination seeds additionally ride a FIXED per-project longitude
-  lane outside the jitter band (≈41 m apart, ≈41 m clear of the band), which
-  makes grid/point and grid/grid collisions deterministic impossibilities
-  rather than birthday-probability ones;
+  create, so the 8 m duplicate radius cannot fire across tests or projects;
+  the pagination seeds additionally ride a FIXED per-project longitude lane
+  outside the jitter band (≈41 m apart, ≈41 m clear of the band), which makes
+  grid/point and grid/grid collisions within a run deterministic
+  impossibilities rather than birthday-probability ones. ACROSS runs the
+  seeds' latitude is jittered, so a leftover seed from a FAILED previous
+  invocation could still collide (~1/300 per project); the pagination tests
+  therefore pre- and post-clean by the STABLE seed prefix (`Scroll lamp` /
+  `Edge lamp`), sweeping every invocation's seeds, not just the current
+  one's — after any completed run (pass or fail-then-rerun), no seed rows
+  remain;
 - pre- and post-clean by soft-deleting same-labelled rows (soft delete frees
   the asset number for the partial unique index and the coordinates for the
   duplicate checks), so a passing suite leaves the list empty;
+- never race the browser: every walk-page flow waits for the first
+  geolocation fix (`#walk-pos` / `#walk-accuracy` populated) before opening
+  or submitting the form, and the photo-preview assertion waits for a
+  decoded frame (`naturalWidth > 0`);
 - pin `maxRedirects: 0` on every `page.request.post` so the frozen 303s are
   observable (the API request context follows redirects by default);
 - dedupe detail hrefs when discovering rows by label (a compliant row may

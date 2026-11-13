@@ -88,12 +88,13 @@ export function jpegSize(bytes: Uint8Array): JpegSize {
       throw new Error('jpegSize: reached end of headers without a SOF marker');
     }
     const len = (bytes[i + 2] << 8) | bytes[i + 3];
-    if (len < 2 || i + 2 + len > bytes.length) {
+    const next = i + 2 + len;
+    if (len < 2 || next > bytes.length) {
       throw new Error('jpegSize: malformed segment length');
     }
     // SOF0..SOF15 except DHT (0xc4), JPG (0xc8) and DAC (0xcc).
     if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-      if (i + 9 > bytes.length) {
+      if (next < i + 9) {
         throw new Error('jpegSize: truncated SOF segment');
       }
       const h = (bytes[i + 5] << 8) | bytes[i + 6];

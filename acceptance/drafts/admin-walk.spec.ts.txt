@@ -41,7 +41,12 @@
 //   - detail-link discovery collapses duplicate hrefs per row (a compliant
 //     row may link the same /admin/lights/{id} twice — e.g. a thumbnail
 //     link plus the label link), so cleanup deletes each light exactly
-//     once.
+//     once;
+//   - every walk-page flow waits for the FIRST geolocation fix
+//     (#walk-pos / #walk-accuracy populated) before opening or submitting
+//     the form, and the photo preview waits for a decoded frame
+//     (naturalWidth > 0) — no submit or assertion races the watchPosition
+//     callback or the image load.
 //
 // Visual notes (what a correct screenshot shows) are inline per test and in
 // full in the README; the mobile projects (pixel-9, iphone-16, iphone-se-320
@@ -177,14 +182,23 @@ async function deleteAllByLabel(page: Page, label: string): Promise<void> {
   throw new Error(`cleanup: lights labelled "${label}" survived 6 delete sweeps`);
 }
 
+/** Open the add-light form deterministically: wait for the FIRST geolocation
+ * fix to populate the position readout (and the hidden lat/lon inputs)
+ * before the form opens — a submit racing an empty position 422s. */
+async function openWalkForm(page: Page): Promise<void> {
+  await page.goto('/admin/walk');
+  await expect(page.locator('#walk-pos')).toHaveText(/\d+\.\d+, -?\d+\.\d+/);
+  await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy \d+ m/);
+  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+}
+
 /** Walk the plan's §7 walk flow: open the add-light form and fill it (the
  * caller clicks `Confirm pin`, optionally after inspecting the panel). */
 async function addLightFromForm(
   page: Page,
   opts: { assetNo?: string; label: string; photo?: string },
 ): Promise<void> {
-  await page.goto('/admin/walk');
-  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await openWalkForm(page);
   if (opts.assetNo) {
     await page.getByLabel('Asset number').fill(opts.assetNo);
   }
@@ -373,8 +387,7 @@ test('@A-205 duplicate panels: numbered Merge, unnumbered Save anyway', async (
   await page.getByRole('button', { name: 'Confirm pin' }).click();
   await expect(page.getByRole('status')).toContainText('Saved');
 
-  await page.goto('/admin/walk');
-  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await openWalkForm(page);
   await page.getByLabel('Asset number').fill(asset);
   await page.getByLabel('Label').fill('Dup panel lamp twin');
   await page.getByRole('button', { name: 'Confirm pin' }).click();
@@ -394,8 +407,7 @@ test('@A-205 duplicate panels: numbered Merge, unnumbered Save anyway', async (
   await expect(page.locator('img[alt*="Dup panel lamp twin"]')).toHaveCount(0);
 
   // Choosing Merge collapses the pair into exactly one row.
-  await page.goto('/admin/walk');
-  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await openWalkForm(page);
   await page.getByLabel('Asset number').fill(asset);
   await page.getByLabel('Label').fill('Dup panel lamp twin');
   await page.getByRole('button', { name: 'Confirm pin' }).click();
@@ -409,8 +421,7 @@ test('@A-205 duplicate panels: numbered Merge, unnumbered Save anyway', async (
   // panel WITH both buttons; Save anyway keeps both lights.
   const near = jittered(`dup-${projectCode(testInfo)}`);
   await context.setGeolocation({ latitude: near.lat, longitude: near.lon, accuracy: 9 });
-  await page.goto('/admin/walk');
-  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await openWalkForm(page);
   await page.getByLabel('Label').fill('Path light one');
   await page.getByRole('button', { name: 'Confirm pin' }).click();
   await expect(page.getByRole('status')).toContainText('Saved');
@@ -420,8 +431,7 @@ test('@A-205 duplicate panels: numbered Merge, unnumbered Save anyway', async (
     longitude: near.lon,
     accuracy: 9,
   });
-  await page.goto('/admin/walk');
-  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await openWalkForm(page);
   await page.getByLabel('Label').fill('Path light two');
   await page.getByRole('button', { name: 'Confirm pin' }).click();
 
@@ -432,8 +442,7 @@ test('@A-205 duplicate panels: numbered Merge, unnumbered Save anyway', async (
   await page.goto('/admin');
   await expect(page.locator('img[alt="Path light two"]')).toHaveCount(0);
 
-  await page.goto('/admin/walk');
-  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await openWalkForm(page);
   await page.getByLabel('Label').fill('Path light two');
   await page.getByRole('button', { name: 'Confirm pin' }).click();
   await expect(panel).toBeVisible();
@@ -487,16 +496,28 @@ test('@A-206 served photo is re-encoded, oriented and metadata-free', async (
   // the INTRINSIC dimensions (naturalWidth/naturalHeight honour EXIF
   // orientation), not the CSS box, which a plain portrait stretched by a
   // wide container could game.
-  await page.goto('/admin/walk');
-  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await openWalkForm(page);
   await page.getByLabel('Label').fill(label);
   await page.getByLabel('Photo').setInputFiles('testdata/photos/portrait-orient6-gps.jpg');
   const preview = page.locator('#photo-preview');
   await expect(preview).toBeVisible();
-  const [naturalW, naturalH] = await preview.evaluate((img: HTMLImageElement) => [
-    img.naturalWidth,
-    img.naturalHeight,
-  ]);
+  // naturalWidth/naturalHeight are 0 until the preview image has LOADED —
+  // CSS visibility alone does not imply decode — so poll for a decoded frame
+  // before comparing. Browsers honour EXIF orientation in the intrinsic
+  // dimensions (a processed or browser-oriented preview both qualify).
+  let naturalW = 0;
+  let naturalH = 0;
+  await expect
+    .poll(
+      async () => {
+        [naturalW, naturalH] = await preview.evaluate(
+          (img: HTMLImageElement) => [img.naturalWidth, img.naturalHeight] as [number, number],
+        );
+        return naturalW;
+      },
+      { message: '#photo-preview decodes (naturalWidth > 0)' },
+    )
+    .toBeGreaterThan(0);
   expect(naturalW, 'preview intrinsic dims (EXIF orientation applied)').toBeGreaterThan(naturalH);
 
   await deleteAllByLabel(page, label);
@@ -537,7 +558,10 @@ test('@A-209 admin list paginates with HTMX', async ({ page }, testInfo) => {
   const code = projectCode(testInfo);
   const baseLabel = `Scroll lamp ${RUN}-${code}`;
   await loginAsAdmin(page);
-  await deleteAllByLabel(page, baseLabel); // rerun safety
+  // Rerun safety ACROSS INVOCATIONS: sweep the stable `Scroll lamp` prefix,
+  // not just this run's label — a previously failed run's seeds ride the same
+  // fixed longitude lane and would collide with this run's seeds (409).
+  await deleteAllByLabel(page, 'Scroll lamp');
 
   // Seed 55 lights through the same HTTP contract the form uses (the UI
   // flow is covered above; 55 UI dialogs would take minutes). The seeds are
@@ -587,7 +611,9 @@ test('@A-209 admin list paginates with HTMX', async ({ page }, testInfo) => {
   await expect(page.locator(`img[alt="${baseLabel} 55"]`)).toHaveCount(0);
   expect(navigated).toBe(false);
 
-  await deleteAllByLabel(page, baseLabel);
+  // Sweep the stable prefix again: this run's seeds AND any interleaved
+  // leftovers must all be gone before the next invocation.
+  await deleteAllByLabel(page, 'Scroll lamp');
 });
 
 test('@A-201 unauthenticated /admin lands on the login page', async ({ page }) => {
