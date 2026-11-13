@@ -39,7 +39,7 @@ assert no `Saved`/no row, then choose save-anyway and save.
 
 `acceptance/drafts/admin-walk.spec.ts.txt:372-376` only waits for the
 client-side `role=alert` after `setGeolocation` outside the bbox. The README
-visual note also freezes "the form does NOT advance" (`acceptance/drafts/README.md:127-129`),
+visual note also freezes "the form does NOT advance" (`acceptance/drafts/README.md:202-203`),
 but the test never opens the add-light form and never checks that no form is
 present or that nothing was saved. The packet test 5 only requires the alert
 (`harness/tasks/T-200.md:244`), so this is a minor coverage gap, not a
