@@ -53,7 +53,7 @@ and write `BLOCKED: web.go request-ID chain order needs an owner fix`.
 
 1. **Logged status is not cross-checked against the actual response.**
    `internal/web/middleware_logging_test.go:88-90` accepts either 200 or 404
-   for both cases, and `:102-105` checks the logged status against the table
+   for both cases, and `:102-104` checks the logged status against the table
    but never against `rec.Code`. The logged status does track the response via
    `statusRecorder` (`internal/web/web.go:75-83,128-129`), so a healthz→404
    regression would fail the `wantStatus "200"` assertion; the residual gap is
@@ -75,7 +75,7 @@ and write `BLOCKED: web.go request-ID chain order needs an owner fix`.
    draft would catch it. A one-line `CSRFTokenName == "csrf_token"` pin in
    `csrf_test.go` is cheap and belongs here.
 4. **Idempotency expectation was changed after a failing run.**
-   `internal/web/csrf_test.go:148-165` changed from expecting a redundant
+   `internal/web/csrf_test.go:147-164` changed from expecting a redundant
    `Set-Cookie` on the reuse path to expecting none. The packet
    (`harness/tasks/T-102.md:46-50`) only requires reuse; the no-redundant-cookie
    behavior is defensible and is pinned, but the expectation was adjusted to
@@ -91,7 +91,7 @@ and write `BLOCKED: web.go request-ID chain order needs an owner fix`.
    blocker, and it was removed rather than escalated. That is a permission-model
    workaround and it reinforced the decision to leave the weak assertions.
 6. **Packet-compliance nit:** `TestCSRFVerify` and `TestCSRFIssue`
-   (`internal/web/csrf_test.go:76-195`) use named subtests with literal cases
+   (`internal/web/csrf_test.go:75-194`) use named subtests with literal cases
    rather than table-driven structures; the packet asks for table-driven tests
    (`harness/tasks/T-102.md:57-61`). Case names are still the assertions, so this
    is not a test-integrity failure, just a deviation.
