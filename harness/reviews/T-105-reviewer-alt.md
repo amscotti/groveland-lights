@@ -42,7 +42,7 @@ attribute-order-sensitive pattern (or an explicit re-freeze) would be safer.
 ### 2. [Medium] The holdout oracle was edited, but the edit is not in the reviewed diff
 
 `harness/handoffs/T-105.md:62-63` says the holdout `hsReCount` got "the same
-one-line edit", and `harness/handoffs/T-105.md:39-45` says the two holdout
+one-line edit", and `harness/handoffs/T-105.md:35-41` says the two holdout
 drafts were renamed there. The holdout is the independent oracle and is not
 covered by `harness/protected.sha256`; its diff/hashes are not attached here,
 so this review cannot verify that only the regex changed (and not an
@@ -101,15 +101,16 @@ say so at the top so a skimming reader does not infer a green suite.
 
 ### 7. [Low] `make check` does not run the holdout suite; the gate does
 
-The handoff/task prose treats `make check` as including holdout
-(`harness/handoffs/T-105.md:113-115`), but `Makefile:135-136` has no holdout
+The task packet calls the full suite "`make check` ... + holdout"
+(`harness/tasks/T-105.md:61-64`), but `Makefile:135-136` has no holdout
 prerequisite; `cmd/harness/gate.go:99-118` runs `make holdout` separately.
-The `make holdout | 0` row is fine; the prose should not imply `make check`
-covers the activated holdout variants.
+The handoff's `make holdout | 0` row (`harness/handoffs/T-105.md:113`) is
+fine; the packet/prose should not imply `make check` covers the activated
+holdout variants.
 
 ### 8. [Info] A-104's first-token assumption is actually pinned
 
-The handoff's claim (`harness/handoffs/T-105.md:69-74`) that the first
+The handoff's claim (`harness/handoffs/T-105.md:70-75`) that the first
 64-char hex token is the recorded checksum is supported by
 `internal/store/dbfile_layout_test.go:11-63` (first == recorded and exactly
 one token), so the absence of an A-104 index pin is justified.
