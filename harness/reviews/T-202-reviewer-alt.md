@@ -22,7 +22,7 @@ are post-patch `file:line`.
 header, so `image.DecodeConfig` fails on it and `Process` already returns
 `ErrUnsupported` from that error (`internal/img/img.go:61-63`) even if the HEIC
 guard is deleted or always returns false. The guard itself is
-`isHEIC` (`internal/img/img.go:184-198`); no test calls it, and none feeds a
+`isHEIC` (`internal/img/img.go:184-201`); no test calls it, and none feeds a
 major-brand or compatible-brand variant, a non-HEIC `ftyp` box, or a short
 `ftyp` buffer. Deleting `isHEIC` (or the call at `img.go:58-60`) therefore keeps
 the whole suite green. This is the definition of a test that cannot fail for the
@@ -54,7 +54,7 @@ WebP.
 
 ### 3. [Low — format assertion is incidental] `requireJPEGOutput` does not actually assert JPEG
 
-`requireJPEGOutput` (`internal/img/img_test.go:167-186`) calls
+`requireJPEGOutput` (`internal/img/img_test.go:167-182`) calls
 `image.DecodeConfig`, which succeeds for any registered decoder, then asserts
 dims and no APP1/APP2. It never checks the magic bytes or the returned format
 name. A non-JPEG result would currently trip `hasJPEGAPPn` only because that
@@ -63,7 +63,7 @@ helper assumes an SOI and fatal-errors when `data[2] != 0xFF`
 "lost marker synchronisation", not "not a JPEG". A JPEG-like container that
 keeps the marker chain intact would pass. Quality 85 is also only pinned for
 orientation 1 by the byte-equality reference
-(`internal/img/img_test.go:432-451,463-468`). Use `jpeg.DecodeConfig`/an SOI
+(`internal/img/img_test.go:432-447,497-500`). Use `jpeg.DecodeConfig`/an SOI
 assertion in this helper so the "re-encoded as JPEG, quality 85" contract is
 asserted directly.
 
@@ -82,7 +82,7 @@ weaker than the comment and the packet's "aspect preserved" wording.
 
 `testHookFullDecode` (`internal/img/img.go:27-30`) is invoked after a
 successful `image.Decode` (`img.go:75-77`). The pixel-bomb test sets it and
-asserts zero (`internal/img/img_test.go:313-338`), but no test ever processes a
+asserts zero (`internal/img/img_test.go:313-339`), but no test ever processes a
 normal image with the hook set to prove the hook fires. Deleting the hook call —
 or moving it out of `Process` — leaves `decodes == 0` and the test green. The
 load-bearing proof is the `ErrPixelBomb` assertion itself: the header-only bomb
@@ -93,8 +93,8 @@ vacuously zero.
 
 ### 6. [Info — handoff/documentation precision]
 
-- `isHEIC` checks `mif1`/`msf1` in the compatible-brand loop as well as as
-  major brands (`internal/img/img.go:174-176,188-198`), but the handoff says
+- `isHEIC` checks `mif1`/`msf1` in the compatible-brand loop as well as
+  major brands (`internal/img/img.go:174-178,188-201`), but the handoff says
   "`mif1`/`msf1` are accepted as major brands only"
   (`harness/handoffs/T-202.md:149-153`). Behaviour is still `ErrUnsupported`
   either way; the statement is simply wrong.
@@ -126,14 +126,14 @@ vacuously zero.
   sniff as the packet requires.
 - **The EXIF orientation matrices are spec-correct and independently pinned.**
   I re-derived `sourceXY` for all eight orientations from the EXIF definitions;
-  `orientationQuadrants` (`internal/img/img_test.go:371-379`) matches, and the
+  `orientationQuadrants` (`internal/img/img_test.go:371-380`) matches, and the
   orient6/orient8 corner tests use the correct source corners (the 7-pixel
   offset at orient8 bottom-left is absorbed by the smooth gradient and the
   16-unit tolerance). A wrong rotation/flip changes a corner by ~255, so the
   tolerance is meaningful.
 - **The fuzz invariant is the packet's** (1..8, never panic); the packet's
   "truncated input → 1" is covered by the dense prefix test
-  (`internal/img/exif_test.go:265-285`), not by the fuzz body.
+  (`internal/img/exif_test.go:265-282`), not by the fuzz body.
 - **Dependency and ownership are within the packet.** Only
   `golang.org/x/image v0.47.0` is added (allowed); `go.mod`/`go.sum` contain no
   other module change. Only `internal/img/**`, `go.mod`, `go.sum` and the
