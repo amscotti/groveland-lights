@@ -424,8 +424,8 @@
       ],
       "ui": true,
       "allow_deps": [],
-      "status": "review",
-      "attempts": 1,
+      "status": "rework",
+      "attempts": 2,
       "budget": {
         "steps": 200,
         "wall_min": 120
