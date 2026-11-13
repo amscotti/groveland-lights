@@ -5,7 +5,7 @@
   <p>Position: <span id="light-pos">{{.Pos}}</span></p>
   <p>Asset number: {{if .AssetNo}}<span class="light-asset">{{.AssetNo}}</span>{{else}}<span class="light-asset">—</span>{{end}}</p>
   <p>Kind: {{.Kind}} · Status: <span class="status status-{{.Status}}"><span class="dot" aria-hidden="true"></span>{{.Status}}</span>{{if .Accuracy}} · Recorded accuracy: {{.Accuracy}} m{{end}}</p>
-  {{if .Alert}}<div role="alert">{{.Alert}}</div>{{end}}
+  {{if .Alert}}<article role="alert"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M12 2 23 21H1Z" fill="#b3261e"></path><rect x="11" y="9" width="2" height="6" fill="#ffffff"></rect><rect x="11" y="17" width="2" height="2" fill="#ffffff"></rect></svg> <span>{{.Alert}}</span></article>{{end}}
   <form method="post" action="{{.DetailURL}}">
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
     <label for="edit-label">Label</label>

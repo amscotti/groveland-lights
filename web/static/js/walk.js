@@ -67,7 +67,12 @@ function outsideBBox(/** @type {{lat: number, lon: number} | null} */ pt) {
 function setAlert(message) {
   const alert = el('walk-alert');
   if (!(alert instanceof HTMLElement)) return;
-  alert.textContent = message;
+  const text = el('walk-alert-text');
+  if (text) {
+    text.textContent = message;
+  } else {
+    alert.textContent = message;
+  }
   alert.hidden = message === '';
 }
 

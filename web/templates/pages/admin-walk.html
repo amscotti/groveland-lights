@@ -5,7 +5,10 @@
     <span id="walk-pos">waiting for a position…</span>
     <span id="walk-accuracy">accuracy pending…</span>
   </p>
-  <p role="alert" id="walk-alert" hidden></p>
+  <article role="alert" id="walk-alert" hidden>
+    <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M12 2 23 21H1Z" fill="#b3261e"></path><rect x="11" y="9" width="2" height="6" fill="#ffffff"></rect><rect x="11" y="17" width="2" height="2" fill="#ffffff"></rect></svg>
+    <span id="walk-alert-text"></span>
+  </article>
   <svg id="pinpad" viewBox="0 0 200 200" width="100%" role="group" aria-label="Pin pad spanning 50 metres: drag the pin, or focus it and use the arrow keys to nudge by one metre">
     <rect x="1" y="1" width="198" height="198" rx="6" fill="#f4f5f6" stroke="#9aa2ab" stroke-width="1" aria-hidden="true"></rect>
     <path d="M50 2V198M100 2V198M150 2V198M2 50H198M2 100H198M2 150H198" stroke="#dde1e6" stroke-width="1" fill="none" aria-hidden="true"></path>
@@ -34,7 +37,10 @@
       <input type="hidden" id="hidden-lat" name="lat" value="{{.Values.Lat}}">
       <input type="hidden" id="hidden-lon" name="lon" value="{{.Values.Lon}}">
       <input type="hidden" id="hidden-accuracy" name="accuracy_m" value="{{.Values.AccuracyM}}">
-      <div id="dup-slot">{{if .Alert}}<div role="alert">{{.Alert}}</div>{{end}}{{if .Dup}}<article id="dup-panel"><!-- sync: partials/admin-dup.html -->
+      <div id="dup-slot">{{if .Alert}}<article role="alert"><!-- sync: partials/admin-alert.html (role=alert variant) -->
+        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M12 2 23 21H1Z" fill="#b3261e"></path><rect x="11" y="9" width="2" height="6" fill="#ffffff"></rect><rect x="11" y="17" width="2" height="2" fill="#ffffff"></rect></svg>
+        <span>{{.Alert}}</span>
+      </article>{{end}}{{if .Dup}}<article id="dup-panel"><!-- sync: partials/admin-dup.html -->
         <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M12 2 23 21H1Z" fill="#b45309"></path><rect x="11" y="9" width="2" height="6" fill="#ffffff"></rect><rect x="11" y="17" width="2" height="2" fill="#ffffff"></rect></svg>
         <h2>Possible duplicate</h2>
         <p>An existing light looks the same: <strong>{{.Dup.Label}}</strong>{{if .Dup.AssetNo}} (asset number {{.Dup.AssetNo}}){{end}}, about {{.Dup.Distance}} from this position.</p>

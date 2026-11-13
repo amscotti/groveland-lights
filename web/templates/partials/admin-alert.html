@@ -1,1 +1,5 @@
-<div role="{{.Role}}">{{.Message}}</div>
+<article role="{{.Role}}"><!-- alert box (pico article border): red warning icon for role=alert, green check for role=status; the message text is always the label, never colour-only -->
+{{if eq .Role "alert"}}  <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M12 2 23 21H1Z" fill="#b3261e"></path><rect x="11" y="9" width="2" height="6" fill="#ffffff"></rect><rect x="11" y="17" width="2" height="2" fill="#ffffff"></rect></svg>
+{{else}}  <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="#2e7d32"></circle><path d="M7 12.5 10.5 16 17 8.5" stroke="#ffffff" stroke-width="2.5" fill="none"></path></svg>
+{{end}}  <span>{{.Message}}</span>
+</article>
