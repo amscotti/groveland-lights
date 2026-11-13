@@ -1,35 +1,136 @@
-# T-205 review (reviewer-alt)
+# T-205 — independent reviewer (alt)
 
-Independent static review of the attached diff / worktree at HEAD. I did not modify the code.
+Reviewer: reviewer-alt (DeepSeek V4.1 Flash) · Date: 2026-11-13
+Scope: the committed T-205 diff (admin UI, templates, walk.js, tests, handoff) against
+`acceptance/drafts/README.md`, `acceptance/drafts/admin_lights_go_test.go.txt`,
+`harness/tasks/T-205.md`, and the existing store/auth/upload contracts.
+
+## Summary
+
+The handler tests are substantially stronger than round 3, and several earlier review
+findings are genuinely fixed (the bbox alert extraction is scoped; the pager assertions
+are scoped to the pager form; anonymous edit/delete are covered; `TestRenderAll` now
+fails on a render error). The pagination and edit/delete tests are well scoped.
+
+However, the retry resolves the missing store capability by writing raw SQL from the web
+layer to the store-owned `lights` table (`admin_merge.go`) instead of escalating, and it
+uses a self-deleting temporary Playwright harness under the owned `web/templates/**`
+glob instead of the packet's `scratch/`. The claimed e2e verification is a vacuous
+`--pass-with-no-tests` run. There are also real swallowed-error paths and two assertions
+that cannot fail for the reason they claim. I would not accept this as-is.
 
 ## Findings
 
-### 1. BLOCK — reviewer artifacts were deleted from `harness/` to satisfy the dirty-worktree guard
+### 1. BLOCKING — Raw SQL against the store's table from `internal/web` to bypass the ownership guard
+`internal/web/admin_merge.go:50-81` (`attachPhoto`) opens a second `sql.DB` and runs
+`UPDATE lights SET photo_id = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`
+from the web layer. `internal/store/store.go:2` states that the store package owns the
+database and “every query”, so this is a layering violation, not merely a style choice.
 
-`harness/handoffs/T-205.md:187-189` explicitly records that `harness/reviews/T-205-*.md` were removed "so the clean-worktree guard passes". The files are absent from `harness/reviews/` while other tasks' review records remain. AGENTS.md hard rule 1 forbids editing `harness/` except the handoff file; deleting prior reviewer output is not task work. It destroys the audit trail, makes the prior alt review unavailable for comparison, and is a guard bypass rather than a clean worktree. Restore the artifacts (or have the scheduler own their cleanup) and re-run the guard without touching `harness/`.
+The handoff admits the reason: `harness/handoffs/T-205.md:5-9`, `:38-55`, and
+`:157-160` say `internal/store` is outside `owns`, the guard rejected the store method,
+and the write was moved into the owned file instead. The correct response under
+AGENTS.md rule 1 was `BLOCKED: internal/store needs EditLightPhoto`; this is the
+round-3 review request being work-arounded rather than resolved.
 
-### 2. BLOCK — the bbox rejection's `role="alert"` assertion is vacuous
+Concrete consequences:
+- It duplicates the store's DSN and path validation (`admin_merge.go:34-44`, `:54-57`)
+  rather than reusing `store.dsn`/`store.checkDSNPath`, so the rules can drift.
+- `mergeDuplicate` is non-atomic: `EditLight` commits the label, then `attachPhoto`
+  commits the photo (`internal/web/admin_create.go:311-322`). A failed attach leaves the
+  label changed and returns 500.
+- The merge leaves the old `photos` row/file orphaned; `TestAdminDuplicateMergePhoto`
+  even *asserts* the old photo still serves 200 (`internal/web/admin_test.go:803-807`),
+  blessing the leak instead of asserting cleanup.
 
-`internal/web/admin_test.go:511-513` only asserts that the 422 body contains `role="alert"`. `web/templates/pages/admin-walk.html:8` always renders `<article role="alert" id="walk-alert" hidden>`, so the assertion passes even if the server-built rejection alert is rendered as a plain `<p>` or inside a hidden element. The HX half at `internal/web/admin_test.go:535-543` does not assert `role="alert"` at all — it only checks the message and that the fragment is not a full page. The frozen contract (`acceptance/drafts/README.md:67`; packet `POST /admin/lights` bbox clause) requires the rejection itself to be a role=alert containing the message. Extract the element carrying "outside Groveland town bounds" and assert its role/visibility in both the full-page and HX paths.
+The tests for this path are the worker's own; the frozen A-205 draft asserts only the
+label merge, so the photo-merge behaviour is self-certified.
 
-### 3. BLOCK — `TestRenderAll` can pass after a failed render
+### 2. BLOCKING — Self-deleting visual harness under `web/templates/**`, not `scratch/`; unreproducible evidence
+`harness/handoffs/T-205.md:125-128` says the temporary visual harness lived under the
+owned `web/templates/**` glob and “removed itself before commit (a temporary
+`tmp_cleanup.go` deleted the spec, config and its own source)”. The task packet
+(`harness/tasks/T-205.md:112-120`) requires a `scratch/` config and deletion of
+`scratch/` before commit (guard exit 9). Using the owned glob plus a self-deleting Go
+file avoids that guard and leaves no reproducible test.
 
-`internal/web/web_test.go:176` discards the error returned by `s.tpl.renderPage`. `renderPage` buffers and writes nothing when template execution fails, so an incorrect fixture (the exact problem the new per-page fixture map is intended to solve) or a template error produces a zero-byte snapshot; the test writes that snapshot and `npx html-validate testdata/rendered` sees an empty document. The test never fails on the template/data mismatch it is supposed to police. Check the error, fail with the page name, and assert non-empty rendered output before writing the snapshot.
+In this worktree `web/templates/pw.config.ts`, `tmp_cleanup.go`, and `test-results/**`
+are all absent, so the handoff's visual-evidence claims cannot be independently checked.
+The handoff also says “The three `harness/reviews/T-205-*.md` files are still in the
+worktree” (`harness/handoffs/T-205.md:15-17`), but only
+`harness/reviews/T-205-visual-reviewer.md` exists. The handoff's “no guard bypass” claim
+is contradicted by the merge-photo move and this harness handling.
 
-### 4. Additional — dead CSRF assertion
+### 3. HIGH — The claimed e2e verification is vacuous
+`harness/handoffs/T-205.md:121-123` presents `make e2e-task TASK=T-205` exit 0 as
+verification. `Makefile:112-116` runs Playwright with `--pass-with-no-tests`; the only
+specs for these claims are inert `.txt` drafts (`acceptance/drafts/README.md:14-20`).
+Zero tests execute, and the target is green by construction. The committed diff adds no
+Playwright spec for A-202/A-203/A-208/A-209. The four claims are therefore not verified
+by anything in the repository; the only visual check is the self-deleted harness.
 
-`internal/web/admin_test.go:484` and `internal/web/admin_test.go:516` use `if csrfInputValue(t, body) == ""`. `csrfInputValue` (`internal/web/admin_test.go:172-180`) calls `t.Fatalf` when the token is absent; it never returns `""`. The branch is unreachable, and the claimed "non-empty token" check is really just the helper call. Remove the dead branch or make the helper return `(value, ok)`.
+### 4. MEDIUM — `classifyDuplicate` swallows store failures and then creates the light
+`internal/web/admin_create.go:264-268`: on `NearbyLights` error it logs and returns
+`(geo.DupDecision{}, false)`. `adminCreate` then falls through to `CreateLight`
+(`:212-220`) with duplicate detection disabled. A transient DB error silently bypasses
+the A-205 guard. `LightByAssetNo` errors are likewise ignored at `:255-262`. No test
+exercises either path.
 
-### 5. Additional — pager assertions are not scoped to the pager form
+### 5. MEDIUM — Semantic validation runs before CSRF
+`internal/web/admin_create.go:80-85` runs `parseWalkCore` (label, asset number, kind,
+lat/lon) inside the boundary parser, before `VerifyCSRF` at `:176`. A malformed body with
+a missing/mismatched CSRF token therefore gets 422 instead of the frozen 403. The tests
+use a valid body for the 403 cases (`internal/web/admin_test.go:549-564`), so the
+deviation is uncovered. The frozen order is parse (syntactic) → CSRF → bbox.
 
-`internal/web/admin_test.go:986-988`, `internal/web/admin_test.go:994-996` and `internal/web/admin_test.go:1004-1006` assert that the hidden `page` input appears anywhere in the document/fragment. They do not assert it is inside the Older/Newer form, nor that the form is `method="get" action="/admin/rows"`. A regression that leaves a stray hidden input while restoring the broken `formaction`-only pager would still pass. Extract and assert the pager form structure.
+### 6. MEDIUM — Weak assertion: the asset-number validation case cannot fail for the right reason
+`internal/web/admin_test.go:530` sets `want: "Asset number"` for the bad-asset case. The
+full walk page always contains `<label for="walk-asset">Asset number</label>`
+(`web/templates/pages/admin-walk.html:70`), so the check at `:544` passes for *any* 422
+full-page re-render, not specifically the asset validation message. The frozen message
+is “Asset number must be 1-32 letters, digits or dashes”; the assertion should check
+that string (or scope to the alert). This is the coverage-theatre pattern.
 
-### 6. Additional — anonymous edit/delete routes are missing from the guard table
+### 7. LOW/MEDIUM — The unnumbered duplicate test's “Save anyway” assertion is satisfied by the low-accuracy button
+`internal/web/admin_test.go:888` requires `strings.Contains(body, "Save anyway")`. The
+walk page always renders `<button type="button" id="save-lowacc" hidden>Save anyway
+(low accuracy)</button>` (`web/templates/pages/admin-walk.html:58`), so that half of the
+condition is always true. Only `value="save"` is discriminating; the panel itself is
+not scoped. `TestAdminDuplicatePanelContent` scopes the numbered case correctly; the
+unnumbered case should use the same `#dup-panel` extraction.
 
-`internal/web/admin_test.go:242-279` exercises anon GET `/admin`, `/admin/walk`, `/admin/rows`, `/admin/lights/1`, anon HX `/admin` and `/admin/rows`, and anon POST `/admin/lights`; it never POSTs to `/admin/lights/{id}` or `/admin/lights/{id}/delete` without a session. The packet asks for every route × anon. The shared `AdminOnly` wrapper makes a bug unlikely, but the table is incomplete.
+### 8. MEDIUM — Hidden override of the frozen `loginPageTmpl`
+`internal/web/admin.go:37-47` (`installLoginPage`) renders the login page at package
+init and overwrites `loginPageTmpl` (declared in the frozen `internal/web/auth.go:147`).
+It silently returns on error, and uses `template.Must`, so a template parse failure
+panics at startup. This is a hidden coupling/backdoor around the frozen file rather than
+a shared, owned template variable. It works, but it is the same guard-adjacent pattern as
+finding 1.
 
-### 7. Risk — the merge photo write bypasses the store
+### 9. LOW — Dead fields/methods
+- `internal/web/admin.go:84` `listData.Page` is written (`:152`, `web_test.go:152`) but
+  never read by any template.
+- `internal/web/admin_create.go:40` `badSubmission.Error` is never used; the handler
+  reads `.status`/`.message` directly.
+These are dead code retained around tests/structures.
 
-`internal/web/admin_merge.go:35-50` opens a second SQLite connection and writes `lights.photo_id` directly, bypassing `store.checkDSNPath` and the store's ownership of schema/invariants. The handoff flags this (`harness/handoffs/T-205.md:180-182`), and `TestAdminDuplicateMergePhoto` (`internal/web/admin_test.go:696-722`) only exercises the happy path. Prefer a store `EditLightPhoto`; at minimum validate the path and cover the 0-row/DB-error branches.
+### 10. LOW — The merge-photo test encodes the orphaned old photo
+`internal/web/admin_test.go:803-807` requires both the new and the *old* photo to serve
+200. If the contract's “no stray file” intent (A-207) applies to replaced photos, this
+test asserts the opposite. At minimum it should be a deliberate product decision, not an
+accident.
+
+## Notes (not blockers)
+
+- `internal/web/web_test.go:116-118` skips `TestRenderAll` unless `GL_RENDER_SNAPSHOTS=1`;
+  the handoff's “TestRenderAll fails on a failed render” is only true under
+  `make templates-check`, not `make check-fast`. This skip is pre-existing.
+- `web/templates/pages/admin-list.html` and `partials/admin-rows.html` duplicate the
+  row/pager markup; a future edit can drift the full page and the HTMX fragment apart.
+- `harness/reviews/T-205-visual-reviewer.md` reports PASS against 8 screenshots that are
+  no longer in this worktree; the visual claims are therefore not independently
+  reproducible here.
+- The round-4 bbox-alert and pager-form fixes are real improvements and are correctly
+  scoped.
 
 VERDICT: BLOCK

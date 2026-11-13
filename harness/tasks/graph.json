@@ -414,7 +414,8 @@
         "internal/web/web_test.go",
         "web/templates/**",
         "web/static/js/walk.js",
-        "web/static/js/globals.d.ts"
+        "web/static/js/globals.d.ts",
+        "internal/store/lights_photo*.go"
       ],
       "claims": [
         "A-202",
@@ -424,8 +425,8 @@
       ],
       "ui": true,
       "allow_deps": [],
-      "status": "review",
-      "attempts": 3,
+      "status": "rework",
+      "attempts": 1,
       "model": "deepseek",
       "budget": {
         "steps": 200,
