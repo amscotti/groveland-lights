@@ -131,6 +131,11 @@ func checkProtectedPaths(changed []string, t *Task, pol Policy) (int, bool) {
 // checkOwnership is check 3.
 func checkOwnership(changed []string, t *Task) (int, bool) {
 	allowed := append(append([]string{}, t.Owns...), "harness/handoffs/"+t.ID+".md")
+	if t.Type == "acceptance" {
+		// `make protect` regenerates the ratchet baseline alongside the manifest
+		// when the acceptance suite adds tests; that's legitimate output.
+		allowed = append(allowed, "harness/.ratchet.json")
+	}
 	for _, p := range changed {
 		if !ownsCovered(allowed, p) {
 			fmt.Fprintf(os.Stderr, "ERROR: out of ownership: %s not covered by owns of %s\n", p, t.ID)

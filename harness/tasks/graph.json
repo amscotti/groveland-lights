@@ -42,7 +42,7 @@
       "ui": false,
       "allow_deps": [],
       "status": "rework",
-      "attempts": 1,
+      "attempts": 2,
       "budget": {
         "steps": 200,
         "wall_min": 90

@@ -100,8 +100,13 @@ func schedPreconditions(root string, pol Policy) error {
 var errStopRequested = errors.New("stop requested")
 
 // dispatchReady claims the currently-ready tasks. Returns an error only for
-// stop-the-world conditions (dirty main, bad state).
+// stop-the-world conditions (dirty main, bad state). The scheduler's own state
+// files are committed first and excluded from the clean-main assertion — that
+// assertion exists to catch AGENT edits to main (E4), not scheduler bookkeeping.
 func dispatchReady(root string, pol Policy, g *Graph, wg *sync.WaitGroup) error {
+	if err := commitHarnessState(root); err != nil {
+		return err
+	}
 	ready := ReadyTasks(g, pol)
 	for _, t := range ready {
 		// Contract-first (feature tasks need a done acceptance dep).
@@ -110,13 +115,9 @@ func dispatchReady(root string, pol Policy, g *Graph, wg *sync.WaitGroup) error 
 			progress(root, "blocked "+t.ID+" "+err.Error())
 			continue
 		}
-		// E4: main must be clean before claiming.
-		if dirty := DirtyLines(gitOut2(root, "status", "--porcelain")); len(dirty) > 0 {
+		// E4: main must be clean before claiming (ignoring scheduler-owned state).
+		if dirty := dirtyNonScheduler(root); len(dirty) > 0 {
 			return fmt.Errorf("main checkout dirty: %v — stopping the world", dirty)
-		}
-		// E9: commit graph + new packets before creating worktrees.
-		if err := commitHarnessState(root); err != nil {
-			return err
 		}
 		if err := spawnTask(root, pol, t, wg); err != nil {
 			setTaskStatus(root, t.ID, StatusBlocked, err.Error())
@@ -124,6 +125,29 @@ func dispatchReady(root string, pol Policy, g *Graph, wg *sync.WaitGroup) error 
 		}
 	}
 	return nil
+}
+
+// schedulerOwned paths are main-repo files the scheduler itself mutates; they
+// are committed by commitHarnessState and don't count as dirty for E4.
+func schedulerOwned(p string) bool {
+	return matchGlob("harness/tasks/**", p) || p == "harness/progress.log" ||
+		p == "harness/.ratchet.json" || p == "harness/protected.sha256"
+}
+
+// dirtyNonScheduler returns porcelain lines whose path isn't scheduler-owned.
+func dirtyNonScheduler(root string) []string {
+	var out []string
+	for _, raw := range strings.Split(gitOut2(root, "status", "--porcelain"), "\n") {
+		if len(raw) < 4 {
+			continue
+		}
+		p := strings.TrimSpace(raw[3:])
+		if p == "" || schedulerOwned(p) {
+			continue
+		}
+		out = append(out, raw)
+	}
+	return out
 }
 
 func stopExists(root string) bool {
