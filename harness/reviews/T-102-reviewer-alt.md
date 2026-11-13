@@ -35,7 +35,7 @@ were traced directly.
   `harness/runs/20261113T045239b/T-102/worker.jsonl:131-138`: it observed
   `header X-Request-Id="a1cd53c7fa39bb2a"` and `req_id=-`, but used `t.Logf`
   instead of a failing assertion (`--- PASS`), and the probe was then deleted
-  (handoff `:144-149`). The kept tests preserve the non-empty-only check.
+  (`harness/handoffs/T-102.md:144-149`). The kept tests preserve the non-empty-only check.
 - `internal/web/middleware_logging_test.go:260-274` does not close the gap: it
   exercises `withRequestID` alone (header vs context in isolation), not the
   `withLogging` -> `withRequestID` chain where the context is lost. The suite
