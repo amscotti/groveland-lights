@@ -32,13 +32,60 @@ index 24605cf..9825c57 100644
  	}
 diff --git a/harness/handoffs/T-208.md b/harness/handoffs/T-208.md
 new file mode 100644
-index 0000000..8958345
+index 0000000..60440ea
 --- /dev/null
 +++ b/harness/handoffs/T-208.md
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,208 @@
 +# T-208 handoff — store onto Server + /probe fragment Content-Type
 +
 +VERDICT: DONE (both deliverables in; full `make check` green on the final tree)
++
++## Retry note (attempt 3)
++
++Attempt 2's code was correct and complete; its gate failed on a **harness
++race, not on any code or spec defect**. Sequence: `rebaseOntoMain` rebased the
++branch onto main, guard + `make check` passed, but the scheduler committed
++harness state to main *during* the gate window (`915eaf7` landed at 10:09:29;
++`commitHarnessState` (sched.go) runs at dispatch time and is not under
++`harness/.merge.lock`), so `finalizeMerge`'s `git merge --ff-only task/T-208`
++(gate.go) was refused (exit 128, "Not possible to fast-forward"). Branch and
++main diverged purely by scheduler bookkeeping commits.
++
++Attempt 3 therefore changed **no code** — probe.go/web.go/probe_test.go/
++web_test.go/main.go/boot_test.go are byte-identical to the attempt-2 state —
++and spent the run on verification:
++
++- Re-ran the entire battery on this exact tree; every exit code fresh, all
++  green (table below). Red-check for the Content-Type fix re-demonstrated:
++  headers disabled → `TestProbeFragmentContentType` exit **1** with
++  `text/plain; charset=utf-8` on both rows; restored → exit 0, `git diff` on
++  probe.go empty.
++- Guard re-validated by hand: `git diff --name-only main...HEAD` =
++  `cmd/server/{main,boot_test}.go`, `internal/web/{web,probe,probe_test,
++  web_test}.go`, `harness/handoffs/T-208.md`, `harness/tasks/graph.json`
++  (scheduler-owned, exempt) — every path in `owns`; `middleware_logging_test.go`
++  absent from the diff; no skip/only/fixme/TODO/Phase-N markers in added lines;
++  no go.mod/package.json changes; handoff present.
++- Worker-side history surgery (`git reset`, `git rebase`, `git merge`,
++  `git update-ref`) is permission-denied in the worker shell, so the ancestry
++  fix is left to the gate's own `rebaseOntoMain` + integrator — the designed
++  path for a stale branch.
++
++**Note for the gate/integrator agent on this branch's topology:** the branch
++is `fa58ccd → 46d45c0 (work) → ad71a6c (signature fix + handoff) → abff3c2
++(graph.json artifact created by attempt-2's finalizeMerge)`. At the next gate,
++`git rebase main` replays the first two cleanly; `abff3c2`'s one-line
++graph.json patch (`status: review → merging`) **will conflict** with main's
++`status: running / attempts: 2` on the same lines — the correct resolution is
++main's version (graph.json is scheduler-owned; finalizeMerge restores main's
++copy before the merge regardless). After the rebase the branch is linear on
++main and the ff-only merge applies. Residual risk: the same scheduler race can
++recur during `make check`; it is outside task control (see open issue 6).
++This is attempt 3 of `max_attempts: 3` — a race-repeat escalates/blocks the
++task, so if this merge fails again the cause is the harness race, not T-208.
++
++A forensic branch `T-208-attempt2-backup` preserves the pre-attempt-3 chain
++(including `abff3c2`); safe to delete after merge.
 +
 +## Retry note (attempt 2)
 +
@@ -122,37 +169,36 @@ index 0000000..8958345
 +so the wire response was `Content-Type: text/plain; charset=utf-8` — a no-JS
 +visitor hitting `/probe` directly saw escaped source (judge-M1 "Gap (b)").
 +
-+Re-proven on this tree (attempt 2): with the two
++Re-proven on this tree (attempt 3): with the two
 +`w.Header().Set(probeContentType)` lines temporarily disabled,
 +`TestProbeFragmentContentType` fails with
 +`fragment Content-Type = "text/plain; charset=utf-8"` on both rows (exit 1);
-+with them restored it passes (exit 0), and `git diff` on probe.go is empty
-+afterwards. The recorder-based assertions used elsewhere in the suite cannot
++with them restored it passes (exit 0), and `git status` shows probe.go
++byte-identical to HEAD afterwards. The recorder-based assertions used elsewhere in the suite cannot
 +see this because the recorder never sniffs — hence the wire-level
 +(`httptest.NewServer`) table test.
 +
-+## Commands run (attempt 2, final tree)
++## Commands run (attempt 3, final tree — all exits fresh)
 +
 +| Command | Exit | Result |
 +|---|---|---|
-+| `make check-fast` | 0 | fmt-check, vet, lint 0 issues, unit (−race, −shuffle) green — run with the variadic `New` + reverted middleware test in place |
++| `make check-fast` | 0 | fmt-check (go mod tidy), vet, golangci-lint 0 issues, unit (−race, −shuffle) green |
 +| `go test ./internal/web/... ./cmd/server/... -count=1` (packet's required cmd) | 0 | ok |
-+| red-check: header lines disabled → `go test ./internal/web/ -run TestProbeFragmentContentType -count=1` | **1** | expected failure reproducing judge-M1 gap (b): `text/plain; charset=utf-8` on both rows |
-+| header lines restored → same command | 0 | green; `git diff` on probe.go empty |
 +| `make build` | 0 | binary rebuilt through `web.New(cfg, logger, db)` |
 +| `go test -tags smoke -count=1 ./cmd/server/` | 0 | boot smoke: probe flows + persistence across SIGTERM/respawn + checksum-refusal, black-box against the rebuilt binary |
++| `make test-acceptance-go` | 0 | protected Go acceptance suite green |
++| red-check: header lines disabled → `go test ./internal/web/ -run TestProbeFragmentContentType -count=1` | **1** | expected failure reproducing judge-M1 gap (b): `text/plain; charset=utf-8` on both rows |
++| header lines restored → same command | 0 | green; `git status` shows no modified files (probe.go byte-identical to HEAD) |
 +| `make e2e-task T=T-208` | 2 | usage branch — Makefile variable is `TASK` (AGENTS.md/packet spell it `T=`; Makefile protected, discrepancy recorded as open issue 1) |
 +| `make e2e-task TASK=T-208` | 0 | "no claims for T-208" (packet has `"claims": []`) |
 +| `make check` (final tree) | 0 | full gate: check-fast, generate-check (go mod tidy), cover (web 86.5% / config 81.1%), govulncheck, templates-check (render snapshots + html-validate), tsc, acceptance-go, e2e 32/32, a11y 8/8, visual, gitleaks — all green |
-+| `git diff main -- internal/web/middleware_logging_test.go` | 0 | empty output — byte-identical to main |
++| `git diff --name-only main...HEAD` | 0 | 8 paths, all in owns ∪ {handoff, exempt graph.json}; `middleware_logging_test.go` absent |
 +
-+Notes: the first `make check` run failed at the e2e step with "port 8931
-+already in use" (a stale webServer from an earlier session; `lsof -ti :8931`
-+found nothing seconds later). The immediate re-run was green — no code
-+implication. Attempt 1's evidence (same probe.go bytes): baseline
-+`make check-fast` / `make test-acceptance-go` / `@A-103` Playwright green
-+pre-change; `make check` full gate green post-change; `noctx` lint fix in the
-+new wire-level test (`NewRequestWithContext` + `client.Do`).
++Historical: attempt 1's first `make check` run failed once at the e2e step with
++"port 8931 already in use" (stale webServer from an earlier session); the
++immediate re-run was green — no code implication. Attempt 1's lint pass added
++the `noctx` fix in the new wire-level test (`NewRequestWithContext` +
++`client.Do`).
 +
 +## Open issues / notes
 +
@@ -176,6 +222,15 @@ index 0000000..8958345
 +   templates).
 +5. As delivered: T-106 (untrack test-run.db blobs) ran/will run separately per
 +   harness/state.md; nothing in this task touches those files.
++6. **Harness: gate vs scheduler race on main** (bit attempt 2, see retry note
++   3): `commitHarnessState` (sched.go) commits to main at dispatch time and is
++   not serialised under `harness/.merge.lock`, which the gate holds. A
++   scheduler commit landing between the gate's `rebaseOntoMain` and its final
++   `merge --ff-only` makes the merge refuse and costs the task an attempt.
++   Suggestion for the planner: have `commitHarnessState` take the merge lock,
++   or have `finalizeMerge` retry one rebase+merge cycle on ff-refusal.
++7. Forensic branch `T-208-attempt2-backup` (pre-attempt-3 chain incl. the
++   `abff3c2` graph.json artifact) — delete after merge.
 +
 +## Verification summary
 +
@@ -189,6 +244,19 @@ index 0000000..8958345
 +  final tree.
 +- Observable probe behaviour otherwise unchanged; A-103/A-104/A-105 active specs
 +  green in the final `make check` (acceptance-go + 32/32 Playwright).
+diff --git a/harness/tasks/graph.json b/harness/tasks/graph.json
+index 7d67814..4312101 100644
+--- a/harness/tasks/graph.json
++++ b/harness/tasks/graph.json
+@@ -512,7 +512,7 @@
+       "claims": [],
+       "ui": false,
+       "allow_deps": [],
+-      "status": "review",
++      "status": "merging",
+       "attempts": 1,
+       "budget": {
+         "steps": 200,
 diff --git a/internal/web/probe.go b/internal/web/probe.go
 index 212b6f0..7568eb8 100644
 --- a/internal/web/probe.go
