@@ -334,7 +334,7 @@
       "allow_deps": [
         "golang.org/x/image"
       ],
-      "status": "ready",
+      "status": "running",
       "attempts": 0,
       "budget": {
         "steps": 200,
