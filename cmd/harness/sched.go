@@ -274,6 +274,7 @@ func runTaskLifecycle(root string, pol Policy, id string) {
 	_ = os.WriteFile(diffFile, []byte(gitOut2(wt(root, id), "diff", "main...HEAD")), 0o600)
 
 	setTaskStatus(root, id, StatusReview, "")
+	clearReviewArtifacts(root, id)
 	roles := []string{"reviewer", "reviewer-alt"}
 	if tk.UI {
 		roles = append(roles, "visual-reviewer")
@@ -591,3 +592,82 @@ func runIntegrator(root, wtPath string, t *Task, pol Policy) error {
 }
 
 var _ = bufio.NewReader // keep import if unused in some builds
+
+// cmdReviews runs ONLY the review round + gate for a task whose worker phase
+// is already done (operator recovery tool: avoids burning a full agent retry
+// when stale verdict files or a crash interrupted the review stage).
+func cmdReviews(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: harness reviews T-###")
+	}
+	root, err := repoRoot()
+	if err != nil {
+		return err
+	}
+	pol, err := loadPolicy(root)
+	if err != nil {
+		return err
+	}
+	g, err := loadGraph(root)
+	if err != nil {
+		return err
+	}
+	t := g.task(args[0])
+	if t == nil {
+		return fmt.Errorf("unknown task %s", args[0])
+	}
+
+	// Stale verdict files from earlier rounds must not poison this round.
+	clearReviewArtifacts(root, t.ID)
+
+	wtDir := wt(root, t.ID)
+	diffPath := filepath.Join(root, "harness", "reviews", t.ID+".diff")
+	_ = os.MkdirAll(filepath.Dir(diffPath), 0o750)
+	_ = os.WriteFile(diffPath, []byte(gitOut2(wtDir, "diff", "main...HEAD")), 0o600)
+
+	roles := []string{"reviewer", "reviewer-alt"}
+	if t.UI {
+		roles = append(roles, "visual-reviewer")
+	}
+	var rwg sync.WaitGroup
+	verdicts := map[string]string{}
+	var mu sync.Mutex
+	for _, rr := range roles {
+		rwg.Add(1)
+		go func(rr string) {
+			defer rwg.Done()
+			v := runReview(root, wtDir, t.ID, rr, pol)
+			mu.Lock()
+			verdicts[rr] = v
+			mu.Unlock()
+		}(rr)
+	}
+	rwg.Wait()
+	blocked := false
+	for _, rr := range roles {
+		if verdicts[rr] == "PASS" {
+			progress(root, "review_pass("+rr+") "+t.ID)
+			continue
+		}
+		blocked = true
+		progress(root, fmt.Sprintf("review_block(%s) %s", rr, t.ID))
+	}
+	if blocked {
+		appendFindings(root, t.ID, roles, verdicts)
+		return fmt.Errorf("review BLOCK: %v", verdicts)
+	}
+	setTaskStatus(root, t.ID, StatusMerging, "")
+	return cmdGate([]string{t.ID})
+}
+
+// clearReviewArtifacts removes previous rounds' verdict files for a task from
+// both main and the worktree. The scheduler owns this cleanup (deleting them
+// is NOT task work — reviewer-alt T-205 finding #1).
+func clearReviewArtifacts(root, id string) {
+	for _, dir := range []string{root, wt(root, id)} {
+		matches, _ := filepath.Glob(filepath.Join(dir, "harness", "reviews", id+"-*.md"))
+		for _, m := range matches {
+			_ = os.Remove(m)
+		}
+	}
+}

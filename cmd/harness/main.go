@@ -42,6 +42,8 @@ func main() {
 		err = cmdVerifyAgents(os.Args[2:])
 	case "selftest":
 		err = cmdSelftest(os.Args[2:])
+	case "reviews":
+		err = cmdReviews(os.Args[2:])
 	case "protect":
 		err = cmdProtect(os.Args[2:])
 	default:
