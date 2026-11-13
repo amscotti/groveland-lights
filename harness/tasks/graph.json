@@ -237,7 +237,7 @@
       "claims": [],
       "ui": false,
       "allow_deps": [],
-      "status": "running",
+      "status": "review",
       "attempts": 1,
       "budget": {
         "steps": 50,
