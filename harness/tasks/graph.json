@@ -81,7 +81,7 @@
         "github.com/remyoudompheng/bigfft",
         "modernc.org/libc"
       ],
-      "status": "rework",
+      "status": "running",
       "attempts": 2,
       "budget": {
         "steps": 200,
@@ -107,7 +107,7 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "rework",
+      "status": "running",
       "attempts": 1,
       "budget": {
         "steps": 200,
