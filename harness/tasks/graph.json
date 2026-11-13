@@ -75,7 +75,7 @@
         "modernc.org/memory",
         "modernc.org/gc/v3"
       ],
-      "status": "rework",
+      "status": "running",
       "attempts": 1,
       "budget": {
         "steps": 200,
