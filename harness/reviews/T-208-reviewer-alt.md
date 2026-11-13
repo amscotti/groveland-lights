@@ -22,13 +22,13 @@ refer to the patched files as shown by the diff.
 - **No deleted, skipped, narrowed or disabled test.** The only pre-existing
   probe rows touched are helper-signature adaptations (`newProbeServer` now
   returns `(*Server, *store.DB)` at `internal/web/probe_test.go:34-43`;
-  `probeCountNow` takes the handle at `:107-117`) and the renamed
+  `probeCountNow` takes the handle at `:112-121`) and the renamed
   "store unset" → "store nil" row (`:184-193`). That row still exercises the
   same `Server.Store == nil` path, now against a nil-store `newTestServer`
   instead of a global reset. `TestProbePost`'s CSRF matrix (missing/tampered →
   403 with the count unchanged), the 303 no-JS row, the 400 parse row, the
   fragment-markup row and the `#map`/`<html>`/`<body>` ban are all retained
-  (`internal/web/probe_test.go:135-317`). No `t.Skip`, `test.skip`,
+  (`internal/web/probe_test.go:139-296`). No `t.Skip`, `test.skip`,
   `test.only` or `.fixme` appears in the diff.
 - **No fixture-value special-casing in production code.** The only new
   production literal is `probeContentType = "text/html; charset=utf-8"`
@@ -142,7 +142,7 @@ the unit tests. A one-row `TestNewWiresStore` (`New(cfg, log, db)` →
 `internal/web/probe.go:91-93` says "The fragment is a full HTML document for a
 no-JS visitor who navigates here directly." It is not a full document:
 `TestProbeGet` asserts the fragment contains no `<html`/`<body>`
-(`internal/web/probe_test.go:163-177`). The intended meaning is that the
+(`internal/web/probe_test.go:165-179`). The intended meaning is that the
 response body is the whole fragment. Comment-only; no behavioural impact.
 
 ### 6. [Info — scheduler-owned file] The `harness/tasks/graph.json` hunk is not a worker edit
@@ -152,9 +152,10 @@ The diff includes `harness/tasks/graph.json` `"status": "review"` →
 scheduler-owned and guard-exempt (`cmd/harness/guard.go:117-125,146-148`);
 `finalizeMerge` restores main's copy before merging
 (`cmd/harness/gate.go:122-128`). The handoff attributes it to the gate's
-bookkeeping commit, and the worker transcripts show the commit was created by
-`finalizeMerge`, not by the worker. Not a rule-1 violation and not
-authoritative branch content.
+bookkeeping commit, and the commit subject/subject history in the worker
+transcript is consistent with that account. Even if a worker had authored it,
+the guard exempts the path and the gate replaces the content; it is not
+authoritative branch content. Not a rule-1 violation in effect.
 
 ### 7. [Info — harness, not code] The attempt-4 handoff's rebase recipe is outside the review surface
 
