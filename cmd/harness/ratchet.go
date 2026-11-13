@@ -125,7 +125,7 @@ func DirtyLines(porcelain string) []string {
 			continue
 		}
 		if matchGlob("harness/handoffs/**", p) || matchGlob("harness/runs/**", p) ||
-			p == "node_modules" || p == ".env.test" || p == ".merge.lock" {
+			matchGlob("harness/reviews/**", p) || p == "node_modules" || p == ".env.test" || p == ".merge.lock" {
 			continue
 		}
 		out = append(out, raw)

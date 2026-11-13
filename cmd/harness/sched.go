@@ -400,8 +400,14 @@ func runReview(root, wt, id, role string, pol Policy) string {
 		msg = fmt.Sprintf("Review task %s. Screenshots are under %s (read the .png files; if the directory is empty, review the attached diff for layout/CSS correctness instead). Write findings and verdict to %s.",
 			id, filepath.Join(wt, "test-results"), "harness/reviews/"+id+"-"+role+".md")
 	}
-	if err := runAgent(root, root, role, pol.Roles[role], id, attach, msg, transcript, 30); err != nil {
+	// Reviewers run IN THE WORKTREE so any stray scratch writes land in the
+	// disposable tree, never on main (E4). The verdict file is harvested after.
+	if err := runAgent(root, wt, role, pol.Roles[role], id, attach, msg, transcript, 30); err != nil {
 		return "ERROR: " + err.Error()
+	}
+	// Harvest the review file from the worktree into main's reviews dir.
+	if data, err := os.ReadFile(filepath.Join(wt, "harness", "reviews", id+"-"+role+".md")); err == nil {
+		_ = os.WriteFile(out, data, 0o600)
 	}
 	// Verdict: prefer the review file, fall back to the transcript.
 	if data, err := os.ReadFile(out); err == nil {
