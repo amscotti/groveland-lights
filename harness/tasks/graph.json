@@ -305,7 +305,7 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "review",
+      "status": "done",
       "attempts": 2,
       "budget": {
         "steps": 200,
