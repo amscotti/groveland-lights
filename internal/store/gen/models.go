@@ -4,7 +4,98 @@
 
 package gen
 
+import (
+	"database/sql"
+)
+
+type Comment struct {
+	ID        int64
+	LightID   int64
+	UserID    int64
+	Body      string
+	Hidden    int64
+	CreatedAt string
+}
+
+type CommentFlag struct {
+	CommentID int64
+	SessionID string
+	Reason    sql.NullString
+	CreatedAt string
+}
+
+type Light struct {
+	ID                int64
+	AssetNo           sql.NullString
+	Kind              string
+	Label             string
+	Lat               float64
+	Lon               float64
+	AccuracyM         sql.NullFloat64
+	PhotoID           sql.NullInt64
+	Status            string
+	StatusSource      string
+	StatusAt          sql.NullString
+	StatusConfirmedAt sql.NullString
+	GmlPoleNo         sql.NullString
+	CreatedBy         sql.NullInt64
+	CreatedAt         string
+	UpdatedAt         string
+	DeletedAt         sql.NullString
+}
+
+type LoginToken struct {
+	TokenHash string
+	Email     string
+	ExpiresAt string
+	UsedAt    sql.NullString
+}
+
+type Photo struct {
+	ID        int64
+	OwnerID   sql.NullInt64
+	Path      string
+	Width     int64
+	Height    int64
+	Bytes     int64
+	Sha256    string
+	CreatedAt string
+}
+
 type Probe struct {
 	ID int64
 	N  int64
+}
+
+type Report struct {
+	ID        int64
+	LightID   int64
+	UserID    int64
+	SessionID string
+	Status    string
+	Note      sql.NullString
+	PhotoID   sql.NullInt64
+	Lat       sql.NullFloat64
+	Lon       sql.NullFloat64
+	AccuracyM sql.NullFloat64
+	IpHmac    string
+	CreatedAt string
+	RoundedAt sql.NullString
+}
+
+type Session struct {
+	ID        string
+	UserID    int64
+	Role      string
+	CreatedAt string
+	ExpiresAt string
+}
+
+type User struct {
+	ID        int64
+	Handle    string
+	Email     sql.NullString
+	Role      string
+	Points    int64
+	CreatedAt string
 }

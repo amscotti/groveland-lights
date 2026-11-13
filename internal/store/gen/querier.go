@@ -6,13 +6,34 @@ package gen
 
 import (
 	"context"
+	"database/sql"
 )
 
 type Querier interface {
+	// Light inventory queries. The lights table is created by
+	// migrations/0002_lights.sql; soft-deleted rows (deleted_at IS NULL filters)
+	// are invisible to every read and every edit, which is the A-208 store half.
+	// created_at/updated_at/deleted_at are RFC3339 TEXT stamped by the typed
+	// wrappers in internal/store/lights.go.
+	CreateLight(ctx context.Context, arg CreateLightParams) (Light, error)
+	// Photo metadata queries. The photos table is created by
+	// migrations/0002_lights.sql; the photo BLOB itself lives in PHOTO_DIR on
+	// disk, the row only records the stored path and processed dimensions.
+	// owner_id stays NULL until the auth slice (hand-written database/sql in the
+	// session/user store files) begins attaching photos to user accounts.
+	CreatePhoto(ctx context.Context, arg CreatePhotoParams) (Photo, error)
+	GetLight(ctx context.Context, id int64) (Light, error)
+	GetLightByAssetNo(ctx context.Context, assetNo sql.NullString) (Light, error)
+	GetPhoto(ctx context.Context, id int64) (Photo, error)
+	ListPhotos(ctx context.Context, limit int64) ([]Photo, error)
+	ListRecentLights(ctx context.Context, arg ListRecentLightsParams) ([]Light, error)
+	NearbyLights(ctx context.Context, arg NearbyLightsParams) ([]Light, error)
 	// Probe counter queries. The probe table is created by
 	// migrations/0001_init.sql and always holds exactly one row (id = 1).
 	ProbeCount(ctx context.Context) (int64, error)
 	ProbeInc(ctx context.Context) (int64, error)
+	SoftDeleteLight(ctx context.Context, arg SoftDeleteLightParams) (int64, error)
+	UpdateLight(ctx context.Context, arg UpdateLightParams) (Light, error)
 }
 
 var _ Querier = (*Queries)(nil)

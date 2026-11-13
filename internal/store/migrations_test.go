@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -72,8 +73,8 @@ func TestMigrationsApplyCleanly(t *testing.T) {
 		check func(t *testing.T)
 	}{
 		{
-			name:  "probe_and_schema_migrations_are_the_only_tables",
-			check: func(t *testing.T) { checkOnlyProbeAndBookkeepingTables(t, db) },
+			name:  "tables_are_exactly_probe_bookkeeping_and_product_schema",
+			check: func(t *testing.T) { checkTablesAreExactlyTheMigratedSchema(t, db) },
 		},
 		{
 			name:  "probe_table_columns_match_migration_ddl",
@@ -88,8 +89,8 @@ func TestMigrationsApplyCleanly(t *testing.T) {
 			check: func(t *testing.T) { checkProbeRowSeeded(t, db) },
 		},
 		{
-			name:  "migration_recorded_as_0001_init_version",
-			check: func(t *testing.T) { checkRecordedVersion(t, db) },
+			name:  "recorded_versions_are_0001_init_and_0002_lights",
+			check: func(t *testing.T) { checkRecordedVersions(t, db) },
 		},
 		{
 			name:  "recorded_checksum_is_64_char_lowercase_hex_of_file",
@@ -106,7 +107,11 @@ func TestMigrationsApplyCleanly(t *testing.T) {
 	}
 }
 
-func checkOnlyProbeAndBookkeepingTables(t *testing.T, db *DB) {
+// checkTablesAreExactlyTheMigratedSchema asserts the exact table set after a
+// fresh Open: the probe table, the runner-owned bookkeeping table and the
+// product schema of migrations/0002_lights.sql — and nothing else. Any
+// unexpected table is a migration bug.
+func checkTablesAreExactlyTheMigratedSchema(t *testing.T, db *DB) {
 	t.Helper()
 	rows, err := db.sql.QueryContext(context.Background(),
 		"SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -125,7 +130,10 @@ func checkOnlyProbeAndBookkeepingTables(t *testing.T, db *DB) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate sqlite_master: %v", err)
 	}
-	want := []string{"probe", "schema_migrations"}
+	want := []string{
+		"comment_flags", "comments", "lights", "login_tokens", "photos",
+		"probe", "reports", "schema_migrations", "sessions", "users",
+	}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("tables = %v, want %v", names, want)
 	}
@@ -219,16 +227,30 @@ func checkProbeRowSeeded(t *testing.T, db *DB) {
 	}
 }
 
-func checkRecordedVersion(t *testing.T, db *DB) {
+// checkRecordedVersions asserts that every embedded migration file is
+// recorded exactly once after a fresh Open, in filename order.
+func checkRecordedVersions(t *testing.T, db *DB) {
 	t.Helper()
-	var version string
-	err := db.sql.QueryRowContext(context.Background(),
-		"SELECT version FROM schema_migrations").Scan(&version)
+	rows, err := db.sql.QueryContext(context.Background(),
+		"SELECT version FROM schema_migrations ORDER BY version")
 	if err != nil {
 		t.Fatalf("select schema_migrations: %v", err)
 	}
-	if version != "0001_init" {
-		t.Fatalf("recorded version = %q, want 0001_init", version)
+	defer rows.Close()
+	var versions []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			t.Fatalf("scan version: %v", err)
+		}
+		versions = append(versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate schema_migrations: %v", err)
+	}
+	want := []string{"0001_init", "0002_lights"}
+	if strings.Join(versions, ",") != strings.Join(want, ",") {
+		t.Fatalf("recorded versions = %v, want %v", versions, want)
 	}
 }
 
@@ -376,15 +398,15 @@ func TestMigrationsIdempotentOnReopen(t *testing.T) {
 			},
 		},
 		{
-			name: "exactly_one_migration_row_after_reopen",
+			name: "every_migration_recorded_exactly_once_after_reopen",
 			check: func(t *testing.T) {
 				var rows int
 				if err := db2.sql.QueryRowContext(ctx,
 					"SELECT COUNT(*) FROM schema_migrations").Scan(&rows); err != nil {
 					t.Fatalf("count schema_migrations: %v", err)
 				}
-				if rows != 1 {
-					t.Fatalf("schema_migrations rows = %d, want 1 (no double-apply)", rows)
+				if rows != 2 {
+					t.Fatalf("schema_migrations rows = %d, want 2 (0001 and 0002, no double-apply)", rows)
 				}
 			},
 		},
@@ -573,5 +595,200 @@ func checkReapplyIsNoOp(fx orderFixture) {
 	}
 	if n != 2 {
 		fx.t.Fatalf("schema_migrations rows = %d after re-apply, want 2", n)
+	}
+}
+
+// TestSchemaMatchesExpected pins the frozen M2 schema oracle
+// (testdata/schema.expected.sql, T-200): a fresh database's sqlite_master
+// CREATE statements — probe and bookkeeping excluded — must equal the
+// expected file's statements. Both sides are normalized the same way (line
+// comments stripped, whitespace runs collapsed) and compared as sorted sets,
+// so statement TEXT matters, formatting does not.
+func TestSchemaMatchesExpected(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openFresh(t)
+
+	rows, err := db.sql.QueryContext(ctx,
+		"SELECT sql FROM sqlite_master "+
+			"WHERE name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations'")
+	if err != nil {
+		t.Fatalf("query sqlite_master: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var ddl sql.NullString
+		if err := rows.Scan(&ddl); err != nil {
+			t.Fatalf("scan sqlite_master.sql: %v", err)
+		}
+		if ddl.Valid && strings.TrimSpace(ddl.String) != "" {
+			got = append(got, normalizeSQL(ddl.String))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate sqlite_master: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "schema.expected.sql"))
+	if err != nil {
+		t.Fatalf("read schema oracle: %v", err)
+	}
+	want := normalizeStatements(string(b))
+
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, "\n;\n") != strings.Join(want, "\n;\n") {
+		t.Fatalf("schema mismatch against testdata/schema.expected.sql\n--- got ---\n%s\n--- want ---\n%s",
+			strings.Join(got, ";\n"), strings.Join(want, ";\n"))
+	}
+	if len(got) == 0 {
+		t.Fatal("sqlite_master yielded no statements; the schema is empty")
+	}
+}
+
+// normalizeStatements splits a .sql file on statement-terminating semicolons
+// (the schema files carry no string literals containing ';'), normalizes each
+// statement and drops the empties.
+func normalizeStatements(raw string) []string {
+	var out []string
+	for _, stmt := range strings.Split(raw, ";") {
+		if s := normalizeSQL(stmt); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// normalizeSQL strips `--` line comments, collapses every whitespace run to
+// one space and trims the ends.
+func normalizeSQL(s string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		if i := strings.Index(line, "--"); i >= 0 {
+			line = line[:i]
+		}
+		b.WriteString(line)
+		b.WriteByte(' ')
+	}
+	return strings.TrimSpace(strings.Join(strings.Fields(b.String()), " "))
+}
+
+// TestMigrationsUpgradeWithData proves the upgrade path existing deployments
+// take: a database created and populated under 0001 alone is reopened by the
+// current binary, which applies 0002 in place — the old data survives, the
+// new schema coexists, and SQLite reports no integrity or foreign-key
+// violations afterwards.
+func TestMigrationsUpgradeWithData(t *testing.T) {
+	ctx := context.Background()
+
+	// A filesystem holding only 0001: what a pre-M2 deployment binary embeds.
+	b, err := fs.ReadFile(migrations.Files, "0001_init.sql")
+	if err != nil {
+		t.Fatalf("read embedded 0001_init.sql: %v", err)
+	}
+	legacyFS := fstest.MapFS{"0001_init.sql": &fstest.MapFile{Data: b}}
+
+	path := filepath.Join(t.TempDir(), "upgrade.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	if err := applyMigrations(ctx, raw, legacyFS); err != nil {
+		t.Fatalf("apply 0001 only: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, "UPDATE probe SET n = 5 WHERE id = 1"); err != nil {
+		t.Fatalf("seed probe data under 0001: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("raw close: %v", err)
+	}
+
+	// The current binary opens the legacy database: 0001 is already recorded
+	// with a matching checksum, 0002 applies on top.
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open on 0001-only database: %v", err)
+	}
+	defer db.Close()
+
+	tests := []struct {
+		name  string
+		check func(t *testing.T, ctx context.Context, db *DB)
+	}{
+		{"data_written_under_0001_survives_the_upgrade", checkUpgradeKeepsData},
+		{"both_migrations_are_recorded_exactly_once", checkUpgradeRecordsBoth},
+		{"foreign_key_check_is_empty", checkUpgradeFKClean},
+		{"integrity_check_reports_ok", checkUpgradeIntegrityOK},
+		{"product_schema_is_usable_after_upgrade", checkUpgradeProductUsable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.check(t, ctx, db)
+		})
+	}
+}
+
+func checkUpgradeKeepsData(t *testing.T, ctx context.Context, db *DB) {
+	t.Helper()
+	n, err := db.ProbeCount(ctx)
+	if err != nil {
+		t.Fatalf("ProbeCount: %v", err)
+	}
+	if n != 5 {
+		t.Fatalf("ProbeCount after upgrade = %d, want 5 (pre-upgrade data lost?)", n)
+	}
+}
+
+func checkUpgradeRecordsBoth(t *testing.T, ctx context.Context, db *DB) {
+	t.Helper()
+	var n int
+	if err := db.sql.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM schema_migrations").Scan(&n); err != nil {
+		t.Fatalf("count schema_migrations: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("schema_migrations rows = %d, want 2", n)
+	}
+}
+
+func checkUpgradeFKClean(t *testing.T, ctx context.Context, db *DB) {
+	t.Helper()
+	violations := 0
+	rows, err := db.sql.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		t.Fatalf("PRAGMA foreign_key_check: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		violations++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate foreign_key_check: %v", err)
+	}
+	if violations != 0 {
+		t.Fatalf("PRAGMA foreign_key_check reported %d violating rows", violations)
+	}
+}
+
+func checkUpgradeIntegrityOK(t *testing.T, ctx context.Context, db *DB) {
+	t.Helper()
+	var result string
+	if err := db.sql.QueryRowContext(ctx,
+		"PRAGMA integrity_check").Scan(&result); err != nil {
+		t.Fatalf("PRAGMA integrity_check: %v", err)
+	}
+	if result != "ok" {
+		t.Fatalf("PRAGMA integrity_check = %q, want ok", result)
+	}
+}
+
+func checkUpgradeProductUsable(t *testing.T, ctx context.Context, db *DB) {
+	t.Helper()
+	l, err := db.CreateLight(ctx, NewLight{Kind: KindPark, Label: "Upgraded park lamp", Lat: 42.7617, Lon: -71.0303})
+	if err != nil {
+		t.Fatalf("CreateLight on upgraded database: %v", err)
+	}
+	if _, err := db.GetLight(ctx, l.ID); err != nil {
+		t.Fatalf("GetLight on upgraded database: %v", err)
 	}
 }
