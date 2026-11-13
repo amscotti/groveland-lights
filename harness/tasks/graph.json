@@ -75,7 +75,7 @@
         "modernc.org/memory",
         "modernc.org/gc/v3"
       ],
-      "status": "ready",
+      "status": "running",
       "attempts": 0,
       "budget": {
         "steps": 200,
@@ -101,7 +101,7 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "ready",
+      "status": "running",
       "attempts": 0,
       "budget": {
         "steps": 200,
