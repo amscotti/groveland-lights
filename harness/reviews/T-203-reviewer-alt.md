@@ -17,7 +17,8 @@ diff hunks.
 - **No pre-existing test was weakened, deleted, skipped or narrowed.** The diff
   only adds files; it edits no existing test. No `t.Skip`, `test.skip`,
   `test.only`, `.fixme`, `TODO`, `FIXME`, `panic("not implemented")`,
-  `console.log` or "Phase N" string appears in the added bytes.
+  `console.log` or "Phase N" marker appears in the added code/test files (the
+  handoff's `grep` command mentions the marker names, but it is not code).
 - **No acceptance-fixture literal appears in non-test code.** The A-201 token
   fixture (`dGVzdC1hZG1pbi10b2tlbi0zMi1ieXRl`) appears only in the handoff, not
   in `internal/`. However, `tokenMatches` does deliberately accept the base64
@@ -174,14 +175,15 @@ in the diff); the tree itself is consistent with a green run.
 
 - **Frozen API matches the packet**: `SessionCookieName`, `AdminOnly`, the store
   method signatures, `UserID`, the sentinels and `Now`
-  (`internal/web/session.go:26-28,83`, `internal/store/session.go:23,68`,
-  `internal/store/user.go:34-48`).
+  (`internal/web/session.go:26-28,83`, `internal/store/session.go:23,38,68`,
+  `internal/store/user.go:21-41`).
 - **Store semantics are correct**: `EnsureAdminUser` uses
   `ON CONFLICT(handle) DO NOTHING` then select; `ConsumeAdminToken` hashes with
   SHA-256/hex and detects replay via the `login_tokens` primary key; sessions
   are 32 crypto/rand bytes base64url with 24 h RFC3339 stamps; expiry is strict
   at `expires_at`; `DeleteSession` is idempotent; the sessions FKs are tested
-  (`migrations/0002_lights.sql:70-82`).
+  (`internal/store/session_test.go:163`; schema at
+  `migrations/0002_lights.sql:70-82`).
 - **Cookie codec and attributes are correct**: `base64url(id) + "." +
   hex(HMAC-SHA256(key, id))`; `Path=/`, `Max-Age=86400`, `HttpOnly`,
   `SameSite=Lax`, `Secure` only in prod (`internal/web/session.go:35-42,65-81`).
