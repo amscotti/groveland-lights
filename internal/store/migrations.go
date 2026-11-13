@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -76,37 +77,40 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	applied_at TEXT NOT NULL
 );`
 
-// checksumRecordValue encodes a migration's digest for its schema_migrations
-// row. The first embedded migration's checksum (0001_init.sql in every real
-// binary) is recorded as lowercase-hex TEXT: the A-104 contract names exactly
-// that file's checksum as the 64-char lowercase-hex token that the byte-level
-// tamper oracle locates in the raw database file, and
-// internal/store/dbfile_layout_test.go pins that token as the ONLY one in the
-// file. Every later migration's checksum is recorded as the raw 32-byte
-// digest BLOB — the same value in a different, unambiguous encoding — so no
-// additional hex token ever enters the file, no matter how many migrations
-// are added, and the first-token oracle stays unambiguous. Reading
-// (decodeRecordedSum) accepts both encodings for any row, so the guard still
-// verifies every recorded checksum at every boot and a corrupted value in
-// either encoding refuses the boot naming the offending file.
-func checksumRecordValue(first bool, m migration) any {
-	if first {
+// sumRecordEncoding is the runner's on-disk encoding contract for
+// schema_migrations.sha256 (every recorded value is TEXT, matching the
+// column):
+//
+//   - The anchor row — the first embedded migration, 0001_init.sql — records
+//     its digest as 64-char lowercase hex. That encoding is frozen by the
+//     boot contract (A-104): the recorded anchor checksum is the 64-char
+//     lowercase-hex token in the database file, and the byte-level tamper
+//     contract rewrites exactly that token, expecting the next boot to
+//     refuse naming 0001_init.sql. Recording exactly one anchor token keeps
+//     that byte-level integrity check unambiguous for any number of future
+//     migrations.
+//   - Every later migration records rawB64Prefix plus the RFC 4648 base64url
+//     (unpadded) encoding of its raw 32-byte digest: tagged, 43 payload
+//     characters long. The tag's non-hex bytes and the 43-character payload
+//     bound mean a later row can never form, extend or concatenate into a
+//     64-char lowercase-hex run, so the anchor stays the file's only hex
+//     token no matter how many migrations are added.
+//
+// Verification never parses a stored value: applyMigrations recomputes the
+// expected representation for each migration's position (sumRecordValue)
+// from the embedded file's digest and compares bytes. Any drift — a
+// corrupted anchor, a wrong digest under the right tag, a foreign encoding
+// such as bare hex on a later row — mismatches and refuses the boot naming
+// the offending file.
+const rawB64Prefix = "raw-b64:"
+
+// sumRecordValue returns the exact schema_migrations.sha256 representation
+// for the migration at index i of the embedded set (see sumRecordEncoding).
+func sumRecordValue(index int, m migration) string {
+	if index == 0 {
 		return m.sum
 	}
-	return m.sumRaw
-}
-
-// decodeRecordedSum normalizes a stored schema_migrations.sha256 value to the
-// lowercase-hex digest string the verifier compares. Rows record the first
-// embedded migration's checksum as hex TEXT and later ones as the raw digest
-// BLOB (see checksumRecordValue); both encodings decode to the same string
-// for an intact row, and any corruption decodes to a string that cannot equal
-// the embedded file's digest, so verification refuses.
-func decodeRecordedSum(raw []byte) string {
-	if len(raw) == 64 {
-		return string(raw) // hex TEXT (first migration, legacy or hand-edited rows)
-	}
-	return hex.EncodeToString(raw)
+	return rawB64Prefix + base64.RawURLEncoding.EncodeToString(m.sumRaw)
 }
 
 // applyMigrations brings the database up to the embedded schema. Every
@@ -133,12 +137,17 @@ func applyMigrations(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 		seen[m.version] = true
 		recorded, ok := applied[m.version]
 		if !ok {
-			if err := applyOne(ctx, db, m, i == 0); err != nil {
+			if err := applyOne(ctx, db, m, i); err != nil {
 				return err
 			}
 			continue
 		}
-		if recorded != m.sum {
+		// Byte-exact comparison against the representation this position
+		// must carry (sumRecordValue): no parsing, no alternate encodings.
+		// A stored value that differs from what the runner itself would
+		// write is corruption in either the file or the database, and the
+		// boot refuses naming the offending file.
+		if recorded != sumRecordValue(i, m) {
 			return fmt.Errorf("store: migration %s checksum mismatch (recorded %s, file %s): %w",
 				m.file, recorded, m.sum, ErrChecksumMismatch)
 		}
@@ -154,8 +163,9 @@ func applyMigrations(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 	return nil
 }
 
-// recordedMigrations maps version -> recorded sha256 (hex string, whatever
-// the on-disk encoding was).
+// recordedMigrations maps version -> the recorded checksum representation
+// (see sumRecordValue). Values are compared byte-for-byte against the
+// expected representation; no decoding happens on this path.
 func recordedMigrations(ctx context.Context, db *sql.DB) (map[string]string, error) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT version, sha256 FROM schema_migrations ORDER BY version")
@@ -165,12 +175,11 @@ func recordedMigrations(ctx context.Context, db *sql.DB) (map[string]string, err
 	defer func() { _ = rows.Close() }()
 	out := make(map[string]string)
 	for rows.Next() {
-		var version string
-		var raw []byte
-		if err := rows.Scan(&version, &raw); err != nil {
+		var version, recorded string
+		if err := rows.Scan(&version, &recorded); err != nil {
 			return nil, fmt.Errorf("store: scan schema_migrations: %w", err)
 		}
-		out[version] = decodeRecordedSum(raw)
+		out[version] = recorded
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: iterate schema_migrations: %w", err)
@@ -179,10 +188,10 @@ func recordedMigrations(ctx context.Context, db *sql.DB) (map[string]string, err
 }
 
 // applyOne runs one migration file in its own transaction and records its
-// checksum. Any failure rolls the whole file back. first marks the first
-// embedded migration, whose checksum is recorded as hex TEXT (see
-// checksumRecordValue for why the encodings differ).
-func applyOne(ctx context.Context, db *sql.DB, m migration, first bool) error {
+// checksum in the positional representation sumRecordValue defines (see
+// sumRecordEncoding for the contract). Any failure rolls the whole file
+// back.
+func applyOne(ctx context.Context, db *sql.DB, m migration, index int) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: migration %s: begin: %w", m.file, err)
@@ -195,7 +204,7 @@ func applyOne(ctx context.Context, db *sql.DB, m migration, first bool) error {
 	}
 	if _, err := tx.ExecContext(ctx,
 		"INSERT INTO schema_migrations (version, sha256, applied_at) VALUES (?, ?, ?)",
-		m.version, checksumRecordValue(first, m), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		m.version, sumRecordValue(index, m), time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return fmt.Errorf("store: migration %s: record: %w", m.file, err)
 	}
 	if err := tx.Commit(); err != nil {

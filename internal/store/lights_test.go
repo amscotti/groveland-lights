@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 )
 
 // ptr helpers for building optional-column inputs in the tables below.
@@ -23,11 +24,20 @@ const (
 	grovelandLon = -71.0303
 )
 
-// haversineM is the test-side oracle for ground distance in metres (mean
-// Earth radius), deliberately independent of the store's flat degree
+// testMeanEarthRadiusM is the test-side mean-Earth figure, deliberately
+// independent of the store's metersPerDegree constant: distances, offsets
+// and boundary rows are derived from it, making them the independent
+// yardstick the bbox checks are measured against.
+const testMeanEarthRadiusM = 6371008.8
+
+// testMeterPerDeg is that figure converted to metres per degree of
+// latitude (a pure constant expression).
+const testMeterPerDeg = testMeanEarthRadiusM * math.Pi / 180
+
+// haversineM is the test-side oracle for ground distance in metres, using
+// testMeanEarthRadiusM — deliberately independent of the store's flat degree
 // conversion: candidates are placed with it and classified with it.
 func haversineM(lat1, lon1, lat2, lon2 float64) float64 {
-	const earthRadiusM = 6371008.8
 	rad := math.Pi / 180
 	dPhi := (lat2 - lat1) * rad
 	dLambda := (lon2 - lon1) * rad
@@ -35,18 +45,19 @@ func haversineM(lat1, lon1, lat2, lon2 float64) float64 {
 	phi2 := lat2 * rad
 	a := math.Sin(dPhi/2)*math.Sin(dPhi/2) +
 		math.Cos(phi1)*math.Cos(phi2)*math.Sin(dLambda/2)*math.Sin(dLambda/2)
-	return 2 * earthRadiusM * math.Asin(math.Sqrt(a))
+	return 2 * testMeanEarthRadiusM * math.Asin(math.Sqrt(a))
 }
 
 // offsetNorth returns the point dM metres north of (lat, lon); offsetEast
-// returns the point dM metres east.
+// returns the point dM metres east. Both place candidates with the
+// independent test-side Earth figure, never the store's constants.
 func offsetNorth(lat, lon, dM float64) (float64, float64) {
-	return lat + dM/metersPerDegree, lon
+	return lat + dM/testMeterPerDeg, lon
 }
 
 func offsetEast(lat, lon, dM float64) (float64, float64) {
 	cos := math.Cos(lat * math.Pi / 180)
-	return lat, lon + dM/(metersPerDegree*cos)
+	return lat, lon + dM/(testMeterPerDeg*cos)
 }
 
 // mustCreateLight inserts one light or fails the test.
@@ -238,10 +249,18 @@ func checkCreateLightAssetNoReusableAfterDelete(t *testing.T, ctx context.Contex
 
 func checkCreateLightInvalidKind(t *testing.T, ctx context.Context, db *DB) {
 	t.Helper()
-	if _, err := db.CreateLight(ctx, NewLight{
+	_, err := db.CreateLight(ctx, NewLight{
 		Kind: "shop", Label: "Not a kind", Lat: grovelandLat, Lon: grovelandLon,
-	}); err == nil {
-		t.Fatal("CreateLight with kind=shop succeeded, want an error")
+	})
+	if !errors.Is(err, errInvalidKind) {
+		t.Fatalf("CreateLight(kind=shop) error = %v, want errInvalidKind (the boundary parser's sentinel)", err)
+	}
+	var n int
+	if err := db.sql.QueryRowContext(ctx, "SELECT COUNT(*) FROM lights").Scan(&n); err != nil {
+		t.Fatalf("count lights: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("lights rows = %d after the refused create, want 0 (invalid input must not persist)", n)
 	}
 }
 
@@ -577,9 +596,10 @@ func checkNearby(t *testing.T, ctx context.Context, db *DB, made map[string]Ligh
 }
 
 // checkNearbyOutsideRows pins the division of labour: the 8.1 m and 25.1 m
-// candidates appear in the prefilter while their Haversine distance is above
-// the radius, so the exact Go-side filter (internal/geo) is what excludes
-// them — the store never clips near-threshold candidates.
+// candidates MUST appear in the prefilter (its presence is asserted, not
+// assumed from the membership subtests) while their Haversine distance is
+// above the radius, so the exact Go-side filter (internal/geo) is what
+// excludes them — the store never clips near-threshold candidates.
 func checkNearbyOutsideRows(t *testing.T, ctx context.Context, db *DB, made map[string]Light) {
 	t.Helper()
 	got8, err := db.NearbyLights(ctx, grovelandLat, grovelandLon, 8)
@@ -603,15 +623,17 @@ func checkNearbyOutsideRows(t *testing.T, ctx context.Context, db *DB, made map[
 	}
 	lat810, lon810 := offsetNorth(grovelandLat, grovelandLon, 8.1)
 	lat2510, lon2510 := offsetEast(grovelandLat, grovelandLon, 25.1)
-	if seen8 {
-		if d := haversineM(grovelandLat, grovelandLon, lat810, lon810); d <= 8 {
-			t.Fatalf("8 m results hold a row whose distance %.3f m is inside the radius; seed offsets are wrong", d)
-		}
+	if !seen8 {
+		t.Fatalf("8 m prefilter dropped the just-outside 8.1 m candidate; the bbox must over-cover the radius")
 	}
-	if seen25 {
-		if d := haversineM(grovelandLat, grovelandLon, lat2510, lon2510); d <= 25 {
-			t.Fatalf("25 m results hold a row whose distance %.3f m is inside the radius; seed offsets are wrong", d)
-		}
+	if !seen25 {
+		t.Fatalf("25 m prefilter dropped the just-outside 25.1 m candidate; the bbox must over-cover the radius")
+	}
+	if d := haversineM(grovelandLat, grovelandLon, lat810, lon810); d <= 8 {
+		t.Fatalf("8 m results hold a row whose distance %.3f m is inside the radius; seed offsets are wrong", d)
+	}
+	if d := haversineM(grovelandLat, grovelandLon, lat2510, lon2510); d <= 25 {
+		t.Fatalf("25 m results hold a row whose distance %.3f m is inside the radius; seed offsets are wrong", d)
 	}
 }
 
@@ -654,10 +676,37 @@ func checkEditUpdatesColumns(t *testing.T, ctx context.Context, db *DB) {
 		AssetNo: strPtr("GP-001"), Kind: KindPark,
 		Label: "Old label", Lat: grovelandLat, Lon: grovelandLon,
 	})
+	backdateLightStamps(t, ctx, db, created.ID)
 	edited, err := db.EditLight(ctx, created.ID, "New label", strPtr("GP-002"))
 	if err != nil {
 		t.Fatalf("EditLight: %v", err)
 	}
+	checkEditedColumns(t, edited)
+	checkEditedStamps(t, edited)
+	got, err := db.GetLight(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetLight after edit: %v", err)
+	}
+	checkEditedPersisted(t, got, edited.UpdatedAt)
+}
+
+// backdateLightStamps sets a row's created_at/updated_at to a fixed past
+// instant, so a missing re-stamp cannot pass: create and edit would
+// otherwise share the same wall-clock second, making updated_at equal to
+// created_at whether or not the edit re-stamped it.
+func backdateLightStamps(t *testing.T, ctx context.Context, db *DB, id LightID) {
+	t.Helper()
+	const backdated = "2020-01-01T00:00:00Z"
+	if _, err := db.sql.ExecContext(ctx,
+		"UPDATE lights SET created_at = ?, updated_at = ? WHERE id = ?",
+		backdated, backdated, int64(id)); err != nil {
+		t.Fatalf("backdate stamps: %v", err)
+	}
+}
+
+// checkEditedColumns asserts the edit's column effects on the returned row.
+func checkEditedColumns(t *testing.T, edited Light) {
+	t.Helper()
 	if edited.Label != "New label" {
 		t.Fatalf("edited label = %q, want New label", edited.Label)
 	}
@@ -670,15 +719,33 @@ func checkEditUpdatesColumns(t *testing.T, ctx context.Context, db *DB) {
 	if edited.Lat != grovelandLat || edited.Lon != grovelandLon {
 		t.Fatalf("edited position = (%v, %v), want unchanged", edited.Lat, edited.Lon)
 	}
-	got, err := db.GetLight(ctx, created.ID)
+}
+
+// checkEditedStamps pins the edit's timestamp behaviour: created_at stays at
+// the backdated value (untouched), updated_at moves to a fresh stamp after
+// it — an edit that skips the re-stamp fails this.
+func checkEditedStamps(t *testing.T, edited Light) {
+	t.Helper()
+	backAt, err := time.Parse(time.RFC3339, "2020-01-01T00:00:00Z")
 	if err != nil {
-		t.Fatalf("GetLight after edit: %v", err)
+		t.Fatalf("parse backdated stamp: %v", err)
 	}
+	if !edited.CreatedAt.Equal(backAt) {
+		t.Fatalf("edited created_at = %v, want the untouched backdated %v", edited.CreatedAt, backAt)
+	}
+	if !edited.UpdatedAt.After(backAt) {
+		t.Fatalf("edited updated_at = %v, want a fresh stamp after the backdated %v", edited.UpdatedAt, backAt)
+	}
+}
+
+// checkEditedPersisted asserts the readback row matches the edit result.
+func checkEditedPersisted(t *testing.T, got Light, wantUpdated time.Time) {
+	t.Helper()
 	if got.Label != "New label" || got.AssetNo == nil || *got.AssetNo != "GP-002" {
 		t.Fatalf("persisted row = (%q, %v), want (New label, GP-002)", got.Label, got.AssetNo)
 	}
-	if got.UpdatedAt.Before(got.CreatedAt) {
-		t.Fatalf("updated_at %v before created_at %v", got.UpdatedAt, got.CreatedAt)
+	if !got.UpdatedAt.Equal(wantUpdated) {
+		t.Fatalf("persisted updated_at = %v, want the stamped %v", got.UpdatedAt, wantUpdated)
 	}
 }
 
@@ -861,22 +928,31 @@ func TestBBoxDegrees(t *testing.T) {
 	tests := []struct {
 		name string
 		lat  float64
+		lon  float64
 		rM   float64
 	}{
-		{name: "zero_radius_spans_nothing", lat: grovelandLat, rM: 0},
-		{name: "groveland_latitude_radius_25m", lat: grovelandLat, rM: 25},
-		{name: "groveland_latitude_radius_8m", lat: grovelandLat, rM: 8},
-		{name: "near_polar_latitude_stays_finite", lat: 89.9, rM: 25},
+		{name: "zero_radius_spans_nothing", lat: grovelandLat, lon: grovelandLon, rM: 0},
+		{name: "groveland_latitude_radius_25m", lat: grovelandLat, lon: grovelandLon, rM: 25},
+		{name: "groveland_latitude_radius_8m", lat: grovelandLat, lon: grovelandLon, rM: 8},
+		{name: "near_polar_latitude_stays_finite", lat: 89.9, lon: grovelandLon, rM: 25},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			checkBBox(t, tt.lat, tt.rM)
+			checkBBox(t, tt.lat, tt.lon, tt.rM)
 		})
 	}
 }
 
-func checkBBox(t *testing.T, lat, rM float64) {
+func checkBBox(t *testing.T, lat, lon, rM float64) {
 	t.Helper()
+	// The absolute metre conversion is pinned against the independent
+	// mean-Earth figure: metersPerDegree must track true metre-per-degree
+	// latitude within 0.5%, so a consistently-wrong constant cannot hide
+	// behind the store's own arithmetic reappearing in this test.
+	if rel := math.Abs(metersPerDegree-testMeterPerDeg) / testMeterPerDeg; rel > 0.005 {
+		t.Fatalf("metersPerDegree = %v drifts %.3f%% from the mean-Earth degree %v",
+			metersPerDegree, rel*100, testMeterPerDeg)
+	}
 	latDelta, lonDelta := bboxDegrees(lat, rM)
 	if math.IsNaN(latDelta) || math.IsInf(latDelta, 0) {
 		t.Fatalf("latDelta = %v, want finite", latDelta)
@@ -904,5 +980,35 @@ func checkBBox(t *testing.T, lat, rM float64) {
 	lonSpanM := lonDelta * metersPerDegree * cos
 	if lonSpanM < rM && lonDelta < 180 {
 		t.Fatalf("longitude span %.3f m clips the %.1f m radius", lonSpanM, rM)
+	}
+	checkBBoxBoundaryRows(t, lat, lon, rM, cos, latDelta, lonDelta)
+}
+
+// checkBBoxBoundaryRows places near-boundary rows with the INDEPENDENT
+// Earth figure: a point at 99% of the radius due north/east must sit inside
+// the box; one at 135% (beyond the 110% safety margin) must sit outside it.
+// Placing the rows without the store's constants keeps the in/out
+// classification a real cross-check of the conversion, not a restatement.
+func checkBBoxBoundaryRows(t *testing.T, lat, lon, rM, cos, latDelta, lonDelta float64) {
+	t.Helper()
+	if inLat := lat + rM*0.99/testMeterPerDeg; inLat < lat-latDelta || inLat > lat+latDelta {
+		t.Fatalf("bbox lat span [%v, %v] clips the %.1f m point at 99%% of the radius (lat %v)",
+			lat-latDelta, lat+latDelta, rM*0.99, inLat)
+	}
+	if outLat := lat + rM*1.35/testMeterPerDeg; outLat >= lat-latDelta && outLat <= lat+latDelta {
+		t.Fatalf("bbox lat span [%v, %v] reaches past the %.1f m point at 135%% of the radius (lat %v)",
+			lat-latDelta, lat+latDelta, rM*1.35, outLat)
+	}
+	if lonDelta >= 180 {
+		return
+	}
+	inLon := lon + rM*0.99/(testMeterPerDeg*cos)
+	if inLon < lon-lonDelta || inLon > lon+lonDelta {
+		t.Fatalf("bbox lon span [%v, %v] clips the %.1f m east point at 99%% of the radius (lon %v)",
+			lon-lonDelta, lon+lonDelta, rM*0.99, inLon)
+	}
+	if outLon := lon + rM*1.35/(testMeterPerDeg*cos); outLon >= lon-lonDelta && outLon <= lon+lonDelta {
+		t.Fatalf("bbox lon span [%v, %v] reaches past the %.1f m east point at 135%% of the radius (lon %v)",
+			lon-lonDelta, lon+lonDelta, rM*1.35, outLon)
 	}
 }
