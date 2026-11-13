@@ -1,0 +1,2632 @@
+diff --git a/acceptance/drafts/README.md b/acceptance/drafts/README.md
+new file mode 100644
+index 0000000..ba423d4
+--- /dev/null
++++ b/acceptance/drafts/README.md
+@@ -0,0 +1,144 @@
++# M2 acceptance drafts (frozen contract)
++
++Inert drafts for milestone M2 (admin inventory, "walk the town"), written by
++T-200 BEFORE any feature task branched. The `.go.txt` / `.spec.ts.txt`
++extensions are compiled/loaded by nothing, so the merge gate stays green while
++the contract is already enforceable: git history proves these tests predate
++the implementations. **T-207 (also test-author) activates them by pure
++rename — no content edits. A gofmt pass on the activated Go files is the only
++sanctioned mechanical step.** If an assertion turns out to be unsatisfiable
++or ambiguous against the merged feature, T-207 writes `BLOCKED: <reason>` and
++routes the dispute to the planner; the oracle is never edited to fit the
++implementation (the T-105 lesson).
++
++## Activation (T-207)
++
++    git mv acceptance/drafts/admin_auth_go_test.go.txt    acceptance/go/admin_auth_test.go
++    git mv acceptance/drafts/admin_lights_go_test.go.txt  acceptance/go/admin_lights_test.go
++    git mv acceptance/drafts/admin-walk.spec.ts.txt       acceptance/e2e/admin-walk.spec.ts
++    # then remove this directory (the frozen bytes stay auditable in git
++    # history; preserve the table below in the handoff)
++
++**T-207 must preserve the contract table below** (copy it into the T-207
++handoff verbatim): workers and reviewers resolve every UI dispute against it.
++
++## Frozen UI contract (workers build to this EXACTLY)
++
++| Element | Contract |
++|---|---|
++| `/admin/login` | heading `Admin login`; label `Token`; button `Sign in` |
++| `/admin/walk` `#walk-pos` | text matching `\d+\.\d+, -?\d+\.\d+` |
++| `#walk-accuracy` | text matching `/accuracy \d+ m/` |
++| `#pin` (draggable pin) | `aria-label="position pin"`, keyboard-movable |
++| `#pin-pos` | current pin coords, same numeric format |
++| buttons | `Add light here` (exact), `Save anyway (low accuracy)`, `Confirm pin`, `Merge`, `Save anyway` |
++| form labels | `Asset number`, `Label`, `Kind` (select: `Park`, `Building`), `Photo` |
++| success | role=status containing `Saved` |
++| bbox rejection | role=alert containing `outside Groveland town bounds` |
++| duplicate panel | `#dup-panel` with heading `Possible duplicate` |
++| list `/admin` | heading `Lights`; row per light with thumbnail `img[alt=<label>]`; link/button `Older` |
++
++Additional selectors frozen by the drafts (needed by specific tests):
++
++| Element | Contract |
++|---|---|
++| `#manual-lat`, `#manual-lon` | number inputs, visible when geolocation is denied |
++| `#photo-preview` | in-form preview `img`; renders EXIF orientation applied |
++| `#light-pos` | admin detail coordinates as `lat, lon` at 6 decimal places |
++| login markup | `<h1>Admin login</h1>`, `<label ..>Token</label>` + `<input name="token">`, `<button>Sign in</button>` |
++| list row link | the label text links to `/admin/lights/{id}` (accessible name contains the label) |
++| thumbnail alt format | `alt="<asset_no> <label>"` for numbered lights, `alt="<label>"` for unnumbered (this reconciles the table's `img[alt=<label>]` with test 7's `img[alt^="GP-017"]`; asset numbers may not appear anywhere else twice) |
++| walk form | `/admin/walk` server-renders the add-light form with a hidden `csrf_token` input (value attribute, order free) |
++
++## Frozen HTTP contract (Go drafts)
++
++| Route | Contract |
++|---|---|
++| `GET /admin` (no session) | 302 → `/admin/login`; with `HX-Request: true` and no session: 401 + `HX-Redirect: /admin/login` |
++| `GET /admin/login` | 200 form page (see markup above) |
++| `GET /admin/login?token=X` | valid `ADMIN_TOKEN` → 302 → `/admin` + `Set-Cookie: gl_session=...` with `HttpOnly`, `SameSite=Lax` (one-time: replay → 403); wrong token → 403 |
++| `POST /admin/lights` | multipart `csrf_token, label, kind(park\|building\|street), lat, lon, asset_no?, photo?, dup_choice?` → 303 `Location: /admin/lights/{id}`; duplicate → 409 body contains `Possible duplicate`; outside `TOWN_BBOX` → 422 body contains `outside Groveland town bounds`; >15 MB → 413; wrong type / HEIC / >40 MP → 415 (HEIC body contains `please choose JPEG`) |
++| `GET /admin/lights/{id}` | 200 detail; photo referenced as `src="/photos/..."`; 404 after soft delete |
++| `POST /admin/lights/{id}` | edit (multipart `csrf_token` + changed fields; unspecified fields keep values) → 303 |
++| `POST /admin/lights/{id}/delete` | soft delete (multipart `csrf_token`) → 303 |
++| `GET /admin` | list: heading `Lights`, the 50 most recent lights, one `img alt="<label>"` per row (placeholder thumbnails for photo-less lights are fine) |
++| `GET /admin/rows?page=N` | HTMX rows fragment; without `HX-Request` → 303 → `/admin?page=N` |
++| `GET /photos/...` | served photo: `Content-Type: image/jpeg`, long edge ≤ 1600, NO APP1 segment (so no EXIF, no GPS), EXIF orientation applied (a 600×800 Orientation=6 upload serves wider-than-tall) |
++
++Ordering: the admin list is `ORDER BY created_at DESC, id DESC` (the id
++tie-break is REQUIRED — rapid test creates share a timestamp second).
++
++Session cookie name: `gl_session`. CSRF token field name: `csrf_token`
++(double-submit pattern as in the probe contract).
++
++## Fixtures (`testdata/photos/`, generated)
++
++`go run ./testdata/photos/gen` writes AND verifies every fixture below; run
++output includes per-file sha256 (deterministic — identical on every run):
++
++| File | What | sha256 |
++|---|---|---|
++| `portrait-orient6-gps.jpg` | 600×800 JPEG, EXIF APP1 with Orientation=6 + GPS IFD; processed output must be 800×600 with no APP1 | `52846307a4650b3e8b983792012314d18221c441bcd051b168ae1d059dbad8a9` |
++| `portrait-orient8-gps.jpg` | same with Orientation=8 (holdout uses this) | `cf2ae83678ad03262485135b0f34c6d2e06ba21400a742822249e40198e1ce1c` |
++| `landscape.jpg` | 320×200 plain JPEG, no EXIF (happy path) | `732bb9fe995f74d0c14c6592a5193bb5a3d1ef30f75467f773120946522aa02c` |
++| `tiny.png` | 1×1 PNG | `1bffb9ddaca4e6f750fb22599dcdd7a83de59d1066f987bb448f373b79b718b0` |
++| `pixelbomb.png` | IHDR claims 50000×50000 (>40 MP) in 45 bytes; never a raster | `5f30f81f7864fd8612975cfde74c03a9c08769748559406e91809db1f14679f5` |
++| `text-as.jpg` | plain text with a .jpg name | `075b49fd4d5c8220b36351f0d556ba35789a48adc96714d57853f038ba805fe7` |
++| `heic.bin` | 16 bytes, `ftyp` box at offset 4, brand `heic` at offset 8 | `30d1619fdf4c18354f114d3de09fc36c645a9b3d51089da1bd830fbb2f8b6ac9` |
++
++Oversized uploads are NEVER committed: the Go drafts synthesise a >15 MB
++multipart body at runtime (a valid JPEG plus junk after its EOI marker).
++
++## Schema oracle (`testdata/schema.expected.sql`)
++
++The frozen M2 schema: `migrations/0002_*` must produce a database whose
++`sqlite_master` CREATE statements equal this file (probe table first, copied
++verbatim from `migrations/0001_init.sql`, then the product tables in file
++order). T-201 owns that equality.
++
++## Per-assertion visual notes (what a correct screenshot shows)
++
++The mobile projects are the primary target; every note assumes the
++iphone-se-320 viewport (320×640) unless stated.
++
++- **A-201 login**: a single centred card — heading "Admin login", one labelled
++  "Token" input (password-style), a full-width "Sign in" button. Nothing else
++  competes for attention; tap targets ≥ 44 px tall; no horizontal scroll.
++- **A-202 walk page** (320×640): top strip shows `#walk-pos` and
++  `#walk-accuracy` ("accuracy 12 m") in readable type; the middle is the map
++  canvas; **"Add light here" sits in the bottom third, full-width, thumb-
++  reachable**. With accuracy 80 m the button is visibly disabled and "Save
++  anyway (low accuracy)" appears beside/below it; choosing it re-enables the
++  button. Geolocation denied: `#manual-lat` / `#manual-lon` number inputs
++  appear (manual pin-drop fallback), still no horizontal scroll.
++- **A-203 pin**: a pin marker with `aria-label="position pin"` centred on the
++  map; `#pin-pos` under the map shows the live coordinates; dragging (or
++  arrow keys, focus on the pin) moves it and updates `#pin-pos`; after
++  "Confirm pin" the admin detail's `#light-pos` shows exactly those
++  coordinates at 6 dp.
++- **A-204 rejection**: a red alert box reading "…outside Groveland town
++  bounds…" (role=alert) near the position readout; the form does NOT advance.
++- **A-205 duplicate panel**: `#dup-panel` — an amber/bordered panel headed
++  "Possible duplicate" with two buttons, "Merge" (primary) and "Save anyway";
++  nothing is saved until one is chosen.
++- **A-206 photo**: after picking the portrait fixture, `#photo-preview`
++  renders **wider than tall** (orientation already applied); the served photo
++  on the list is a clean re-encoded JPEG (no EXIF/GPS block, long edge
++  ≤ 1600).
++- **A-208 detail/edit**: the admin detail shows the photo, `#light-pos` and a
++  labelled form ("Label" filled) with "Save changes"; "Delete light" is a
++  visually destructive (red) action separated from the save button.
++- **A-209 list**: heading "Lights"; one row per light with a small square
++  thumbnail (`img alt=<label>`), asset number + label text, status chip;
++  "Older" at the bottom swaps in the next 50 via HTMX (no full reload);
++  **thumbnails visible and no horizontal scroll at 320 px**.
++- **A-201 guard (unauthenticated)**: visiting `/admin` logged out lands on
++  the login card from A-201.
++
++## Holdout mirror
++
++`<holdout_dir>/drafts/` (see harness/policy.json) holds inert variants with
++different data: coordinates 42.7752,-71.0148, asset `GP-042`, the
++Orientation=8 fixture, a runtime-built 16 MB upload, a 51-light pagination
++boundary, and a merge-that-must-leave-exactly-one-row. They activate by the
++same rename procedure and are equally frozen.
+diff --git a/acceptance/drafts/admin-walk.spec.ts.txt b/acceptance/drafts/admin-walk.spec.ts.txt
+new file mode 100644
+index 0000000..c39c5b1
+--- /dev/null
++++ b/acceptance/drafts/admin-walk.spec.ts.txt
+@@ -0,0 +1,284 @@
++// M2 acceptance drafts (T-200): A-201..A-209 for the admin "walk the town"
++// flow, written as a frozen UI contract BEFORE any feature exists.
++//
++// INERT DRAFT: the `.spec.ts.txt` extension means no runner loads this file.
++// T-207 activates it verbatim, with a rename only and NO content edits:
++//
++//   git mv acceptance/drafts/admin-walk.spec.ts.txt acceptance/e2e/admin-walk.spec.ts
++//
++// It FAILS against current main by design (no /admin routes; every test
++// times out on its first admin-page assertion).
++//
++// The frozen UI contract (element names, exact button/label strings, routes,
++// response codes) lives in acceptance/drafts/README.md — workers build to
++// that table EXACTLY. Two ACTIVE utils are imported: ./util/admin.js
++// (loginAsAdmin) and ./util/images.js (hasExifGps, jpegSize).
++//
++// Visual notes (what a correct screenshot shows) are inline per test and in
++// full in the README; the mobile projects (pixel-9, iphone-16, iphone-se-320
++// at 320x640) are the primary targets: "Add light here" sits in the bottom
++// third, the accuracy text is readable, the photo preview is correctly
++// oriented, and every tap target is at least 44 px tall.
++
++import { test, expect, type Page } from '@playwright/test';
++import AxeBuilder from '@axe-core/playwright';
++import { loginAsAdmin } from './util/admin.js';
++import { hasExifGps, jpegSize } from './util/images.js';
++
++test.use({
++  geolocation: { latitude: 42.7617, longitude: -71.0303, accuracy: 12 },
++  permissions: ['geolocation'],
++});
++
++/** Walk the plan's §7 Phase-2 add-light flow with the given fields. */
++async function addLightFromForm(
++  page: Page,
++  opts: { assetNo?: string; label: string; photo?: string },
++): Promise<void> {
++  await page.goto('/admin/walk');
++  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
++  if (opts.assetNo) {
++    await page.getByLabel('Asset number').fill(opts.assetNo);
++  }
++  await page.getByLabel('Label').fill(opts.label);
++  if (opts.photo) {
++    await page.getByLabel('Photo').setInputFiles(opts.photo);
++  }
++  await page.getByRole('button', { name: 'Confirm pin' }).click();
++}
++
++test('@A-202 @A-203 add a light from current position', async ({ page, context }) => {
++  await loginAsAdmin(page);
++  await page.goto('/admin/walk');
++
++  // Live position and accuracy are shown (accuracy 12 m from the context).
++  await expect(page.locator('#walk-pos')).toHaveText(/\d+\.\d+, -?\d+\.\d+/);
++  await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy 12 m/);
++
++  // Open the add-light form, then "walk a few metres": the watchPosition
++  // update must refresh the accuracy text in place.
++  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
++  await context.setGeolocation({ latitude: 42.76175, longitude: -71.03035, accuracy: 8 });
++  await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy 8 m/);
++
++  await page.getByLabel('Asset number').fill('GP-017');
++  await page.getByLabel('Label').fill('Ball field lamp');
++  await page.getByLabel('Kind').selectOption({ label: 'Park' });
++  await page.getByLabel('Photo').setInputFiles('testdata/photos/portrait-orient6-gps.jpg');
++  await page.getByRole('button', { name: 'Confirm pin' }).click();
++
++  await expect(page.getByRole('status')).toContainText('Saved');
++});
++
++test('@A-202 low accuracy gates saving behind an explicit save-anyway choice', async ({
++  page,
++  context,
++}) => {
++  await context.setGeolocation({ latitude: 42.7617, longitude: -71.0303, accuracy: 80 });
++  await loginAsAdmin(page);
++  await page.goto('/admin/walk');
++
++  await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy 80 m/);
++  const add = page.getByRole('button', { name: 'Add light here', exact: true });
++  await expect(add).toBeVisible();
++  // Over the 30 m threshold the primary action is disabled until the admin
++  // explicitly accepts the low-accuracy risk.
++  await expect(add).toBeDisabled();
++  await page.getByRole('button', { name: 'Save anyway (low accuracy)' }).click();
++  await expect(add).toBeEnabled();
++});
++
++test.describe('walk mode without geolocation permission', () => {
++  test.use({ permissions: [] });
++
++  test('@A-202 geolocation denied shows manual pin fields', async ({ page }) => {
++    await loginAsAdmin(page);
++    await page.goto('/admin/walk');
++
++    await expect(page.locator('#manual-lat')).toBeVisible();
++    await expect(page.locator('#manual-lon')).toBeVisible();
++    await expect(page.locator('#manual-lat')).toHaveAttribute('type', 'number');
++    await expect(page.locator('#manual-lon')).toHaveAttribute('type', 'number');
++  });
++});
++
++test('@A-203 dragged pin position is what gets saved', async ({ page }) => {
++  await loginAsAdmin(page);
++  await page.goto('/admin/walk');
++
++  const pin = page.locator('#pin');
++  await expect(pin).toBeVisible();
++  await expect(pin).toHaveAttribute('aria-label', 'position pin');
++  await expect(page.locator('#pin-pos')).toHaveText(/\d+\.\d+, -?\d+\.\d+/);
++  const before = (await page.locator('#pin-pos').innerText()).trim();
++
++  // Drag the pin ~80 px and read the new coordinates.
++  const box = (await pin.boundingBox())!;
++  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
++  await page.mouse.down();
++  await page.mouse.move(box.x + box.width / 2 + 80, box.y + box.height / 2 + 80, {
++    steps: 8,
++  });
++  await page.mouse.up();
++
++  const after = (await page.locator('#pin-pos').innerText()).trim();
++  expect(after).not.toBe(before);
++  expect(after).toMatch(/^\d+\.\d+, -?\d+\.\d+$/);
++  const coords = after.match(/^(\d+\.\d+), (-?\d+\.\d+)$/)!;
++  const expected = `${Number(coords[1]).toFixed(6)}, ${Number(coords[2]).toFixed(6)}`;
++
++  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
++  await page.getByLabel('Label').fill('Dragged pin lamp');
++  await page.getByRole('button', { name: 'Confirm pin' }).click();
++  await expect(page.getByRole('status')).toContainText('Saved');
++
++  // The admin detail shows exactly the confirmed coordinates, 6 dp.
++  await page.goto('/admin');
++  await page.getByRole('link', { name: /Dragged pin lamp/ }).click();
++  await expect(page).toHaveURL(/\/admin\/lights\/\d+$/);
++  await expect(page.locator('#light-pos')).toHaveText(expected);
++});
++
++test('@A-204 position outside TOWN_BBOX is rejected', async ({ page, context }) => {
++  await loginAsAdmin(page);
++  await page.goto('/admin/walk');
++  await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy 12 m/);
++
++  // 42.36,-71.06 is far outside 42.70,-71.09,42.82,-70.96.
++  await context.setGeolocation({ latitude: 42.36, longitude: -71.06, accuracy: 10 });
++  await expect(page.getByRole('alert')).toContainText('outside Groveland town bounds');
++});
++
++test('@A-205 duplicate asset numbers raise the merge panel', async ({ page }) => {
++  await loginAsAdmin(page);
++  await addLightFromForm(page, { assetNo: 'GP-017', label: 'Dup panel lamp' });
++  await expect(page.getByRole('status')).toContainText('Saved');
++
++  // A second light with the same asset number nearby hits the panel.
++  await page.goto('/admin/walk');
++  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
++  await page.getByLabel('Asset number').fill('GP-017');
++  await page.getByLabel('Label').fill('Dup panel lamp twin');
++  await page.getByRole('button', { name: 'Confirm pin' }).click();
++
++  const panel = page.locator('#dup-panel');
++  await expect(panel).toBeVisible();
++  await expect(panel.getByRole('heading', { name: 'Possible duplicate' })).toBeVisible();
++  await expect(panel.getByRole('button', { name: 'Merge' })).toBeVisible();
++  await expect(panel.getByRole('button', { name: 'Save anyway' })).toBeVisible();
++});
++
++test('@A-206 served photo is re-encoded, oriented and metadata-free', async ({ page }) => {
++  await loginAsAdmin(page);
++  await page.goto('/admin');
++
++  // The light created by the @A-202 @A-203 test above carries the portrait
++  // Orientation=6 fixture photo.
++  const img = page.locator('img[alt^="GP-017"]').first();
++  await expect(img).toBeVisible();
++  const src = await img.getAttribute('src');
++  expect(src).toBeTruthy();
++  const res = await page.request.get(src!);
++  expect(res.status()).toBe(200);
++  const bytes = new Uint8Array(await res.body());
++  expect(hasExifGps(bytes)).toBe(false);
++  const { w, h } = jpegSize(bytes);
++  expect(Math.max(w, h)).toBeLessThanOrEqual(1600);
++  expect(w).toBeGreaterThan(h); // 600x800 + Orientation=6 => wider than tall
++
++  // The in-form preview renders the orientation already applied.
++  await page.goto('/admin/walk');
++  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
++  await page.getByLabel('Label').fill('Orientation preview lamp');
++  await page.getByLabel('Photo').setInputFiles('testdata/photos/portrait-orient6-gps.jpg');
++  const preview = page.locator('#photo-preview');
++  await expect(preview).toBeVisible();
++  const box = (await preview.boundingBox())!;
++  expect(box.width).toBeGreaterThan(box.height);
++});
++
++test('@A-208 edit relabels and delete removes the light', async ({ page }) => {
++  await loginAsAdmin(page);
++  await addLightFromForm(page, { assetNo: 'GP-018', label: 'Edit me lamp' });
++  await expect(page.getByRole('status')).toContainText('Saved');
++
++  await page.goto('/admin');
++  await page.getByRole('link', { name: /Edit me lamp/ }).click();
++  await expect(page).toHaveURL(/\/admin\/lights\/\d+$/);
++
++  await page.getByLabel('Label').fill('Edited lamp');
++  await page.getByRole('button', { name: 'Save changes' }).click();
++  await expect(page.getByRole('status')).toContainText('Saved');
++  await expect(page.getByLabel('Label')).toHaveValue('Edited lamp');
++
++  await page.getByRole('button', { name: 'Delete light' }).click();
++  await page.goto('/admin');
++  await expect(page.getByRole('link', { name: /Edited lamp/ })).toHaveCount(0);
++  await expect(page.locator('img[alt*="Edited lamp"]')).toHaveCount(0);
++});
++
++test('@A-209 admin list paginates with HTMX', async ({ page }) => {
++  await loginAsAdmin(page);
++  await page.goto('/admin/walk');
++
++  // Seed 60 lights through the same HTTP contract the form uses (the UI flow
++  // is covered above; 60 UI dialogs would take minutes). 60 guarantees the
++  // 50-per-page boundary regardless of the few lights earlier tests left in
++  // this server's database.
++  const html = await page.content();
++  const csrf =
++    html.match(/<input[^>]*name="csrf_token"[^>]*>/)?.[0].match(/value="([^"]*)"/)?.[1] ?? '';
++  expect(csrf, 'csrf_token parsed from the walk page form').not.toBe('');
++  for (let i = 1; i <= 60; i++) {
++    const res = await page.request.post('/admin/lights', {
++      multipart: {
++        csrf_token: csrf,
++        label: `Scroll lamp ${String(i).padStart(2, '0')}`,
++        kind: 'park',
++        lat: String(42.76 + i * 0.0004),
++        lon: String(-71.045 + i * 0.0004),
++      },
++    });
++    expect(res.status(), `create Scroll lamp ${i}`).toBe(303);
++  }
++
++  await page.goto('/admin');
++  await expect(page.getByRole('heading', { name: 'Lights', exact: true })).toBeVisible();
++  await expect(page.locator('img[alt="Scroll lamp 60"]')).toBeVisible();
++  await expect(page.locator('img[alt="Scroll lamp 05"]')).toHaveCount(0);
++
++  // "Older" swaps in page 2 as an HTMX fragment — no full navigation.
++  let navigated = false;
++  page.on('framenavigated', (frame) => {
++    if (frame === page.mainFrame()) {
++      navigated = true;
++    }
++  });
++  await page.getByRole('link', { name: 'Older' }).click();
++  await expect(page.locator('img[alt="Scroll lamp 05"]')).toBeVisible();
++  await expect(page.locator('img[alt="Scroll lamp 60"]')).toHaveCount(0);
++  expect(navigated).toBe(false);
++});
++
++test('@A-201 unauthenticated /admin lands on the login page', async ({ page }) => {
++  await page.goto('/admin');
++  await expect(page).toHaveURL(/\/admin\/login$/);
++  await expect(page.getByRole('heading', { name: 'Admin login' })).toBeVisible();
++});
++
++test('@A-202 @a11y walk page and admin list have no axe violations', async ({ page }) => {
++  await loginAsAdmin(page);
++  await page.goto('/admin/walk');
++  await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy \d+ m/);
++  const walk = await new AxeBuilder({ page })
++    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
++    .analyze();
++  expect(walk.violations).toEqual([]);
++
++  await page.goto('/admin');
++  await expect(page.getByRole('heading', { name: 'Lights', exact: true })).toBeVisible();
++  const list = await new AxeBuilder({ page })
++    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
++    .analyze();
++  expect(list.violations).toEqual([]);
++});
+diff --git a/acceptance/drafts/admin_auth_go_test.go.txt b/acceptance/drafts/admin_auth_go_test.go.txt
+new file mode 100644
+index 0000000..0310ed5
+--- /dev/null
++++ b/acceptance/drafts/admin_auth_go_test.go.txt
+@@ -0,0 +1,337 @@
++//go:build acceptance
++
++// @A-201 — admin login: one-time ADMIN_TOKEN exchange and guarded /admin/*
++// (frozen contract, written by T-200 before the feature tasks branch).
++//
++// INERT DRAFT: `.go.txt` is compiled by nothing. T-207 activates it by pure
++// rename with NO content edits (a gofmt pass is the only sanctioned step):
++//
++//	git mv acceptance/drafts/admin_auth_go_test.go.txt acceptance/go/admin_auth_test.go
++//
++// Contract owner: T-203 (auth/session). It FAILS against current main by
++// design (no /admin routes exist yet — everything under /admin answers 404).
++//
++// Frozen flow (byte-exact expectations for workers; see also
++// acceptance/drafts/README.md):
++//
++//	GET  /admin (no session)                 -> 302 Location: /admin/login
++//	GET  /admin/login                        -> 200 page: <h1>Admin login</h1>,
++//	                                             <label ..>Token</label> with
++//	                                             <input name="token">, and a
++//	                                             <button>Sign in</button>
++//	GET  /admin/login?token=<wrong>          -> 403
++//	GET  /admin/login?token=<ADMIN_TOKEN>    -> 302 Location: /admin AND a
++//	                                             Set-Cookie for gl_session
++//	                                             carrying HttpOnly and
++//	                                             SameSite=Lax
++//	GET  /admin/login?token=<ADMIN_TOKEN>    -> 403 (the token is one-time;
++//	    (replay)                                replaying it must not mint a
++//	                                             second session)
++//	GET  /admin (gl_session cookie)          -> 200
++//	GET  /admin + HX-Request: true, no cookie -> 401 with header
++//	                                             HX-Redirect: /admin/login
++package acceptance
++
++import (
++	"context"
++	"io"
++	"net"
++	"net/http"
++	"net/http/cookiejar"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"regexp"
++	"strconv"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++)
++
++// aaAdminToken mirrors .env.test (the spawned server gets the same value).
++const aaAdminToken = "dGVzdC1hZG1pbi10b2tlbi0zMi1ieXRl"
++
++var (
++	aaReHeading = regexp.MustCompile(`<h1[^>]*>\s*Admin login\s*</h1>`)
++	aaReLabel   = regexp.MustCompile(`<label[^>]*>\s*Token\s*</label>`)
++	aaReInput   = regexp.MustCompile(`<input[^>]*name="token"[^>]*>`)
++	aaReButton  = regexp.MustCompile(`<button[^>]*>\s*Sign in\s*</button>`)
++)
++
++// TestA201AdminLogin covers the whole frozen auth flow: the guard redirect,
++// the login form, wrong-token rejection, the one-time exchange (cookie flags
++// included), replay rejection, the authenticated page, and the HTMX variant
++// of the guard.
++func TestA201AdminLogin(t *testing.T) {
++	s := aaSpawnDir(t, "", "")
++	t.Cleanup(func() { aaKill(t, s) })
++	browser := aaClient(t) // "browser": cookie jar, never follows redirects
++	bare := aaClient(t)    // a second, cookie-less client for the HTMX probe
++
++	// Unauthenticated /admin is a full-page redirect to the login page.
++	status, header, body := aaDo(t, browser, http.MethodGet, s.baseURL+"/admin", nil, false)
++	if status != http.StatusFound {
++		t.Fatalf("GET /admin without session: status %d, want 302; body:\n%s", status, body)
++	}
++	if loc := header.Get("Location"); loc != "/admin/login" {
++		t.Fatalf("GET /admin without session: Location = %q, want %q", loc, "/admin/login")
++	}
++
++	// The login page renders the frozen form: heading, label+input, button.
++	status, _, body = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin/login", nil, false)
++	if status != http.StatusOK {
++		t.Fatalf("GET /admin/login: status %d, want 200; body:\n%s", status, body)
++	}
++	for _, re := range []*regexp.Regexp{aaReHeading, aaReLabel, aaReInput, aaReButton} {
++		if !re.MatchString(body) {
++			t.Errorf("GET /admin/login: markup missing the frozen %q element; body:\n%s", re.String(), body)
++		}
++	}
++
++	// A wrong token is rejected.
++	status, _, _ = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin/login?token=definitely-not-the-token", nil, false)
++	if status != http.StatusForbidden {
++		t.Fatalf("GET /admin/login?token=<wrong>: status %d, want 403", status)
++	}
++
++	// The valid token exchanges for an admin session exactly once.
++	status, header, _ = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin/login?token="+aaAdminToken, nil, false)
++	if status != http.StatusFound {
++		t.Fatalf("GET /admin/login?token=<valid>: status %d, want 302", status)
++	}
++	if loc := header.Get("Location"); loc != "/admin" {
++		t.Fatalf("GET /admin/login?token=<valid>: Location = %q, want %q", loc, "/admin")
++	}
++	var sessionCookie string
++	for _, c := range header.Values("Set-Cookie") {
++		if strings.HasPrefix(c, "gl_session=") {
++			sessionCookie = c
++		}
++	}
++	if sessionCookie == "" {
++		t.Fatalf("GET /admin/login?token=<valid>: no Set-Cookie for gl_session; got %q", header.Values("Set-Cookie"))
++	}
++	if !strings.Contains(strings.ToLower(sessionCookie), "httponly") {
++		t.Errorf("gl_session cookie lacks HttpOnly: %q", sessionCookie)
++	}
++	if !strings.Contains(strings.ToLower(sessionCookie), "samesite=lax") {
++		t.Errorf("gl_session cookie lacks SameSite=Lax: %q", sessionCookie)
++	}
++
++	// Replaying the same token is refused — it was consumed.
++	status, _, _ = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin/login?token="+aaAdminToken, nil, false)
++	if status != http.StatusForbidden {
++		t.Fatalf("GET /admin/login?token=<valid> (replay): status %d, want 403", status)
++	}
++
++	// The minted session cookie unlocks /admin.
++	status, _, body = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin", nil, false)
++	if status != http.StatusOK {
++		t.Fatalf("GET /admin with session cookie: status %d, want 200; body:\n%s", status, body)
++	}
++
++	// HTMX fragment requests without a session get 401 + HX-Redirect so the
++	// client library can bounce to the login page itself.
++	status, header, _ = aaDo(t, bare, http.MethodGet, s.baseURL+"/admin", nil, true)
++	if status != http.StatusUnauthorized {
++		t.Fatalf("GET /admin (HX-Request, no session): status %d, want 401", status)
++	}
++	if loc := header.Get("HX-Redirect"); loc != "/admin/login" {
++		t.Fatalf("GET /admin (HX-Request, no session): HX-Redirect = %q, want %q", loc, "/admin/login")
++	}
++}
++
++// --- aa helpers (self-contained on purpose: activation is a pure rename,
++// so this file must not depend on helpers defined elsewhere in the package) ---
++
++// aaClient is a cookie-carrying client that never follows redirects, so 302s
++// and their Set-Cookie headers stay observable.
++func aaClient(t *testing.T) *http.Client {
++	t.Helper()
++	jar, err := cookiejar.New(nil)
++	if err != nil {
++		t.Fatalf("cookie jar: %v", err)
++	}
++	return &http.Client{
++		Jar:     jar,
++		Timeout: 10 * time.Second,
++		CheckRedirect: func(req *http.Request, via []*http.Request) error {
++			return http.ErrUseLastResponse
++		},
++	}
++}
++
++// aaDo performs one request, optionally with HX-Request: true, and returns
++// status, headers and the fully-read body.
++func aaDo(t *testing.T, c *http.Client, method, target string, body io.Reader, hx bool) (int, http.Header, string) {
++	t.Helper()
++	req, err := http.NewRequest(method, target, body)
++	if err != nil {
++		t.Fatalf("%s %s: %v", method, target, err)
++	}
++	if hx {
++		req.Header.Set("HX-Request", "true")
++	}
++	resp, err := c.Do(req)
++	if err != nil {
++		t.Fatalf("%s %s: %v", method, target, err)
++	}
++	defer resp.Body.Close()
++	b, err := io.ReadAll(resp.Body)
++	if err != nil {
++		t.Fatalf("%s %s: read body: %v", method, target, err)
++	}
++	return resp.StatusCode, resp.Header, string(b)
++}
++
++type aaSyncBuf struct {
++	mu  sync.Mutex
++	buf strings.Builder
++}
++
++func (b *aaSyncBuf) Write(p []byte) (int, error) {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	return b.buf.Write(p)
++}
++
++func (b *aaSyncBuf) String() string {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	return b.buf.String()
++}
++
++// aaServer is one spawned instance; dbPath/photoDir are remembered so a
++// second spawn can reuse the same directories.
++type aaServer struct {
++	cmd      *exec.Cmd
++	baseURL  string
++	dbPath   string
++	photoDir string
++	out      *aaSyncBuf
++	stopped  bool
++}
++
++// aaSpawnDir starts the server (APP_ENV=test) on its own free port with the
++// dummy .env.test secrets; empty dbPath/photoDir mean fresh paths under a
++// t.TempDir().
++func aaSpawnDir(t *testing.T, dbPath, photoDir string) *aaServer {
++	t.Helper()
++	bin := aaFindBin(t)
++	dir := t.TempDir()
++	if dbPath == "" {
++		dbPath = filepath.Join(dir, "app.db")
++	}
++	if photoDir == "" {
++		photoDir = filepath.Join(dir, "photos")
++	}
++	port := aaFreePort(t)
++	base := "http://127.0.0.1:" + strconv.Itoa(port)
++	out := &aaSyncBuf{}
++	cmd := exec.Command(bin)
++	cmd.Dir = dir
++	cmd.Env = []string{
++		"PORT=" + strconv.Itoa(port),
++		"APP_ENV=test",
++		"BASE_URL=" + base,
++		"DB_PATH=" + dbPath,
++		"PHOTO_DIR=" + photoDir,
++		"SESSION_KEY=dGVzdC1zZXNzaW9uLWtleS0zMi1ieXRlcy1hYQ==",
++		"IP_HASH_KEY=dGVzdC1pcGhhc2gta2V5LTMyLWJ5dGVzLWJi",
++		"ADMIN_TOKEN=" + aaAdminToken,
++		"TOWN_BBOX=42.70,-71.09,42.82,-70.96",
++		"TZ=America/New_York",
++		"PATH=" + os.Getenv("PATH"),
++	}
++	cmd.Stdout, cmd.Stderr = out, out
++	if err := cmd.Start(); err != nil {
++		t.Fatalf("start %s: %v", bin, err)
++	}
++	s := &aaServer{cmd: cmd, baseURL: base, dbPath: dbPath, photoDir: photoDir, out: out}
++	aaWaitHealthy(t, s, 5*time.Second)
++	return s
++}
++
++// aaKill is the cleanup stop (SIGKILL + wait), idempotent.
++func aaKill(t *testing.T, s *aaServer) {
++	t.Helper()
++	if s.stopped {
++		return
++	}
++	s.stopped = true
++	_ = s.cmd.Process.Kill()
++	_ = s.cmd.Wait()
++}
++
++// aaFindBin resolves the server binary: $BIN, else bin/server walked up from
++// the test working directory to the repo root. A missing binary is a failure.
++func aaFindBin(t *testing.T) string {
++	t.Helper()
++	if p := os.Getenv("BIN"); p != "" {
++		abs, err := filepath.Abs(p)
++		if err != nil {
++			t.Fatalf("BIN=%q: %v", p, err)
++		}
++		if _, err := os.Stat(abs); err != nil {
++			t.Fatalf("BIN=%q: %v", p, err)
++		}
++		return abs
++	}
++	dir, err := os.Getwd()
++	if err != nil {
++		t.Fatalf("getwd: %v", err)
++	}
++	for i := 0; i < 8; i++ {
++		cand := filepath.Join(dir, "bin", "server")
++		if st, err := os.Stat(cand); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
++			return cand
++		}
++		parent := filepath.Dir(dir)
++		if parent == dir {
++			break
++		}
++		dir = parent
++	}
++	t.Fatal("server binary not found: run `make build` or set BIN")
++	return ""
++}
++
++// aaFreePort picks a free TCP port by listening on 127.0.0.1:0 and closing.
++func aaFreePort(t *testing.T) int {
++	t.Helper()
++	l, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatalf("listen :0: %v", err)
++	}
++	defer l.Close()
++	return l.Addr().(*net.TCPAddr).Port
++}
++
++// aaWaitHealthy polls /healthz until 200 with a context deadline; a hung or
++// crashed server fails the test with its output instead of hanging.
++func aaWaitHealthy(t *testing.T, s *aaServer, timeout time.Duration) {
++	t.Helper()
++	ctx, cancel := context.WithTimeout(context.Background(), timeout)
++	defer cancel()
++	client := &http.Client{Timeout: 1 * time.Second}
++	for {
++		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+"/healthz", nil)
++		if err != nil {
++			t.Fatalf("new request: %v", err)
++		}
++		if resp, err := client.Do(req); err == nil {
++			_, _ = io.Copy(io.Discard, resp.Body)
++			_ = resp.Body.Close()
++			if resp.StatusCode == http.StatusOK {
++				return
++			}
++		}
++		select {
++		case <-ctx.Done():
++			aaKill(t, s)
++			t.Fatalf("server not healthy within %s; output:\n%s", timeout, s.out.String())
++		case <-time.After(50 * time.Millisecond):
++		}
++	}
++}
+diff --git a/acceptance/drafts/admin_lights_go_test.go.txt b/acceptance/drafts/admin_lights_go_test.go.txt
+new file mode 100644
+index 0000000..a45986e
+--- /dev/null
++++ b/acceptance/drafts/admin_lights_go_test.go.txt
+@@ -0,0 +1,945 @@
++//go:build acceptance
++
++// @A-204..@A-209 — admin inventory CRUD over HTTP: bbox rejection, photo
++// pipeline, no-stray-files, duplicates, edit/soft-delete, pagination (frozen
++// contract, written by T-200 before the feature tasks branch).
++//
++// INERT DRAFT: `.go.txt` is compiled by nothing. T-207 activates it by pure
++// rename with NO content edits (a gofmt pass is the only sanctioned step):
++//
++//	git mv acceptance/drafts/admin_lights_go_test.go.txt acceptance/go/admin_lights_test.go
++//
++// Contract owners: T-204 (bbox), T-202/T-206 (photo pipeline), T-201 (store
++// + duplicates + soft delete), T-205 (admin pages + HTMX pagination). It
++// FAILS against current main by design (no /admin routes exist yet).
++//
++// Frozen routes and request/response contract (workers build to this
++// EXACTLY; full table in acceptance/drafts/README.md):
++//
++//	POST /admin/lights            multipart: csrf_token, label, kind
++//	                              (park|building|street), lat, lon,
++//	                              asset_no?, photo?, dup_choice?
++//	                              -> 303 Location: /admin/lights/{id} (no-JS)
++//	                              -> 409 body contains "Possible duplicate"
++//	                                 (dup panel) when dup_choice is absent
++//	                              -> 422 body contains
++//	                                 "outside Groveland town bounds"
++//	                              -> 413 over the 15 MB upload cap
++//	                              -> 415 wrong type / HEIC (HEIC body says
++//	                                 "please choose JPEG") / >40 MP bomb
++//	GET  /admin/lights/{id}       detail page; 404 once soft-deleted; the
++//	                              photo appears as src="/photos/..."
++//	POST /admin/lights/{id}       edit (multipart: csrf_token + label...),
++//	                              303 back to the detail page
++//	POST /admin/lights/{id}/delete  soft delete (multipart: csrf_token), 303
++//	                              to /admin
++//	GET  /admin                   list page: heading "Lights", the 50 most
++//	                              recent lights (ORDER BY created_at DESC,
++//	                              id DESC), one <img alt="<label>"> per row
++//	                              (placeholder thumbnails allowed)
++//	GET  /admin/rows?page=N       HTMX rows fragment; without HX-Request it
++//	                              must 303 to /admin?page=N
++//	GET  /photos/...              served, re-encoded photos: image/jpeg,
++//	                              long edge <= 1600, no APP1 segment
++package acceptance
++
++import (
++	"bytes"
++	"context"
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"io"
++	"mime/multipart"
++	"net"
++	"net/http"
++	"net/http/cookiejar"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"regexp"
++	"strconv"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++)
++
++// alAdminToken mirrors .env.test (the spawned server gets the same value).
++const alAdminToken = "dGVzdC1hZG1pbi10b2tlbi0zMi1ieXRl"
++
++var (
++	alReCSRF    = regexp.MustCompile(`<input[^>]*name="csrf_token"[^>]*>`)
++	alReValue   = regexp.MustCompile(`value="([^"]*)"`)
++	alRePhotoSw = regexp.MustCompile(`src="(/photos/[^"]+)"`)
++)
++
++// alAltRe matches the per-row thumbnail alt attribute for one label.
++func alAltRe(label string) *regexp.Regexp {
++	return regexp.MustCompile(`alt="` + regexp.QuoteMeta(label) + `"`)
++}
++
++// alAltAssetRe matches per-row thumbnails of lights carrying an asset_no:
++// the frozen alt format is "<asset_no> <label>".
++func alAltAssetRe(assetNo string) *regexp.Regexp {
++	return regexp.MustCompile(`alt="` + regexp.QuoteMeta(assetNo) + ` `)
++}
++
++// TestA204OutsideBBox: a create whose coordinates fall outside TOWN_BBOX is
++// rejected with 422 and the frozen message.
++func TestA204OutsideBBox(t *testing.T) {
++	s := alSpawnDir(t, "", "")
++	t.Cleanup(func() { alKill(t, s) })
++	c, csrf := alLogin(t, s)
++
++	status, _, body := alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf,
++		"label":      "Out of town lamp",
++		"kind":       "park",
++		"lat":        "42.36",
++		"lon":        "-71.06",
++	}, "", nil)
++	if status != http.StatusUnprocessableEntity {
++		t.Fatalf("POST /admin/lights outside bbox: status %d, want 422; body:\n%s", status, body)
++	}
++	if !strings.Contains(body, "outside Groveland town bounds") {
++		t.Errorf("POST /admin/lights outside bbox: body lacks the frozen rejection message; body:\n%s", body)
++	}
++}
++
++// TestA205Duplicates: the same asset_no posted again (nearby) raises the
++// duplicate panel (409 + "Possible duplicate"); dup_choice=merge collapses
++// the pair into one row; unnumbered lights within ~5 m raise the same panel
++// and dup_choice=save keeps both.
++func TestA205Duplicates(t *testing.T) {
++	s := alSpawnDir(t, "", "")
++	t.Cleanup(func() { alKill(t, s) })
++	c, csrf := alLogin(t, s)
++
++	// Seed GP-017 (the plan's illustrative park fixture).
++	status, _, body := alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf, "asset_no": "GP-017", "label": "Ball field lamp",
++		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
++	}, "", nil)
++	if status != http.StatusSeeOther {
++		t.Fatalf("create GP-017: status %d, want 303; body:\n%s", status, body)
++	}
++
++	// Same asset_no nearby -> duplicate panel.
++	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf, "asset_no": "GP-017", "label": "Ball field lamp twin",
++		"kind": "park", "lat": "42.76175", "lon": "-71.03035",
++	}, "", nil)
++	if status != http.StatusConflict {
++		t.Fatalf("duplicate asset_no: status %d, want 409; body:\n%s", status, body)
++	}
++	if !strings.Contains(body, "Possible duplicate") {
++		t.Errorf("duplicate asset_no: body lacks the frozen panel heading; body:\n%s", body)
++	}
++
++	// Explicit merge -> success and still exactly one GP-017 row.
++	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf, "asset_no": "GP-017", "label": "Ball field lamp twin",
++		"kind": "park", "lat": "42.76175", "lon": "-71.03035", "dup_choice": "merge",
++	}, "", nil)
++	if status != http.StatusSeeOther {
++		t.Fatalf("merge duplicate: status %d, want 303; body:\n%s", status, body)
++	}
++	// Thumbnail alt = "<asset_no> <label>", so exactly one row's alt starts
++	// with "GP-017 " after the merge.
++	list := alGet(t, c, s.baseURL+"/admin")
++	if got := len(alAltAssetRe("GP-017").FindAllString(list, -1)); got != 1 {
++		t.Errorf("after merge the list shows %d rows for asset GP-017, want exactly 1;\n%s", got, list)
++	}
++
++	// Unnumbered fixture, then a second unnumbered one ~4.5 m away.
++	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf, "label": "Path light one",
++		"kind": "park", "lat": "42.7625", "lon": "-71.0295",
++	}, "", nil)
++	if status != http.StatusSeeOther {
++		t.Fatalf("create unnumbered A: status %d, want 303; body:\n%s", status, body)
++	}
++	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf, "label": "Path light two",
++		"kind": "park", "lat": "42.76254", "lon": "-71.0295",
++	}, "", nil)
++	if status != http.StatusConflict {
++		t.Fatalf("unnumbered within 8 m: status %d, want 409; body:\n%s", status, body)
++	}
++	if !strings.Contains(body, "Possible duplicate") {
++		t.Errorf("unnumbered within 8 m: body lacks the frozen panel heading; body:\n%s", body)
++	}
++
++	// Explicit save-anyway -> success, two distinct lights exist.
++	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf, "label": "Path light two",
++		"kind": "park", "lat": "42.76254", "lon": "-71.0295", "dup_choice": "save",
++	}, "", nil)
++	if status != http.StatusSeeOther {
++		t.Fatalf("save-anyway duplicate: status %d, want 303; body:\n%s", status, body)
++	}
++	list = alGet(t, c, s.baseURL+"/admin")
++	for _, label := range []string{"Path light one", "Path light two"} {
++		if got := len(alAltRe(label).FindAllString(list, -1)); got != 1 {
++			t.Errorf("after save-anyway the list shows %q %d times, want exactly 1 (one row per light)", label, got)
++		}
++	}
++}
++
++// TestA206PhotoPipeline: the flagship portrait fixture (600x800, EXIF
++// Orientation=6, GPS IFD) comes back re-encoded: JPEG, no APP1 segment at
++// all (so no EXIF GPS), long edge within 1600 px, and wider than tall
++// (orientation applied). HEIC, a text file and a pixel bomb are refused with
++// 415 (HEIC with the frozen wording); an over-cap upload gets 413.
++func TestA206PhotoPipeline(t *testing.T) {
++	s := alSpawnDir(t, "", "")
++	t.Cleanup(func() { alKill(t, s) })
++	c, csrf := alLogin(t, s)
++
++	portrait := alFixture(t, "portrait-orient6-gps.jpg")
++
++	status, header, body := alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf, "label": "Photo pipeline lamp",
++		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
++	}, "portrait-orient6-gps.jpg", portrait)
++	if status != http.StatusSeeOther {
++		t.Fatalf("create with photo: status %d, want 303; body:\n%s", status, body)
++	}
++	detailURL := header.Get("Location")
++	if !strings.HasPrefix(detailURL, "/admin/lights/") {
++		t.Fatalf("create with photo: Location = %q, want /admin/lights/{id}", detailURL)
++	}
++
++	// The detail page points at the stored photo via /photos/...
++	detail := alGet(t, c, s.baseURL+detailURL)
++	m := alRePhotoSw.FindStringSubmatch(detail)
++	if m == nil {
++		t.Fatalf("detail page has no photo src=\"/photos/...\"; body:\n%s", detail)
++	}
++	photoHeader, served := alGetPhoto(t, c, s.baseURL+m[1])
++	if ct := photoHeader.Get("Content-Type"); !strings.HasPrefix(ct, "image/jpeg") {
++		t.Fatalf("GET %s: Content-Type = %q, want image/jpeg", m[1], ct)
++	}
++	if app1, ok := alFindApp1(served); ok {
++		t.Errorf("served photo still carries an APP1 segment (%d bytes): metadata must be stripped", len(app1))
++	}
++	if alHasExifGps(served) {
++		t.Errorf("served photo still carries EXIF GPS data")
++	}
++	w, h, err := alJpegDims(served)
++	if err != nil {
++		t.Fatalf("served photo: %v", err)
++	}
++	if w > 1600 || h > 1600 {
++		t.Errorf("served photo is %dx%d; long edge must be <= 1600", w, h)
++	}
++	if w <= h {
++		t.Errorf("served photo is %dx%d; EXIF Orientation=6 must make it wider than tall (800x600)", w, h)
++	}
++
++	// HEIC sniffed and refused with the frozen wording.
++	heic := alFixture(t, "heic.bin")
++	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf, "label": "Heic lamp",
++		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
++	}, "heic.bin", heic)
++	if status != http.StatusUnsupportedMediaType {
++		t.Fatalf("HEIC upload: status %d, want 415; body:\n%s", status, body)
++	}
++	if !strings.Contains(body, "please choose JPEG") {
++		t.Errorf("HEIC upload: body lacks the frozen wording \"please choose JPEG\"; body:\n%s", body)
++	}
++
++	// A text file with a .jpg name is refused on sniffing.
++	textAs := alFixture(t, "text-as.jpg")
++	status, _, _ = alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf, "label": "Text lamp",
++		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
++	}, "text-as.jpg", textAs)
++	if status != http.StatusUnsupportedMediaType {
++		t.Fatalf("text-as.jpg upload: status %d, want 415", status)
++	}
++
++	// A PNG whose header claims 50000x50000 is refused.
++	bomb := alFixture(t, "pixelbomb.png")
++	status, _, _ = alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf, "label": "Bomb lamp",
++		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
++	}, "pixelbomb.png", bomb)
++	if status != http.StatusUnsupportedMediaType {
++		t.Fatalf("pixelbomb.png upload: status %d, want 415", status)
++	}
++
++	// A body past the 15 MB cap (valid JPEG + junk after EOI) gets 413.
++	oversize := alOversizeJPEG(t, "landscape.jpg", 16<<20)
++	status, _, _ = alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf, "label": "Oversize lamp",
++		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
++	}, "big.jpg", oversize)
++	if status != http.StatusRequestEntityTooLarge {
++		t.Fatalf("oversize upload: status %d, want 413", status)
++	}
++}
++
++// TestA207NoStrayFiles: every rejected upload must leave PHOTO_DIR untouched;
++// the happy path stores exactly one new .jpg.
++func TestA207NoStrayFiles(t *testing.T) {
++	s := alSpawnDir(t, "", "") // fresh PHOTO_DIR under its own t.TempDir()
++	t.Cleanup(func() { alKill(t, s) })
++	c, csrf := alLogin(t, s)
++
++	rejects := []struct {
++		name   string
++		file   string
++		status int
++	}{
++		{"heic", "heic.bin", http.StatusUnsupportedMediaType},
++		{"text-as-jpg", "text-as.jpg", http.StatusUnsupportedMediaType},
++		{"pixelbomb", "pixelbomb.png", http.StatusUnsupportedMediaType},
++		{"oversize", "", http.StatusRequestEntityTooLarge},
++	}
++	before := alCountFiles(t, s.photoDir)
++	for _, r := range rejects {
++		var data []byte
++		fileName := r.file
++		if r.name == "oversize" {
++			data = alOversizeJPEG(t, "landscape.jpg", 16<<20)
++			fileName = "big.jpg"
++		} else {
++			data = alFixture(t, r.file)
++		}
++		status, _, body := alCreate(t, c, s.baseURL, map[string]string{
++			"csrf_token": csrf, "label": "Stray " + r.name,
++			"kind": "park", "lat": "42.7617", "lon": "-71.0303",
++		}, fileName, data)
++		if status != r.status {
++			t.Fatalf("%s upload: status %d, want %d; body:\n%s", r.name, status, r.status, body)
++		}
++		if got := alCountFiles(t, s.photoDir); got != before {
++			t.Fatalf("%s upload left stray files: PHOTO_DIR held %d files before, %d after", r.name, before, got)
++		}
++	}
++
++	// Happy path: exactly one new file appears, and it is a .jpg.
++	happy := alFixture(t, "landscape.jpg")
++	status, _, body := alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf, "label": "Happy path lamp",
++		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
++	}, "landscape.jpg", happy)
++	if status != http.StatusSeeOther {
++		t.Fatalf("happy-path upload: status %d, want 303; body:\n%s", status, body)
++	}
++	names := alListFiles(t, s.photoDir)
++	if len(names) != before+1 {
++		t.Fatalf("happy-path upload: PHOTO_DIR held %d files before, %d after; want exactly one new file", before, len(names))
++	}
++	if !strings.HasSuffix(names[len(names)-1], ".jpg") {
++		t.Errorf("stored photo %q is not a .jpg", names[len(names)-1])
++	}
++}
++
++// TestA208EditSoftDelete: a label edit shows on the detail page; a delete
++// makes the detail 404 and removes the light from the list.
++func TestA208EditSoftDelete(t *testing.T) {
++	s := alSpawnDir(t, "", "")
++	t.Cleanup(func() { alKill(t, s) })
++	c, csrf := alLogin(t, s)
++
++	status, header, body := alCreate(t, c, s.baseURL, map[string]string{
++		"csrf_token": csrf, "asset_no": "GP-018", "label": "Old label",
++		"kind": "park", "lat": "42.7620", "lon": "-71.0290",
++	}, "", nil)
++	if status != http.StatusSeeOther {
++		t.Fatalf("create GP-018: status %d, want 303; body:\n%s", status, body)
++	}
++	detailURL := header.Get("Location")
++
++	// Edit: relabel; the detail page shows the new label.
++	status, _, body = alPostMultipart(t, c, s.baseURL+detailURL, map[string]string{
++		"csrf_token": csrf, "label": "New label",
++	}, "", "", nil, false)
++	if status != http.StatusSeeOther {
++		t.Fatalf("edit label: status %d, want 303; body:\n%s", status, body)
++	}
++	if detail := alGet(t, c, s.baseURL+detailURL); !strings.Contains(detail, "New label") {
++		t.Errorf("detail page after edit lacks \"New label\"; body:\n%s", detail)
++	}
++
++	// Soft delete: detail 404s, list no longer mentions the light.
++	status, _, body = alPostMultipart(t, c, s.baseURL+detailURL+"/delete", map[string]string{
++		"csrf_token": csrf,
++	}, "", "", nil, false)
++	if status != http.StatusSeeOther {
++		t.Fatalf("delete: status %d, want 303; body:\n%s", status, body)
++	}
++	if status, _, _ := alDo(t, c, http.MethodGet, s.baseURL+detailURL, nil, false); status != http.StatusNotFound {
++		t.Errorf("detail after delete: status %d, want 404", status)
++	}
++	if list := alGet(t, c, s.baseURL+"/admin"); strings.Contains(list, "New label") {
++		t.Errorf("list after delete still mentions the deleted light; body:\n%s", list)
++	}
++}
++
++// TestA209Pagination: 55 photo-less creates; /admin lists the 50 newest and
++// not the 5 oldest; /admin/rows?page=2 is the HTMX fragment (303 to
++// /admin?page=2 without the header, the remaining 5 with it).
++func TestA209Pagination(t *testing.T) {
++	s := alSpawnDir(t, "", "")
++	t.Cleanup(func() { alKill(t, s) })
++	c, csrf := alLogin(t, s)
++
++	for i := 1; i <= 55; i++ {
++		fields := map[string]string{
++			"csrf_token": csrf,
++			"label":      fmt.Sprintf("Pagination lamp %02d", i),
++			"kind":       "park",
++			"lat":        strconv.FormatFloat(42.76+float64(i)*0.0005, 'f', 7, 64),
++			"lon":        strconv.FormatFloat(-71.045+float64(i)*0.0005, 'f', 7, 64),
++		}
++		status, _, body := alCreate(t, c, s.baseURL, fields, "", nil)
++		if status != http.StatusSeeOther {
++			t.Fatalf("create Pagination lamp %02d: status %d, want 303; body:\n%s", i, status, body)
++		}
++	}
++
++	list := alGet(t, c, s.baseURL+"/admin")
++	if !strings.Contains(list, ">Lights<") {
++		t.Errorf("GET /admin: missing the \"Lights\" heading; body:\n%.400s", list)
++	}
++	for i := 6; i <= 55; i++ {
++		if want := fmt.Sprintf("Pagination lamp %02d", i); !strings.Contains(list, want) {
++			t.Errorf("GET /admin: newest-50 page lacks %q", want)
++		}
++	}
++	for i := 1; i <= 5; i++ {
++		if stale := fmt.Sprintf("Pagination lamp %02d", i); strings.Contains(list, stale) {
++			t.Errorf("GET /admin: page 1 still shows the oldest light %q", stale)
++		}
++	}
++
++	// Without HX-Request the rows endpoint redirects to the full page.
++	status, header, _ := alDo(t, c, http.MethodGet, s.baseURL+"/admin/rows?page=2", nil, false)
++	if status != http.StatusSeeOther {
++		t.Fatalf("GET /admin/rows?page=2 (no HX-Request): status %d, want 303", status)
++	}
++	if loc := header.Get("Location"); loc != "/admin?page=2" {
++		t.Fatalf("GET /admin/rows?page=2 (no HX-Request): Location = %q, want /admin?page=2", loc)
++	}
++
++	// With HX-Request it returns the fragment holding the remaining 5.
++	status, _, frag := alDo(t, c, http.MethodGet, s.baseURL+"/admin/rows?page=2", nil, true)
++	if status != http.StatusOK {
++		t.Fatalf("GET /admin/rows?page=2 (HX-Request): status %d, want 200", status)
++	}
++	for i := 1; i <= 5; i++ {
++		if want := fmt.Sprintf("Pagination lamp %02d", i); !strings.Contains(frag, want) {
++			t.Errorf("fragment page 2 lacks %q; fragment:\n%.400s", want, frag)
++		}
++	}
++	if strings.Contains(frag, "Pagination lamp 06") {
++		t.Errorf("fragment page 2 overlaps page 1 (contains \"Pagination lamp 06\")")
++	}
++}
++
++// --- al helpers (self-contained on purpose: activation is a pure rename,
++// so this file must not depend on helpers defined elsewhere in the package) ---
++
++// alLogin exchanges the one-time ADMIN_TOKEN for a session cookie and parses
++// the CSRF token from the walk page's add-light form.
++func alLogin(t *testing.T, s *alServer) (*http.Client, string) {
++	t.Helper()
++	c := alClient(t)
++	status, _, _ := alDo(t, c, http.MethodGet, s.baseURL+"/admin/login?token="+alAdminToken, nil, false)
++	if status != http.StatusFound {
++		t.Fatalf("admin login: status %d, want 302 (token exchange failed)", status)
++	}
++	return c, alCSRF(t, c, s.baseURL)
++}
++
++// alCSRF fetches the walk page and extracts the add-light form's csrf_token.
++func alCSRF(t *testing.T, c *http.Client, base string) string {
++	t.Helper()
++	status, _, body := alDo(t, c, http.MethodGet, base+"/admin/walk", nil, false)
++	if status != http.StatusOK {
++		t.Fatalf("GET /admin/walk: status %d, want 200; body:\n%s", status, body)
++	}
++	input := alReCSRF.FindString(body)
++	if input == "" {
++		t.Fatalf("GET /admin/walk: no hidden input named csrf_token; body:\n%s", body)
++	}
++	v := alReValue.FindStringSubmatch(input)
++	if v == nil {
++		t.Fatalf("GET /admin/walk: csrf_token input has no value; body:\n%s", body)
++	}
++	return v[1]
++}
++
++// alCreate POSTs the add-light form (multipart) without HX-Request.
++func alCreate(t *testing.T, c *http.Client, base string, fields map[string]string, photoName string, photoData []byte) (int, http.Header, string) {
++	t.Helper()
++	return alPostMultipart(t, c, base+"/admin/lights", fields, "photo", photoName, photoData, false)
++}
++
++// alPostMultipart builds one multipart/form-data request. fileField=""
++// means no file part.
++func alPostMultipart(t *testing.T, c *http.Client, target string, fields map[string]string, fileField, fileName string, fileData []byte, hx bool) (int, http.Header, string) {
++	t.Helper()
++	var buf bytes.Buffer
++	w := multipart.NewWriter(&buf)
++	for k, v := range fields {
++		if err := w.WriteField(k, v); err != nil {
++			t.Fatalf("multipart field %s: %v", k, err)
++		}
++	}
++	if fileField != "" {
++		fw, err := w.CreateFormFile(fileField, fileName)
++		if err != nil {
++			t.Fatalf("multipart file %s: %v", fileName, err)
++		}
++		if _, err := fw.Write(fileData); err != nil {
++			t.Fatalf("multipart write %s: %v", fileName, err)
++		}
++	}
++	if err := w.Close(); err != nil {
++		t.Fatalf("multipart close: %v", err)
++	}
++	req, err := http.NewRequest(http.MethodPost, target, &buf)
++	if err != nil {
++		t.Fatalf("POST %s: %v", target, err)
++	}
++	req.Header.Set("Content-Type", w.FormDataContentType())
++	if hx {
++		req.Header.Set("HX-Request", "true")
++	}
++	resp, err := c.Do(req)
++	if err != nil {
++		t.Fatalf("POST %s: %v", target, err)
++	}
++	defer resp.Body.Close()
++	b, err := io.ReadAll(resp.Body)
++	if err != nil {
++		t.Fatalf("POST %s: read body: %v", target, err)
++	}
++	return resp.StatusCode, resp.Header, string(b)
++}
++
++// alDo performs one request, optionally with HX-Request: true.
++func alDo(t *testing.T, c *http.Client, method, target string, body io.Reader, hx bool) (int, http.Header, string) {
++	t.Helper()
++	req, err := http.NewRequest(method, target, body)
++	if err != nil {
++		t.Fatalf("%s %s: %v", method, target, err)
++	}
++	if hx {
++		req.Header.Set("HX-Request", "true")
++	}
++	resp, err := c.Do(req)
++	if err != nil {
++		t.Fatalf("%s %s: %v", method, target, err)
++	}
++	defer resp.Body.Close()
++	b, err := io.ReadAll(resp.Body)
++	if err != nil {
++		t.Fatalf("%s %s: read body: %v", method, target, err)
++	}
++	return resp.StatusCode, resp.Header, string(b)
++}
++
++// alGet fetches a page and requires 200.
++func alGet(t *testing.T, c *http.Client, target string) string {
++	t.Helper()
++	status, _, body := alDo(t, c, http.MethodGet, target, nil, false)
++	if status != http.StatusOK {
++		t.Fatalf("GET %s: status %d, want 200; body:\n%s", target, status, body)
++	}
++	return body
++}
++
++// alGetPhoto fetches a binary URL and requires 200, returning headers and
++// the raw bytes.
++func alGetPhoto(t *testing.T, c *http.Client, target string) (http.Header, []byte) {
++	t.Helper()
++	req, err := http.NewRequest(http.MethodGet, target, nil)
++	if err != nil {
++		t.Fatalf("GET %s: %v", target, err)
++	}
++	resp, err := c.Do(req)
++	if err != nil {
++		t.Fatalf("GET %s: %v", target, err)
++	}
++	defer resp.Body.Close()
++	b, err := io.ReadAll(resp.Body)
++	if err != nil {
++		t.Fatalf("GET %s: read body: %v", target, err)
++	}
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("GET %s: status %d, want 200", target, resp.StatusCode)
++	}
++	return resp.Header, b
++}
++
++// alFixture walks up from the working directory to the repo root and reads
++// testdata/photos/<name>.
++func alFixture(t *testing.T, name string) []byte {
++	t.Helper()
++	dir, err := os.Getwd()
++	if err != nil {
++		t.Fatalf("getwd: %v", err)
++	}
++	for i := 0; i < 8; i++ {
++		cand := filepath.Join(dir, "testdata", "photos", name)
++		if b, err := os.ReadFile(cand); err == nil {
++			return b
++		}
++		parent := filepath.Dir(dir)
++		if parent == dir {
++			break
++		}
++		dir = parent
++	}
++	t.Fatalf("fixture testdata/photos/%s not found (run from the repo root)", name)
++	return nil
++}
++
++// alOversizeJPEG pads a valid fixture JPEG (after its EOI marker) past the
++// 15 MB upload cap; total is at least want bytes.
++func alOversizeJPEG(t *testing.T, fixture string, want int) []byte {
++	t.Helper()
++	base := alFixture(t, fixture)
++	if len(base) >= want {
++		t.Fatalf("fixture %s is already %d bytes; pick a larger target", fixture, len(base))
++	}
++	out := make([]byte, 0, want)
++	out = append(out, base...)
++	out = append(out, bytes.Repeat([]byte{0x55}, want-len(base))...)
++	return out
++}
++
++// alCountFiles counts regular files under dir (0 when it does not exist).
++func alCountFiles(t *testing.T, dir string) int {
++	t.Helper()
++	names := alListFiles(t, dir)
++	return len(names)
++}
++
++// alListFiles lists regular files under dir, sorted (0-entry slice when the
++// directory does not exist yet).
++func alListFiles(t *testing.T, dir string) []string {
++	t.Helper()
++	var names []string
++	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
++		if err != nil {
++			if os.IsNotExist(err) {
++				return nil
++			}
++			return err
++		}
++		if !d.IsDir() {
++			names = append(names, p)
++		}
++		return nil
++	})
++	if err != nil {
++		t.Fatalf("walk %s: %v", dir, err)
++	}
++	return names
++}
++
++// alFindApp1 returns the first APP1 segment payload, if any.
++func alFindApp1(data []byte) ([]byte, bool) {
++	i, _, next, ok := alWalkToMarker(data, 2, 0xe1)
++	if !ok {
++		return nil, false
++	}
++	return data[i+4 : next], true
++}
++
++// alHasExifGps reports whether the JPEG bytes carry an EXIF APP1 segment
++// whose GPSInfo pointer (tag 0x8825) resolves to a non-empty IFD.
++func alHasExifGps(data []byte) bool {
++	i, _, next, ok := alWalkToMarker(data, 2, 0xe1)
++	if !ok {
++		return false
++	}
++	seg := data[i+4 : next]
++	if len(seg) < 6 || string(seg[:6]) != "Exif\x00\x00" {
++		return false
++	}
++	return alTiffHasGps(seg[6:])
++}
++
++// alTiffHasGps parses a TIFF header (either endianness) and reports whether
++// IFD0 holds a GPSInfo pointer to a non-empty IFD.
++func alTiffHasGps(tiff []byte) bool {
++	if len(tiff) < 8 {
++		return false
++	}
++	var le bool
++	switch {
++	case bytes.Equal(tiff[:2], []byte("II")):
++		le = true
++	case bytes.Equal(tiff[:2], []byte("MM")):
++		le = false
++	default:
++		return false
++	}
++	u16 := func(o int) int {
++		if le {
++			return int(binary.LittleEndian.Uint16(tiff[o : o+2]))
++		}
++		return int(binary.BigEndian.Uint16(tiff[o : o+2]))
++	}
++	u32 := func(o int) int {
++		if le {
++			return int(binary.LittleEndian.Uint32(tiff[o : o+4]))
++		}
++		return int(binary.BigEndian.Uint32(tiff[o : o+4]))
++	}
++	ifd0 := u32(4)
++	if ifd0+2 > len(tiff) {
++		return false
++	}
++	for e := 0; e < u16(ifd0); e++ {
++		base := ifd0 + 2 + e*12
++		if base+12 > len(tiff) {
++			return false
++		}
++		if u16(base) == 0x8825 {
++			gps := u32(base + 8)
++			return gps+2 <= len(tiff) && u16(gps) > 0
++		}
++	}
++	return false
++}
++
++// alJpegDims parses the frame dimensions from the first SOF marker
++// (baseline or progressive).
++func alJpegDims(data []byte) (int, int, error) {
++	i := 2
++	for i+4 <= len(data) {
++		if data[i] != 0xff {
++			return 0, 0, errors.New("jpeg dims: lost marker synchronisation")
++		}
++		marker := int(data[i+1])
++		switch {
++		case marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7):
++			i += 2
++			continue
++		case marker == 0xd9 || marker == 0xda:
++			return 0, 0, errors.New("jpeg dims: no SOF marker before the scan data")
++		}
++		segLen := int(binary.BigEndian.Uint16(data[i+2 : i+4]))
++		next := i + 2 + segLen
++		if segLen < 2 || next > len(data) {
++			return 0, 0, errors.New("jpeg dims: malformed segment length")
++		}
++		if marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc {
++			if next < i+9 {
++				return 0, 0, errors.New("jpeg dims: truncated SOF segment")
++			}
++			h := int(binary.BigEndian.Uint16(data[i+5 : i+7]))
++			w := int(binary.BigEndian.Uint16(data[i+7 : i+9]))
++			return w, h, nil
++		}
++		i = next
++	}
++	return 0, 0, errors.New("jpeg dims: no SOF marker found")
++}
++
++// alWalkToMarker scans JPEG segments from offset start until it finds the
++// requested marker; it returns the marker offset, the marker, the offset one
++// past the segment and whether the marker was found.
++func alWalkToMarker(data []byte, start int, want byte) (int, byte, int, bool) {
++	i := start
++	for i+4 <= len(data) {
++		if data[i] != 0xff {
++			return 0, 0, 0, false
++		}
++		marker := data[i+1]
++		if marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7) {
++			i += 2
++			continue
++		}
++		if marker == 0xd9 || marker == 0xda {
++			return 0, 0, 0, false // metadata only precedes the scan
++		}
++		segLen := int(binary.BigEndian.Uint16(data[i+2 : i+4]))
++		next := i + 2 + segLen
++		if segLen < 2 || next > len(data) {
++			return 0, 0, 0, false
++		}
++		if marker == want {
++			return i, marker, next, true
++		}
++		i = next
++	}
++	return 0, 0, 0, false
++}
++
++// alClient is a cookie-carrying client that never follows redirects (so the
++// 303s of the no-JS flows stay observable).
++func alClient(t *testing.T) *http.Client {
++	t.Helper()
++	jar, err := cookiejar.New(nil)
++	if err != nil {
++		t.Fatalf("cookie jar: %v", err)
++	}
++	return &http.Client{
++		Jar:     jar,
++		Timeout: 30 * time.Second,
++		CheckRedirect: func(req *http.Request, via []*http.Request) error {
++			return http.ErrUseLastResponse
++		},
++	}
++}
++
++type alSyncBuf struct {
++	mu  sync.Mutex
++	buf strings.Builder
++}
++
++func (b *alSyncBuf) Write(p []byte) (int, error) {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	return b.buf.Write(p)
++}
++
++func (b *alSyncBuf) String() string {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	return b.buf.String()
++}
++
++// alServer is one spawned instance.
++type alServer struct {
++	cmd      *exec.Cmd
++	baseURL  string
++	dbPath   string
++	photoDir string
++	out      *alSyncBuf
++	stopped  bool
++}
++
++// alSpawnDir starts the server (APP_ENV=test) on its own free port with the
++// dummy .env.test secrets; empty dbPath/photoDir mean fresh paths under a
++// t.TempDir().
++func alSpawnDir(t *testing.T, dbPath, photoDir string) *alServer {
++	t.Helper()
++	bin := alFindBin(t)
++	dir := t.TempDir()
++	if dbPath == "" {
++		dbPath = filepath.Join(dir, "app.db")
++	}
++	if photoDir == "" {
++		photoDir = filepath.Join(dir, "photos")
++	}
++	port := alFreePort(t)
++	base := "http://127.0.0.1:" + strconv.Itoa(port)
++	out := &alSyncBuf{}
++	cmd := exec.Command(bin)
++	cmd.Dir = dir
++	cmd.Env = []string{
++		"PORT=" + strconv.Itoa(port),
++		"APP_ENV=test",
++		"BASE_URL=" + base,
++		"DB_PATH=" + dbPath,
++		"PHOTO_DIR=" + photoDir,
++		"SESSION_KEY=dGVzdC1zZXNzaW9uLWtleS0zMi1ieXRlcy1hYQ==",
++		"IP_HASH_KEY=dGVzdC1pcGhhc2gta2V5LTMyLWJ5dGVzLWJi",
++		"ADMIN_TOKEN=" + alAdminToken,
++		"TOWN_BBOX=42.70,-71.09,42.82,-70.96",
++		"TZ=America/New_York",
++		"PATH=" + os.Getenv("PATH"),
++	}
++	cmd.Stdout, cmd.Stderr = out, out
++	if err := cmd.Start(); err != nil {
++		t.Fatalf("start %s: %v", bin, err)
++	}
++	s := &alServer{cmd: cmd, baseURL: base, dbPath: dbPath, photoDir: photoDir, out: out}
++	alWaitHealthy(t, s, 5*time.Second)
++	return s
++}
++
++// alKill is the cleanup stop (SIGKILL + wait), idempotent.
++func alKill(t *testing.T, s *alServer) {
++	t.Helper()
++	if s.stopped {
++		return
++	}
++	s.stopped = true
++	_ = s.cmd.Process.Kill()
++	_ = s.cmd.Wait()
++}
++
++// alFindBin resolves the server binary: $BIN, else bin/server walked up from
++// the test working directory to the repo root.
++func alFindBin(t *testing.T) string {
++	t.Helper()
++	if p := os.Getenv("BIN"); p != "" {
++		abs, err := filepath.Abs(p)
++		if err != nil {
++			t.Fatalf("BIN=%q: %v", p, err)
++		}
++		if _, err := os.Stat(abs); err != nil {
++			t.Fatalf("BIN=%q: %v", p, err)
++		}
++		return abs
++	}
++	dir, err := os.Getwd()
++	if err != nil {
++		t.Fatalf("getwd: %v", err)
++	}
++	for i := 0; i < 8; i++ {
++		cand := filepath.Join(dir, "bin", "server")
++		if st, err := os.Stat(cand); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
++			return cand
++		}
++		parent := filepath.Dir(dir)
++		if parent == dir {
++			break
++		}
++		dir = parent
++	}
++	t.Fatal("server binary not found: run `make build` or set BIN")
++	return ""
++}
++
++// alFreePort picks a free TCP port by listening on 127.0.0.1:0 and closing.
++func alFreePort(t *testing.T) int {
++	t.Helper()
++	l, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatalf("listen :0: %v", err)
++	}
++	defer l.Close()
++	return l.Addr().(*net.TCPAddr).Port
++}
++
++// alWaitHealthy polls /healthz until 200 with a context deadline; a hung or
++// crashed server fails the test with its output instead of hanging.
++func alWaitHealthy(t *testing.T, s *alServer, timeout time.Duration) {
++	t.Helper()
++	ctx, cancel := context.WithTimeout(context.Background(), timeout)
++	defer cancel()
++	client := &http.Client{Timeout: 1 * time.Second}
++	for {
++		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+"/healthz", nil)
++		if err != nil {
++			t.Fatalf("new request: %v", err)
++		}
++		if resp, err := client.Do(req); err == nil {
++			_, _ = io.Copy(io.Discard, resp.Body)
++			_ = resp.Body.Close()
++			if resp.StatusCode == http.StatusOK {
++				return
++			}
++		}
++		select {
++		case <-ctx.Done():
++			alKill(t, s)
++			t.Fatalf("server not healthy within %s; output:\n%s", timeout, s.out.String())
++		case <-time.After(50 * time.Millisecond):
++		}
++	}
++}
+diff --git a/acceptance/e2e/util/admin.ts b/acceptance/e2e/util/admin.ts
+new file mode 100644
+index 0000000..d05920c
+--- /dev/null
++++ b/acceptance/e2e/util/admin.ts
+@@ -0,0 +1,19 @@
++import type { Page } from '@playwright/test';
++
++/**
++ * Admin login helper for the M2 drafts (A-201). ACTIVE util (no tests of its
++ * own): it exchanges the ADMIN_TOKEN for an admin session by visiting the
++ * one-time login URL, then waits for the redirect that proves the session
++ * cookie landed. The token matches .env.test / playwright.config.ts /
++ * scripts/holdout-run.sh; ADMIN_TOKEN in the environment (when a runner
++ * exports it) wins.
++ */
++const DEFAULT_ADMIN_TOKEN = 'dGVzdC1hZG1pbi10b2tlbi0zMi1ieXRl';
++
++export async function loginAsAdmin(page: Page): Promise<void> {
++  const token = process.env.ADMIN_TOKEN ?? DEFAULT_ADMIN_TOKEN;
++  await page.goto(`/admin/login?token=${encodeURIComponent(token)}`);
++  // The valid-token exchange answers 302 to /admin (A-201); a wrong or
++  // replayed token would land on 403 instead and this wait would fail.
++  await page.waitForURL(/\/admin(?:\?|$)/);
++}
+diff --git a/acceptance/e2e/util/images.ts b/acceptance/e2e/util/images.ts
+new file mode 100644
+index 0000000..ca6390a
+--- /dev/null
++++ b/acceptance/e2e/util/images.ts
+@@ -0,0 +1,145 @@
++/**
++ * JPEG byte-inspection helpers for the M2 photo contract (A-206/A-207).
++ *
++ * ACTIVE helper (no tests of its own): the frozen drafts import these to
++ * prove, black-box, that a served photo was re-encoded — no EXIF GPS block
++ * survives and the long edge is within the 1600 px cap. Byte-level parsing
++ * only; no image decoding needed.
++ */
++
++/** Dimensions parsed from a JPEG SOF marker. */
++export interface JpegSize {
++  w: number;
++  h: number;
++}
++
++/**
++ * hasExifGps reports whether the JPEG bytes carry an EXIF APP1 segment that
++ * points at a GPS IFD (tag 0x8825 resolving to a non-empty IFD). A correct
++ * pipeline strips the whole APP1 segment, so this must be false for any
++ * served photo.
++ */
++export function hasExifGps(bytes: Uint8Array): boolean {
++  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
++    return false; // not a JPEG
++  }
++  let i = 2;
++  while (i + 4 <= bytes.length) {
++    if (bytes[i] !== 0xff) {
++      return false; // desynchronised; no metadata worth trusting
++    }
++    const marker = bytes[i + 1];
++    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
++      i += 2; // standalone marker, no length field
++      continue;
++    }
++    if (marker === 0xd9 || marker === 0xda) {
++      return false; // EOI / start of scan: metadata only precedes these
++    }
++    const len = (bytes[i + 2] << 8) | bytes[i + 3];
++    if (len < 2 || i + 2 + len > bytes.length) {
++      return false; // malformed segment length
++    }
++    if (marker === 0xe1) {
++      const seg = bytes.subarray(i + 4, i + 2 + len);
++      if (startsWith(seg, exifHeader) && tiffHasGpsIfd(seg.subarray(6))) {
++        return true;
++      }
++    }
++    i += 2 + len;
++  }
++  return false;
++}
++
++/**
++ * jpegSize parses the frame dimensions from the first SOF marker (SOF0, SOF1,
++ * SOF2, ... — progressive JPEGs included). Throws when no SOF is found: a
++ * caller asserting on a served photo wants a loud failure, not {0, 0}.
++ */
++export function jpegSize(bytes: Uint8Array): JpegSize {
++  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
++    throw new Error('jpegSize: not a JPEG (missing SOI)');
++  }
++  let i = 2;
++  while (i + 4 <= bytes.length) {
++    if (bytes[i] !== 0xff) {
++      throw new Error('jpegSize: lost marker synchronisation');
++    }
++    const marker = bytes[i + 1];
++    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
++      i += 2;
++      continue;
++    }
++    if (marker === 0xd9 || marker === 0xda) {
++      throw new Error('jpegSize: reached end of headers without a SOF marker');
++    }
++    const len = (bytes[i + 2] << 8) | bytes[i + 3];
++    if (len < 2 || i + 2 + len > bytes.length) {
++      throw new Error('jpegSize: malformed segment length');
++    }
++    // SOF0..SOF15 except DHT (0xc4), JPG (0xc8) and DAC (0xcc).
++    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
++      const h = (bytes[i + 5] << 8) | bytes[i + 6];
++      const w = (bytes[i + 7] << 8) | bytes[i + 8];
++      return { w, h };
++    }
++    i += 2 + len;
++  }
++  throw new Error('jpegSize: no SOF marker found');
++}
++
++const exifHeader = ascii('Exif\x00\x00');
++
++function ascii(s: string): Uint8Array {
++  return Uint8Array.from(s, (c) => c.charCodeAt(0));
++}
++
++function startsWith(b: Uint8Array, prefix: Uint8Array): boolean {
++  if (b.length < prefix.length) {
++    return false;
++  }
++  for (let i = 0; i < prefix.length; i++) {
++    if (b[i] !== prefix[i]) {
++      return false;
++    }
++  }
++  return true;
++}
++
++/**
++ * tiffHasGpsIfd parses a TIFF header (either endianness), walks the first IFD
++ * and reports whether the GPSInfo pointer tag (0x8825) resolves to an IFD
++ * holding at least one entry. Any malformed input reads as "no GPS".
++ */
++function tiffHasGpsIfd(tiff: Uint8Array): boolean {
++  if (tiff.length < 8) {
++    return false;
++  }
++  const little = tiff[0] === 0x49 && tiff[1] === 0x49;
++  const big = tiff[0] === 0x4d && tiff[1] === 0x4d;
++  if (!little && !big) {
++    return false;
++  }
++  const u16 = (o: number): number =>
++    little ? tiff[o] | (tiff[o + 1] << 8) : (tiff[o] << 8) | tiff[o + 1];
++  const u32 = (o: number): number =>
++    little
++      ? (tiff[o] | (tiff[o + 1] << 8) | (tiff[o + 2] << 16) | (tiff[o + 3] << 24)) >>> 0
++      : ((tiff[o] << 24) | (tiff[o + 1] << 16) | (tiff[o + 2] << 8) | tiff[o + 3]) >>> 0;
++  const ifd0 = u32(4);
++  if (ifd0 + 2 > tiff.length) {
++    return false;
++  }
++  const entries = u16(ifd0);
++  for (let e = 0; e < entries; e++) {
++    const base = ifd0 + 2 + e * 12;
++    if (base + 12 > tiff.length) {
++      return false;
++    }
++    if (u16(base) === 0x8825) {
++      const gps = u32(base + 8);
++      return gps + 2 <= tiff.length && u16(gps) > 0;
++    }
++  }
++  return false;
++}
+diff --git a/harness/handoffs/T-200.md b/harness/handoffs/T-200.md
+new file mode 100644
+index 0000000..e3eb577
+--- /dev/null
++++ b/harness/handoffs/T-200.md
+@@ -0,0 +1,136 @@
++# T-200 — M2 acceptance tests as inert drafts: fixtures, schema oracle, frozen UI contract
++
++Not blocked. All deliverables landed; every existing suite is green
++(`make check` exit 0, `make holdout` PASS); all drafts are proven red against
++current main (executed from a gitignored scratch staging area — details
++below) and proven compile-clean + gofmt-clean for T-207's pure-rename
++activation.
++
++## Files added (main repo, all committed)
++
++| Path | What |
++| --- | --- |
++| `testdata/photos/gen/main.go` | Deterministic fixture generator (stdlib only). `go run ./testdata/photos/gen` writes AND self-verifies all 7 fixtures; an optional argument overrides the output dir (used to mirror the fixtures into the holdout repo). Every run prints per-file sha256; re-runs are byte-identical (verified twice — same hashes). |
++| `testdata/photos/{portrait-orient6-gps.jpg, portrait-orient8-gps.jpg, landscape.jpg, tiny.png, pixelbomb.png, text-as.jpg, heic.bin}` | The 7 fixtures (23 827 / 23 827 / 5 253 / 74 / 45 / 108 / 16 bytes — all far under the 15 MB commit cap). Hand-built EXIF APP1 (Orientation + GPS IFD) inserted after SOI for the two portraits; the pixel bomb is a 45-byte PNG whose IHDR claims 50000×50000 (2.5 GP > 40 MP via DecodeConfig); heic.bin is a 16-byte ftyp/`heic` sniff box. Hashes are tabulated in `acceptance/drafts/README.md`. |
++| `testdata/schema.expected.sql` | Frozen M2 schema oracle: probe CREATE verbatim from `migrations/0001_init.sql`, then the packet's product schema byte-exact (tables and their indexes in the packet's order). NOT `.golden` (policy denies `*.golden*` edits — deliberate). |
++| `acceptance/drafts/admin_auth_go_test.go.txt` | A-201 draft: `TestA201AdminLogin` — 302 guard, frozen login form (h1 `Admin login`, label `Token` + input `name="token"`, button `Sign in`), wrong token 403, one-time token exchange (302 `/admin` + `gl_session` cookie with HttpOnly/SameSite=Lax), replay 403, session 200, HX-Request → 401 + `HX-Redirect: /admin/login`. |
++| `acceptance/drafts/admin_lights_go_test.go.txt` | A-204..A-209 drafts (`TestA204OutsideBBox`, `TestA205Duplicates`, `TestA206PhotoPipeline`, `TestA207NoStrayFiles`, `TestA208EditSoftDelete`, `TestA209Pagination`) + self-contained `al*` helpers (spawn/BIN walk-up/free port/kill; multipart poster; JPEG APP1/SOF byte parsers; fixture walk-up). Frozen routes: POST `/admin/lights` (303/409/422/413/415), GET/POST `/admin/lights/{id}`, POST `/admin/lights/{id}/delete`, GET `/admin/rows?page=N`, GET `/photos/...`. |
++| `acceptance/drafts/admin-walk.spec.ts.txt` | The 11 Playwright tests exactly as the packet numbers them, tags exact (`@A-202 @A-203`, `@A-202`, `@A-202` denied-geolocation describe, `@A-203`, `@A-204`, `@A-205`, `@A-206`, `@A-208`, `@A-209`, `@A-201`, `@A-202 @a11y`). File-level `test.use` geolocation 42.7617,-71.0303 acc 12 + permissions. Pagination test seeds 60 lights via `page.request.post` (multipart, csrf parsed from the walk page) so the 50-per-page boundary is deterministic regardless of lights left by earlier tests. |
++| `acceptance/drafts/README.md` | The frozen contract: packet's UI table verbatim + supplemental selectors (alt format, `#light-pos` 6 dp, `#photo-preview`, manual fields, login markup, row link), the frozen HTTP contract table (codes + bodies + ordering `created_at DESC, id DESC`), fixture table with sha256, schema-oracle note, per-assertion visual notes, holdout pointer. States T-207 preserves the table; disputes → BLOCKED. |
++| `acceptance/e2e/util/images.ts` | ACTIVE helper: `hasExifGps(bytes)` (JPEG APP1 walk → TIFF IFD0 → GPSInfo 0x8825 → non-empty GPS IFD; both endiannesses) and `jpegSize(bytes)` (SOF0..SOF15 minus C4/C8/CC). No tests of its own (packet Deliverable 5: green now). |
++| `acceptance/e2e/util/admin.ts` | ACTIVE helper: `loginAsAdmin(page)` → `goto('/admin/login?token=' + (process.env.ADMIN_TOKEN ?? 'dGVzdC1hZG1pbi10b2tlbi0zMi1ieXRl'))` + `waitForURL(/\/admin(?:\?|$)/)` proving the 302 exchange. |
++| `harness/protected.sha256` | Regenerated by `make protect`: 5 new entries (3 drafts + README + 2 utils); every pre-existing hash byte-identical. |
++
++## Files added (holdout repo `/Users/ascotti/Documents/git_repos/groveland-lights-holdout`, committed there)
++
++| Path | What |
++| --- | --- |
++| `drafts/README.md` | Activation procedure + data-differences note. |
++| `drafts/admin_auth_holdout_go_test.go.txt` | A-201 variant (`ha*` helpers): one-time token is GLOBAL — client B (fresh jar) cannot replay client A's consumed token; empty token 403; cookie adds `Path=/`; B's HX probe 401 + HX-Redirect. |
++| `drafts/admin_lights_holdout_go_test.go.txt` | A-204..A-209 variants (`hl*` helpers), holdout data: 42.7752,-71.0148, GP-042/GP-043, NORTH-of-bbox rejection (lat 42.95), merge that must leave exactly one GP-042 row, Orientation=8 pipeline (wider than tall, no APP1), runtime-built 16 MiB + 1 KiB upload → 413 with PHOTO_DIR unchanged, kind edit (park→building) + soft delete, 51-light boundary (page 2 holds exactly `Boundary lamp 01`). |
++| `drafts/admin-walk-holdout.spec.ts.txt` | e2e variants, same frozen selectors, self-contained (inlined login + byte helpers): acc 14→6 flow with `portrait-orient8-gps.jpg` + `Building`, low accuracy 55, KEYBOARD pin move (ArrowRight/ArrowDown ×5, not mouse), east-of-bbox (lon -70.90) rejection, clicked `Merge` → exactly one `img[alt^="GP-042"]`, served-photo purity, edit/delete, 51-seed pagination boundary, unauthenticated login, a11y. |
++| `testdata/photos/*` | Byte-identical fixture copies (same generator, same sha256) so the holdout is self-contained — `scripts/holdout-run.sh` passes no fixture env and I cannot edit it (not in my owns). |
++
++## Fixture generation notes
++
++- `image/jpeg` writes no EXIF, so the APP1 segment (marker FFE1, `Exif\0\0`,
++  little-endian TIFF: IFD0 with Orientation 0x0112 + GPSInfo pointer 0x8825,
++  GPS IFD at offset 38 with one GPSLatitudeRef="N" entry) is hand-assembled
++  and spliced directly after SOI. The generator re-parses its own output
++  (orientation + GPS present, DecodeConfig unaffected: 600×800) and fails
++  loudly on any mismatch — a run is its own audit.
++- The pixel bomb is signature + IHDR (50000×50000, CRC-correct via
++  hash/crc32) + IEND = 45 bytes; `png.DecodeConfig` sees 2.5 GP.
++- heic.bin: size(16) + `ftyp` at offset 4 + brand `heic` at offset 8 + zero
++  minor version.
++- Determinism: coordinate-derived gradients, fixed quality 90; two
++  consecutive runs produced identical sha256 for all 7 files (see commands).
++
++## Exact frozen strings (beyond the packet's UI table — see drafts/README.md)
++
++Routes/fields: `POST /admin/lights` multipart `csrf_token,label,kind,lat,lon,asset_no?,photo?,dup_choice?`;
++`GET/POST /admin/lights/{id}`; `POST /admin/lights/{id}/delete`;
++`GET /admin/rows?page=N` (no HX → 303 `/admin?page=N`); photos served under
++`/photos/`; cookie `gl_session`; create-success 303 → `/admin/lights/{id}`;
++codes 409 (`Possible duplicate`), 422 (`outside Groveland town bounds`), 415
++(HEIC body: `please choose JPEG`), 413 (>15 MB); list heading `Lights`, 50
++newest, `ORDER BY created_at DESC, id DESC`; thumbnail alt = `<asset_no>
++<label>` for numbered lights / `<label>` for unnumbered (this reconciles the
++packet table's `img[alt=<label>]` with test 7's `img[alt^="GP-017"]`);
++`#light-pos` text `lat, lon` at 6 dp; login markup `<h1>Admin login</h1>` +
++`<label>Token</label>` + `<input name="token">` + `<button>Sign in</button>`.
++
++## Would-fail reasoning (executed, not just reasoned)
++
++The drafts are inert in the repo (extensions no runner picks up), so I
++executed RENAMED COPIES from a gitignored scratch staging area
++(`testdata/rendered/t200-verify/` — under the gitignored
++`testdata/rendered/*`; never committed, invisible to the manifest, `./...`
++and Playwright's testDir). Results against current main (`bin/server` built
++at HEAD 4d6f347):
++
++- Go drafts (visible): all 7 tests FAIL — `TestA201AdminLogin` at its first
++  assertion (`GET /admin: status 404, want 302`; no `/admin` route exists),
++  the six `admin_lights` tests at `alLogin` (`token exchange failed`, 404).
++- Go drafts (holdout): all 7 FAIL the same way (`GET /admin/login: 404` /
++  login 404).
++- Playwright draft (visible): all 11 tests FAIL on desktop-chromium — 10 at
++  `loginAsAdmin`'s `waitForURL` (the token URL 404s, so `/admin` never
++  arrives) and `@A-201 unauthenticated` at `toHaveURL(/\/admin\/login$/)`
++  (URL stays `/admin` on the 404 page).
++- Playwright draft (holdout): typecheck-verified only (its runner path is
++  T-207's rename; its Go/e2e siblings prove the pattern red).
++
++Root cause on current main, reasoned from `internal/web`: routes registered
++are only `GET /healthz`, `GET /static/`, `GET /{$}` and the probe pair —
++every `/admin*`, `/photos/*` request 404s; `DB_PATH` holds only `probe` +
++`schema_migrations` (migrations 0001), so the schema oracle would also
++mismatch today (T-201's task).
++
++## How verified (commands run, exit codes)
++
++| Command | Exit | Result |
++| --- | --- | --- |
++| `go run ./testdata/photos/gen` (×3, incl. mirror to holdout) | 0 | 7 fixtures written + verified each time; identical sha256 across runs |
++| `go vet -tags acceptance ./testdata/rendered/t200-verify/ ./testdata/rendered/t200-verify/holdout/` | 0 | all 4 Go drafts compile (this is how the drafts will land post-rename) |
++| `gofmt -l` over the staged .go copies | 0 | empty — activation needs no formatting edits |
++| `go test -tags acceptance -run TestA20 ./testdata/rendered/t200-verify/ -v` | 1 | 7/7 FAIL against current main (red confirmed, see above) |
++| `go test -tags acceptance -run TestHoldoutA20 ./testdata/rendered/t200-verify/holdout/ -v` | 1 | 7/7 FAIL (red confirmed) |
++| `npx tsc --noEmit -p <scratch tsconfig>` (visible spec + utils) | 0 | strict-typechecks |
++| `npx tsc --noEmit -p <scratch holdout tsconfig>` | 0 | strict-typechecks |
++| `npx playwright test --config <scratch config> --project desktop-chromium` (11 draft tests) | 1 | 11/11 FAIL (red confirmed; failures at the exact frozen first assertions) |
++| `make js-check` | 0 | repo tsc accepts the two new ACTIVE utils |
++| `make test-acceptance-go` | 0 | `ok acceptance/go 0.956s` (existing suite green) |
++| `npx playwright test` | 0 | 32/32 passed on all four projects (existing suite green) |
++| `make check-fast` | 0 | after one `gofmt -w testdata/photos/gen/main.go` (fmt-check caught it first run: exit 1) |
++| `make check` | 0 | FULL gate green: fmt/vet/lint 0 issues, unit `-race -shuffle=on` ok, coverage (config 81.1%, web 86.2%), govulncheck none, templates-check, js-check, test-acceptance-go, e2e 32/32, a11y 8/8, visual none, gitleaks clean |
++| `make protect` | 0 | manifest regenerated (5 new entries, all pre-existing hashes identical); ratchet baseline go=51 pw=32 unchanged |
++| `make holdout` | 0 | `ok holdout 1.378s` + e2e 8/8 → `holdout: PASS` (inert drafts correctly ignored by both runners) |
++
++## Notes / open issues
++
++1. Scratch staging: `testdata/rendered/t200-verify/` holds the renamed draft
++   copies + the throwaway copy tool + scratch Playwright config used for the
++   red/typecheck proofs. It is inside `testdata/rendered/*` (gitignored),
++   contains no `.golden` file, is outside `acceptance/**` (invisible to the
++   manifest) and outside every runner's discovery path (`./...` skips
++   `testdata`; Playwright's testDir is `acceptance/e2e`). It is NOT
++   committed; it can be deleted wholesale at any time (I have no `rm`
++   permission in this session — flagging for the operator if cleanup is
++   wanted).
++2. The packet's frozen table (`img[alt=<label>]`) and its test 7
++   (`img[alt^="GP-017"]`) are jointly satisfiable only by the alt-format rule
++   I froze (`<asset_no> <label>` numbered, `<label>` unnumbered). Documented
++   in drafts/README.md; not treated as a spec defect (both statements are
++   encoded verbatim and the reconciliation is stated).
++3. `scripts/holdout-run.sh` passes no fixture env, and it is outside my
++   owns — so the holdout repo carries its own byte-identical fixture copies
++   (generator argument makes mirroring reproducible). If the planner prefers
++   env plumbing later, the drafts' walk-up resolver still works as-is.
++4. e2e test 7 (served-photo purity) intentionally reuses the light created
++   by test 1 in the same file (workers=1, file order): documented in the
++   spec comment; test 9's 60-seed makes the pagination boundary independent
++   of any leftovers.
++5. Ratchet nuance (pre-existing, T-105 issue c): `countGoTests` runs without
++   `-tags acceptance`, so the draft-activated Go tests won't raise the Go
++   count at T-207 time; the manifest remains their protection.
+diff --git a/harness/protected.sha256 b/harness/protected.sha256
+index 7fea561..4afc176 100644
+--- a/harness/protected.sha256
++++ b/harness/protected.sha256
+@@ -1,9 +1,15 @@
+ 10bddb6ac8239aca9f94db1b93670311883d138a918995af32da839f60007a2c  acceptance/e2e/home_m1.spec.ts
++1bf0c6599f41cc242a49d61b0882a86a2140166ef7e3b36cb03fe7ae3cddcb6b  acceptance/drafts/README.md
+ 23f54a380630ccb77dbe3f7dbcb2a50b292a36fc333ce8827f1dbcd7e42ffa0a  acceptance/go/healthz_test.go
+ 263c15db570708ff5484b6ebcdc57aea3d3c73c779798559d3c61804dd201619  acceptance/contract.json
+ 2f4dc12c823479c5e7cb949c332b19339150b57119e11eb02a343bfd1f30ef3a  acceptance/go/migrations_test.go
+ 34df7d4412223e3b84d714b6e5c19de06b4d700974943f04040246d20152e3c9  acceptance/go/probe_test.go
++4718543ae6a927743fc8aadbd92de285a8821ec452c42118ff0e9370b30fe16a  acceptance/drafts/admin_lights_go_test.go.txt
+ 4ec1052d3e59879ff303cc039cd617d4942f69662da73dbb3f2257db09062917  acceptance/e2e/probe.spec.ts
++52bfc1cb423a86dcc63b41d779d2e6b4e7502431f3c43e21b7d3f5c6f864a8ab  acceptance/drafts/admin-walk.spec.ts.txt
+ 55526dd9e0f4c1ae60585befc5a714c263a219a98bd9a620a6eafac398d956f3  acceptance/e2e/util/console.ts
+ 64f39347ee34ac5e6dc284df6c5fe6881f9f7b8ed6b0139ea3d2b7e29ba22f59  acceptance/e2e/home.spec.ts
++7dcf42120eb0cadea73e0c3905a9a813e1c42923160399a110360929c3ffc7c5  acceptance/e2e/util/admin.ts
++bedb2e76a843c2fa42a796d7d054190f66fdd61b86cecbdbd52c729896afe22d  acceptance/e2e/util/images.ts
+ dadce9e29376ebe41e7422bc509f08b96736749259a67a186606a307a356dd91  acceptance/go/m1_guards_test.go
++f9c17eb36f9da626de391f95da1c41f6b710d2cb4767dff68fc115d4fb027154  acceptance/drafts/admin_auth_go_test.go.txt
+diff --git a/testdata/photos/gen/main.go b/testdata/photos/gen/main.go
+new file mode 100644
+index 0000000..ba843cf
+--- /dev/null
++++ b/testdata/photos/gen/main.go
+@@ -0,0 +1,430 @@
++// Command gen writes (and re-verifies) the M2 photo fixtures used by the
++// A-206/A-207 acceptance drafts. Run from the repo root:
++//
++//	go run ./testdata/photos/gen
++//
++// Everything is deterministic: the committed bytes are exactly what a fresh
++// run reproduces, so the fixtures are auditable and reproducible. The program
++// exits non-zero if any self-check fails, so a run is its own audit.
++//
++// Why a generator: the standard library's image/jpeg writes no EXIF, so the
++// flagship fixtures (portrait JPEGs carrying EXIF Orientation 6/8 plus a GPS
++// IFD) are built by hand — APP1 segment bytes appended right after the SOI
++// marker of an ordinarily encoded JPEG. The pixel bomb is a PNG whose IHDR
++// claims 50000x50000 while the file never carries a raster at all.
++package main
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/binary"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"hash/crc32"
++	"image"
++	"image/color"
++	"image/jpeg"
++	"image/png"
++	"os"
++	"path/filepath"
++)
++
++// fixture geometry: the flagship portrait fixtures are 600x800; with EXIF
++// Orientation 6 (or 8) applied the processed output must come out 800x600 —
++// wider than tall — which is what the photo pipeline contract asserts.
++const (
++	portraitW, portraitH   = 600, 800
++	landscapeW, landscapeH = 320, 200
++	bombDim                = 50000 // IHDR-claimed width AND height
++	maxFixtureBytes        = 15 << 20
++)
++
++func main() {
++	outDir, err := resolveOutDir(os.Args[1:])
++	if err != nil {
++		fail("%v", err)
++	}
++	written, err := writeFixtures(outDir)
++	if err != nil {
++		fail("write fixtures: %v", err)
++	}
++	if err := verifyFixtures(outDir); err != nil {
++		fail("verify: %v", err)
++	}
++	fmt.Printf("gen: %d fixtures verified in %s\n", written, outDir)
++}
++
++// resolveOutDir finds the fixtures directory: an explicit argument wins
++// (used to mirror the fixtures into the holdout repo); otherwise the repo
++// root (the directory that owns migrations/) is found by walking up from the
++// working directory, so the command works from the repo root and anywhere
++// inside it.
++func resolveOutDir(args []string) (string, error) {
++	if len(args) > 0 {
++		if err := os.MkdirAll(args[0], 0o755); err != nil {
++			return "", err
++		}
++		return args[0], nil
++	}
++	dir, err := os.Getwd()
++	if err != nil {
++		return "", err
++	}
++	for i := 0; i < 8; i++ {
++		if st, err := os.Stat(filepath.Join(dir, "migrations")); err == nil && st.IsDir() {
++			return filepath.Join(dir, "testdata", "photos"), nil
++		}
++		parent := filepath.Dir(dir)
++		if parent == dir {
++			break
++		}
++		dir = parent
++	}
++	return "", errors.New("repo root not found (no migrations/ directory on any parent; pass the output dir as an argument)")
++}
++
++// --- fixture builders ---
++
++// gradientImage returns a deterministic RGB image whose channels are derived
++// from the coordinates, so orientation is visually detectable: the red channel
++// grows left-to-right, the green channel top-to-bottom.
++func gradientImage(w, h int) *image.RGBA {
++	img := image.NewRGBA(image.Rect(0, 0, w, h))
++	for y := 0; y < h; y++ {
++		for x := 0; x < w; x++ {
++			img.SetRGBA(x, y, color.RGBA{
++				R: uint8(x * 255 / max(w-1, 1)),
++				G: uint8(y * 255 / max(h-1, 1)),
++				B: 96,
++				A: 255,
++			})
++		}
++	}
++	return img
++}
++
++// encodeJPEG encodes img at a fixed quality; the encoder is deterministic.
++func encodeJPEG(img image.Image) []byte {
++	var buf bytes.Buffer
++	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
++		panic("fixture build: jpeg encode: " + err.Error())
++	}
++	return buf.Bytes()
++}
++
++// withExifAPP1 returns jpegBytes with one EXIF APP1 segment inserted directly
++// after the SOI marker. The segment carries the given Orientation value and a
++// minimal GPS IFD (a single GPSLatitudeRef = "N" entry) — enough for any
++// scanner to report "GPS data present".
++func withExifAPP1(jpegBytes []byte, orientation uint16) []byte {
++	seg := buildExifAPP1(orientation)
++	out := make([]byte, 0, len(jpegBytes)+len(seg))
++	out = append(out, jpegBytes[:2]...) // SOI
++	out = append(out, seg...)
++	out = append(out, jpegBytes[2:]...)
++	return out
++}
++
++// buildExifAPP1 hand-assembles the APP1 segment. TIFF block (little-endian):
++//
++//	 0  "II"  0x002A  IFD0-offset = 8
++//	 8  IFD0, 2 entries:
++//	     0x0112 Orientation  SHORT count 1 = orientation
++//	     0x8825 GPSInfo      LONG  count 1 = GPS IFD offset
++//	38  GPS IFD, 1 entry:
++//	     0x0001 GPSLatitudeRef ASCII count 2 = "N\x00"
++//
++// 8 + (2 + 2*12 + 4) = 38; GPS IFD adds 2 + 1*12 + 4 = 18 bytes -> 56 total.
++func buildExifAPP1(orientation uint16) []byte {
++	const ifd0 = 8
++	const gps = 38
++	tiff := make([]byte, 56)
++
++	copy(tiff[0:], "II")
++	binary.LittleEndian.PutUint16(tiff[2:], 0x002A)
++	binary.LittleEndian.PutUint32(tiff[4:], ifd0)
++
++	binary.LittleEndian.PutUint16(tiff[ifd0:], 2) // two IFD0 entries
++	e0 := tiff[10:22]
++	binary.LittleEndian.PutUint16(e0[0:], 0x0112) // Orientation
++	binary.LittleEndian.PutUint16(e0[2:], 3)      // SHORT
++	binary.LittleEndian.PutUint32(e0[4:], 1)      // count 1
++	binary.LittleEndian.PutUint16(e0[8:], orientation)
++	// e0[10:12] zero padding of the in-place value field.
++	e1 := tiff[22:34]
++	binary.LittleEndian.PutUint16(e1[0:], 0x8825) // GPSInfo pointer
++	binary.LittleEndian.PutUint16(e1[2:], 4)      // LONG
++	binary.LittleEndian.PutUint32(e1[4:], 1)      // count 1
++	binary.LittleEndian.PutUint32(e1[8:], gps)
++	binary.LittleEndian.PutUint32(tiff[34:], 0) // no next IFD
++
++	binary.LittleEndian.PutUint16(tiff[gps:], 1) // one GPS entry
++	g := tiff[gps+2 : gps+2+12]
++	binary.LittleEndian.PutUint16(g[0:], 0x0001) // GPSLatitudeRef
++	binary.LittleEndian.PutUint16(g[2:], 2)      // ASCII
++	binary.LittleEndian.PutUint32(g[4:], 2)      // count 2: "N\x00"
++	g[8] = 'N'
++	// g[9:12] zero padding.
++	binary.LittleEndian.PutUint32(tiff[gps+2+12:], 0) // no next IFD
++
++	payload := make([]byte, 0, 6+len(tiff))
++	payload = append(payload, "Exif\x00\x00"...)
++	payload = append(payload, tiff...)
++	seg := make([]byte, 0, 4+len(payload))
++	seg = append(seg, 0xFF, 0xE1)
++	seg = append(seg, byte(len(payload)+2)>>8, byte(len(payload)+2)) // segment length incl. itself
++	seg = append(seg, payload...)
++	return seg
++}
++
++// buildPixelBombPNG crafts a PNG whose IHDR claims bombDim x bombDim pixels
++// while the file carries no raster data at all — 8 (signature) + 25 (IHDR) +
++// 12 (IEND) bytes. png.DecodeConfig reads only the IHDR, so it reports a
++// >40 MP image; a full decode never gets a chance to allocate.
++func buildPixelBombPNG() []byte {
++	var buf bytes.Buffer
++	buf.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'})
++
++	ihdr := make([]byte, 13)
++	binary.BigEndian.PutUint32(ihdr[0:], bombDim) // width
++	binary.BigEndian.PutUint32(ihdr[4:], bombDim) // height
++	ihdr[8] = 8                                   // bit depth
++	ihdr[9] = 2                                   // color type: truecolor RGB
++	ihdr[10] = 0                                  // compression: deflate
++	ihdr[11] = 0                                  // filter
++	ihdr[12] = 0                                  // no interlace
++	writeChunk(&buf, "IHDR", ihdr)
++	writeChunk(&buf, "IEND", nil)
++	return buf.Bytes()
++}
++
++func writeChunk(buf *bytes.Buffer, typ string, data []byte) {
++	var lenb [4]byte
++	binary.BigEndian.PutUint32(lenb[:], uint32(len(data)))
++	buf.Write(lenb[:])
++	buf.WriteString(typ)
++	buf.Write(data)
++	var crcb [4]byte
++	binary.BigEndian.PutUint32(crcb[:], crc32.ChecksumIEEE(append([]byte(typ), data...)))
++	buf.Write(crcb[:])
++}
++
++// tinyPNG is an ordinary 1x1 RGBA PNG.
++func tinyPNG() []byte {
++	var buf bytes.Buffer
++	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
++	img.SetRGBA(0, 0, color.RGBA{R: 0x7F, G: 0xB2, B: 0x33, A: 0xFF})
++	if err := png.Encode(&buf, img); err != nil {
++		panic("fixture build: png encode: " + err.Error())
++	}
++	return buf.Bytes()
++}
++
++// heicSniff carries an ISO-BMFF ftyp box with the brand "heic" at offset 8
++// (box type "ftyp" at offset 4). It is NOT a real HEIC — the server must
++// reject it on content sniffing, which is exactly what A-207 exercises.
++func heicSniff() []byte {
++	b := make([]byte, 16)
++	binary.BigEndian.PutUint32(b[0:], 16) // box size
++	copy(b[4:], "ftyp")
++	copy(b[8:], "heic")
++	binary.BigEndian.PutUint32(b[12:], 0) // minor version
++	return b
++}
++
++// --- writers ---
++
++func writeFixtures(outDir string) (int, error) {
++	portrait := encodeJPEG(gradientImage(portraitW, portraitH))
++	landscape := encodeJPEG(gradientImage(landscapeW, landscapeH))
++	textAs := []byte("This is not a JPEG. It is plain text wearing a .jpg name, so the\nserver must reject it on sniffing (A-207).\n")
++	files := map[string][]byte{
++		"portrait-orient6-gps.jpg": withExifAPP1(portrait, 6),
++		"portrait-orient8-gps.jpg": withExifAPP1(portrait, 8),
++		"landscape.jpg":            landscape,
++		"tiny.png":                 tinyPNG(),
++		"pixelbomb.png":            buildPixelBombPNG(),
++		"text-as.jpg":              textAs,
++		"heic.bin":                 heicSniff(),
++	}
++	if err := os.MkdirAll(outDir, 0o755); err != nil {
++		return 0, err
++	}
++	n := 0
++	for _, name := range []string{
++		"portrait-orient6-gps.jpg", "portrait-orient8-gps.jpg", "landscape.jpg",
++		"tiny.png", "pixelbomb.png", "text-as.jpg", "heic.bin",
++	} {
++		data := files[name]
++		if len(data) > maxFixtureBytes {
++			return n, fmt.Errorf("%s: %d bytes exceeds the %d-byte commit cap", name, len(data), maxFixtureBytes)
++		}
++		if err := os.WriteFile(filepath.Join(outDir, name), data, 0o644); err != nil {
++			return n, err
++		}
++		sum := sha256.Sum256(data)
++		fmt.Printf("gen: wrote %s (%d bytes, sha256 %s)\n", name, len(data), hex.EncodeToString(sum[:]))
++		n++
++	}
++	return n, nil
++}
++
++// --- self-verification (every run audits the bytes it just wrote) ---
++
++func verifyFixtures(outDir string) error {
++	for name, check := range map[string]func([]byte) error{
++		"portrait-orient6-gps.jpg": portraitCheck(6),
++		"portrait-orient8-gps.jpg": portraitCheck(8),
++		"landscape.jpg":            landscapeCheck,
++		"tiny.png":                 tinyCheck,
++		"pixelbomb.png":            bombCheck,
++		"text-as.jpg":              textAsCheck,
++		"heic.bin":                 heicCheck,
++	} {
++		data, err := os.ReadFile(filepath.Join(outDir, name))
++		if err != nil {
++			return err
++		}
++		if err := check(data); err != nil {
++			return fmt.Errorf("%s: %w", name, err)
++		}
++		fmt.Printf("gen: verified %s\n", name)
++	}
++	return nil
++}
++
++func portraitCheck(wantOrientation uint16) func([]byte) error {
++	return func(data []byte) error {
++		cfg, err := jpeg.DecodeConfig(bytes.NewReader(data))
++		if err != nil {
++			return fmt.Errorf("does not decode as JPEG: %w", err)
++		}
++		if cfg.Width != portraitW || cfg.Height != portraitH {
++			return fmt.Errorf("dims %dx%d, want %dx%d (EXIF orientation must NOT change DecodeConfig)", cfg.Width, cfg.Height, portraitW, portraitH)
++		}
++		orient, hasGPS, err := parseExifAPP1(data)
++		if err != nil {
++			return err
++		}
++		if orient != wantOrientation {
++			return fmt.Errorf("EXIF Orientation = %d, want %d", orient, wantOrientation)
++		}
++		if !hasGPS {
++			return errors.New("no GPS IFD found in the APP1 segment")
++		}
++		return nil
++	}
++}
++
++func landscapeCheck(data []byte) error {
++	cfg, err := jpeg.DecodeConfig(bytes.NewReader(data))
++	if err != nil {
++		return fmt.Errorf("does not decode as JPEG: %w", err)
++	}
++	if cfg.Width != landscapeW || cfg.Height != landscapeH {
++		return fmt.Errorf("dims %dx%d, want %dx%d", cfg.Width, cfg.Height, landscapeW, landscapeH)
++	}
++	if bytes.Contains(data, []byte("Exif\x00\x00")) {
++		return errors.New("ordinary JPEG must carry no EXIF APP1")
++	}
++	return nil
++}
++
++func tinyCheck(data []byte) error {
++	cfg, err := png.DecodeConfig(bytes.NewReader(data))
++	if err != nil {
++		return fmt.Errorf("does not decode as PNG: %w", err)
++	}
++	if cfg.Width != 1 || cfg.Height != 1 {
++		return fmt.Errorf("dims %dx%d, want 1x1", cfg.Width, cfg.Height)
++	}
++	return nil
++}
++
++func bombCheck(data []byte) error {
++	cfg, err := png.DecodeConfig(bytes.NewReader(data))
++	if err != nil {
++		return fmt.Errorf("DecodeConfig must read the crafted IHDR: %w", err)
++	}
++	px := uint64(cfg.Width) * uint64(cfg.Height)
++	if px <= 40_000_000 {
++		return fmt.Errorf("DecodeConfig sees %d px, want > 40 MP", px)
++	}
++	if len(data) > 4096 {
++		return fmt.Errorf("file is %d bytes; a pixel bomb must stay tiny (headers only)", len(data))
++	}
++	return nil
++}
++
++func textAsCheck(data []byte) error {
++	if _, err := jpeg.DecodeConfig(bytes.NewReader(data)); err == nil {
++		return errors.New("plain text must not decode as JPEG")
++	}
++	if !bytes.Contains(data, []byte("not a JPEG")) {
++		return errors.New("content marker missing")
++	}
++	return nil
++}
++
++func heicCheck(data []byte) error {
++	if len(data) < 16 {
++		return fmt.Errorf("only %d bytes", len(data))
++	}
++	if string(data[4:8]) != "ftyp" {
++		return errors.New("no ftyp box type at offset 4")
++	}
++	if string(data[8:12]) != "heic" {
++		return errors.New("brand at offset 8 is not heic")
++	}
++	return nil
++}
++
++// parseExifAPP1 reads back what withExifAPP1 wrote: walks to the first APP1
++// segment, checks the Exif header, then parses the little-endian TIFF IFD0
++// for the Orientation value and the GPSInfo pointer (a GPS IFD with at least
++// one entry counts as "GPS present").
++func parseExifAPP1(data []byte) (orientation uint16, hasGPS bool, err error) {
++	if len(data) < 6 || data[0] != 0xFF || data[1] != 0xD8 {
++		return 0, false, errors.New("not a JPEG (no SOI)")
++	}
++	if data[2] != 0xFF || data[3] != 0xE1 {
++		return 0, false, errors.New("no APP1 directly after SOI")
++	}
++	segLen := int(binary.BigEndian.Uint16(data[4:6]))
++	payload := data[6 : 4+segLen]
++	if len(payload) < 6 || string(payload[:6]) != "Exif\x00\x00" {
++		return 0, false, errors.New("APP1 is not an Exif segment")
++	}
++	tiff := payload[6:]
++	if len(tiff) < 8 || string(tiff[:2]) != "II" {
++		return 0, false, errors.New("no little-endian TIFF header")
++	}
++	ifd0 := int(binary.LittleEndian.Uint32(tiff[4:8]))
++	if ifd0+2 > len(tiff) {
++		return 0, false, errors.New("IFD0 offset out of bounds")
++	}
++	entries := int(binary.LittleEndian.Uint16(tiff[ifd0 : ifd0+2]))
++	for i := 0; i < entries; i++ {
++		base := ifd0 + 2 + i*12
++		if base+12 > len(tiff) {
++			return 0, false, errors.New("truncated IFD0 entry")
++		}
++		e := tiff[base : base+12]
++		switch binary.LittleEndian.Uint16(e[0:2]) {
++		case 0x0112:
++			orientation = binary.LittleEndian.Uint16(e[8:10])
++		case 0x8825:
++			gps := int(binary.LittleEndian.Uint32(e[8:12]))
++			if gps+2 <= len(tiff) && binary.LittleEndian.Uint16(tiff[gps:gps+2]) > 0 {
++				hasGPS = true
++			}
++		}
++	}
++	return orientation, hasGPS, nil
++}
++
++func fail(format string, args ...any) {
++	fmt.Fprintf(os.Stderr, "gen: "+format+"\n", args...)
++	os.Exit(1)
++}
+diff --git a/testdata/photos/heic.bin b/testdata/photos/heic.bin
+new file mode 100644
+index 0000000..8bd31b3
+Binary files /dev/null and b/testdata/photos/heic.bin differ
+diff --git a/testdata/photos/landscape.jpg b/testdata/photos/landscape.jpg
+new file mode 100644
+index 0000000..e08e544
+Binary files /dev/null and b/testdata/photos/landscape.jpg differ
+diff --git a/testdata/photos/pixelbomb.png b/testdata/photos/pixelbomb.png
+new file mode 100644
+index 0000000..f32e6f7
+Binary files /dev/null and b/testdata/photos/pixelbomb.png differ
+diff --git a/testdata/photos/portrait-orient6-gps.jpg b/testdata/photos/portrait-orient6-gps.jpg
+new file mode 100644
+index 0000000..ecbdbbc
+Binary files /dev/null and b/testdata/photos/portrait-orient6-gps.jpg differ
+diff --git a/testdata/photos/portrait-orient8-gps.jpg b/testdata/photos/portrait-orient8-gps.jpg
+new file mode 100644
+index 0000000..578d73d
+Binary files /dev/null and b/testdata/photos/portrait-orient8-gps.jpg differ
+diff --git a/testdata/photos/text-as.jpg b/testdata/photos/text-as.jpg
+new file mode 100644
+index 0000000..f563b16
+--- /dev/null
++++ b/testdata/photos/text-as.jpg
+@@ -0,0 +1,2 @@
++This is not a JPEG. It is plain text wearing a .jpg name, so the
++server must reject it on sniffing (A-207).
+diff --git a/testdata/photos/tiny.png b/testdata/photos/tiny.png
+new file mode 100644
+index 0000000..9d21bf3
+Binary files /dev/null and b/testdata/photos/tiny.png differ
+diff --git a/testdata/schema.expected.sql b/testdata/schema.expected.sql
+new file mode 100644
+index 0000000..b199de6
+--- /dev/null
++++ b/testdata/schema.expected.sql
+@@ -0,0 +1,86 @@
++CREATE TABLE probe (
++  id INTEGER PRIMARY KEY CHECK (id = 1),
++  n  INTEGER NOT NULL DEFAULT 0
++);
++CREATE TABLE users (
++  id INTEGER PRIMARY KEY,
++  handle TEXT NOT NULL UNIQUE,
++  email TEXT UNIQUE,
++  role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user','admin')),
++  points INTEGER NOT NULL DEFAULT 0,
++  created_at TEXT NOT NULL
++);
++CREATE TABLE photos (
++  id INTEGER PRIMARY KEY,
++  owner_id INTEGER REFERENCES users(id),
++  path TEXT NOT NULL UNIQUE,
++  width INTEGER NOT NULL,
++  height INTEGER NOT NULL,
++  bytes INTEGER NOT NULL,
++  sha256 TEXT NOT NULL,
++  created_at TEXT NOT NULL
++);
++CREATE TABLE lights (
++  id INTEGER PRIMARY KEY,
++  asset_no TEXT,
++  kind TEXT NOT NULL CHECK (kind IN ('park','building','street')),
++  label TEXT NOT NULL,
++  lat REAL NOT NULL,
++  lon REAL NOT NULL,
++  accuracy_m REAL,
++  photo_id INTEGER REFERENCES photos(id),
++  status TEXT NOT NULL DEFAULT 'unknown' CHECK (status IN ('on','off','degraded','unknown')),
++  status_source TEXT NOT NULL DEFAULT 'none' CHECK (status_source IN ('none','single','confirmed','admin')),
++  status_at TEXT,
++  status_confirmed_at TEXT,
++  gml_pole_no TEXT,
++  created_by INTEGER REFERENCES users(id),
++  created_at TEXT NOT NULL,
++  updated_at TEXT NOT NULL,
++  deleted_at TEXT
++);
++CREATE INDEX lights_geo ON lights(lat, lon) WHERE deleted_at IS NULL;
++CREATE UNIQUE INDEX lights_asset_no ON lights(asset_no) WHERE asset_no IS NOT NULL AND deleted_at IS NULL;
++CREATE TABLE reports (
++  id INTEGER PRIMARY KEY,
++  light_id INTEGER NOT NULL REFERENCES lights(id),
++  user_id INTEGER NOT NULL REFERENCES users(id),
++  session_id TEXT NOT NULL,
++  status TEXT NOT NULL CHECK (status IN ('on','off','degraded')),
++  note TEXT CHECK (length(note) <= 500),
++  photo_id INTEGER REFERENCES photos(id),
++  lat REAL, lon REAL, accuracy_m REAL,
++  ip_hmac TEXT NOT NULL,
++  created_at TEXT NOT NULL,
++  rounded_at TEXT
++);
++CREATE INDEX reports_light_time ON reports(light_id, created_at DESC);
++CREATE INDEX reports_user_time ON reports(user_id, created_at DESC);
++CREATE TABLE comments (
++  id INTEGER PRIMARY KEY,
++  light_id INTEGER NOT NULL REFERENCES lights(id),
++  user_id INTEGER NOT NULL REFERENCES users(id),
++  body TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 2000),
++  hidden INTEGER NOT NULL DEFAULT 0,
++  created_at TEXT NOT NULL
++);
++CREATE TABLE comment_flags (
++  comment_id INTEGER NOT NULL REFERENCES comments(id),
++  session_id TEXT NOT NULL,
++  reason TEXT,
++  created_at TEXT NOT NULL,
++  PRIMARY KEY (comment_id, session_id)
++);
++CREATE TABLE sessions (
++  id TEXT PRIMARY KEY,
++  user_id INTEGER NOT NULL REFERENCES users(id),
++  role TEXT NOT NULL CHECK (role IN ('anon','user','admin')),
++  created_at TEXT NOT NULL,
++  expires_at TEXT NOT NULL
++);
++CREATE TABLE login_tokens (
++  token_hash TEXT PRIMARY KEY,
++  email TEXT NOT NULL,
++  expires_at TEXT NOT NULL,
++  used_at TEXT
++);
