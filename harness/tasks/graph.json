@@ -424,8 +424,8 @@
       ],
       "ui": true,
       "allow_deps": [],
-      "status": "running",
-      "attempts": 1,
+      "status": "rework",
+      "attempts": 2,
       "model": "deepseek",
       "budget": {
         "steps": 200,
