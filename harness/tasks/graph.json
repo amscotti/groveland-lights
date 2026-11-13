@@ -41,7 +41,7 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "rework",
+      "status": "done",
       "attempts": 2,
       "budget": {
         "steps": 200,
