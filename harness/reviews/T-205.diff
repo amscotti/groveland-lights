@@ -1,88 +1,62 @@
 diff --git a/harness/handoffs/T-205.md b/harness/handoffs/T-205.md
 new file mode 100644
-index 0000000..eee37fc
+index 0000000..58189a4
 --- /dev/null
 +++ b/harness/handoffs/T-205.md
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,135 @@
 +# T-205 handoff — Admin UI: walk-the-town flow, light CRUD, list + HTMX pagination
 +
-+Status: COMPLETE.
++Status: COMPLETE (round-4 retry after reviewer-alt BLOCK).
 +
-+This is the round-4 retry. The round-3 attempt had added `store.EditLightPhoto`
-+under `internal/store/**`, which is outside this task's `owns`, so the gate's
-+guard failed with exit 4 (`out of ownership: internal/store/...`). This retry
-+reverts every `internal/store` change back to `main`; the merge-photo write lives
-+only in the owned `internal/web/admin_merge.go`. The reviewer artifacts under
-+`harness/reviews/T-205-*.md` are present and untouched (untracked reviewer
-+output; nothing under `harness/` was edited except this handoff).
++Commits on `task/T-205` this attempt: `8845c6e` (store transaction + tests +
++error handling) and `803a651` (remove the unused submission HTMX field).
 +
-+## Round-3/round-4 review fixes
++## What changed in this retry
 +
-+1. **No harness deletion / no guard bypass.** The three
-+   `harness/reviews/T-205-*.md` files are still in the worktree, unmodified.
-+   This handoff makes no cleanup claim.
-+2. **Bbox alert assertions are not vacuous.** `alertWithMessage` extracts the
-+   rendered `<article>` that actually carries
-+   `That position is outside Groveland town bounds` (so it cannot match the walk
-+   page's permanently hidden, empty `#walk-alert` placeholder), and
-+   `assertVisibleAlert` proves that element is `role="alert"` and not `hidden`.
-+   Both the full-page 422 and the HTMX 422 use it.
-+3. **`TestRenderAll` fails on a failed render.** The `renderPage` error is checked
-+   per page and a blank document is rejected before the snapshot is written, so
-+   an incorrect fixture cannot produce a zero-byte file that html-validate
-+   silently accepts.
-+4. **Dead CSRF branch removed.** `csrfInputValue` returns `(value, ok)`; callers
-+   assert `ok`. The walk page also compares the form token with the
-+   double-submit cookie value.
-+5. **Pager assertions are scoped to the pager form.**
-+   `pagerFormOf`/`assertPagerPageInput` extract the `method="get"
-+   action="/admin/rows"` form carrying the `Older`/`Newer` button, then assert
-+   the hidden `page` input and the matching `hx-get` are inside that form.
-+6. **Anonymous edit/delete routes covered.** `TestAdminRoutesGuard` posts
-+   `/admin/lights/1` and `/admin/lights/1/delete` without a session and asserts
-+   the 302 to `/admin/login`.
-+7. **Merge photo (A-205) is applied, and its write is unit-tested.**
-+   `mergeDuplicate` applies the submitted label through `EditLight` and the
-+   submitted photo through `attachPhoto`. Because `internal/store` is outside
-+   this task's `owns`, `attachPhoto` performs the one `UPDATE lights SET
-+   photo_id` over a short auxiliary SQLite connection in `internal/web`, with:
-+   - `checkMergeDBPath` rejecting an unset `DB_PATH` and the `?`/`#`/`%`
-+     characters the DSN grammar would reinterpret (mirroring the store's own
-+     rule);
-+   - the same WAL/busy-timeout/foreign-keys pragmas as the store DSN;
-+   - a 5 s bound and the `deleted_at IS NULL` live-row guard;
-+   - `store.ErrNotFound` only for 0 affected rows, with every driver failure
-+     wrapped as a DB error.
-+   `TestAdminDuplicateMergePhoto` exercises a real merge-with-photo over HTTP
-+   (one row survives, its `/photos/...` URL changes, old and new files serve
-+   200). `TestMergeAttachPhotoBranches` covers unset/ambiguous `DB_PATH`,
-+   unknown and soft-deleted ids, and a canceled context.
-+   The round-3 review preferred a store method; that is impossible without
-+   leaving `owns` (guard exit 4) and is recorded as the follow-up below.
-+
-+## Earlier review fixes still in place
-+
-+- **Duplicate panel content is asserted against the existing light**:
-+  `TestAdminDuplicatePanelContent` extracts `#dup-panel` and asserts
-+  `<strong>Ball field lamp</strong>`, `asset number GP-017`, a distance, Merge +
-+  Cancel, no Save-anyway, and no echo of the submitted twin label, in both the
-+  full-page and HTMX responses.
-+- **Pagination boundary is a full-row check**: page 1 holds exactly 50 rows and
-+  all labels 01..50 before the 51st; after it, page 1 is 51..02 (50 rows, no 1)
-+  and page 2 is exactly light 1; the rows fragment is checked the same way.
-+- **Walk re-render keeps the admin's work**: `walkPageDataOf` echoes the asset
-+  number; a parse-error page still mints a fresh CSRF token, the town bbox and
-+  the default `park` kind. `TestAdminCreateOutsideBBox` asserts label, asset,
-+  kind, lat, lon, accuracy and bbox survive the 422.
-+- **Edit preserves position and photo**: `TestAdminEdit` asserts longitude and
-+  the unchanged `/photos/...` URL after a label-only edit.
-+- **The styled login page is live**: `installLoginPage()` renders
-+  `pages/admin-login.html` through the existing pipeline and installs it as
-+  `loginPageTmpl` (auth.go is frozen). `TestAdminLoginPageIsTheStyledPipelinePage`
-+  drives `GET /admin/login`.
-+- **No-JS pager and visible error re-renders**: each pager control is its own
-+  GET form with a hidden `page`; `#add-form` is revealed when a 409/422
-+  re-render carries an alert or duplicate panel.
++1. **Merge-photo now goes through the store, atomically.**
++   - New `internal/store/lights_photo.go` (planner-ratified owns extension):
++     `EditLightPhoto(ctx, id, label, assetNo, photoID)`.
++   - It runs `UPDATE label/asset` and `UPDATE photo_id` inside ONE transaction,
++     so a failed photo write rolls the label/asset back; commit is the only
++     durable point. Missing/soft-deleted ids wrap `store.ErrNotFound`, duplicate
++     asset numbers wrap `store.ErrDuplicateAssetNo`, FK failures surface as DB
++     errors. `internal/store/lights_photo_test.go` covers the round trip,
++     missing/soft-deleted ids, duplicate-asset rollback and unknown-photo
++     rollback.
++   - `internal/web/admin_merge.go` no longer contains any `sql.DB`, DSN or SQL.
++     `mergeDuplicate` calls `EditLightPhoto` (with photo) or `EditLight` (without)
++     and maps a vanished duplicate to a plain create.
++2. **The self-deleting Playwright harness is gone.** No spec/config/Go cleanup
++   file lives under `web/templates/**`; no `tmp_cleanup.go`. The visual flow was
++   run from the packet-sanctioned `scratch/` directory and `scratch/` was
++   removed before commit (verified clean `git status`).
++3. **Swallowed errors fixed.**
++   - `classifyDuplicate` now returns its store error; a failed
++     `LightByAssetNo`/`NearbyLights` answers 500 instead of creating the light
++     with duplicate detection disabled. `TestAdminCreateDuplicateLookupFailure`
++     drops the `lights` table while keeping sessions usable, and pins both the
++     nearby and asset-number paths.
++   - `mergeDuplicate` only falls back to create for `ErrNotFound`; other
++     `GetLight` failures answer 500.
++   - `installLoginPage` no longer silently keeps the legacy page: a template
++     parse/render failure panics with the template name at init.
++4. **CSRF order corrected.** Multipart parsing is now syntactic only; label /
++   asset / kind / position / accuracy / dup_choice validation runs *after*
++   `VerifyCSRF`. A malformed body with a missing token answers 403, not 422
++   (`TestAdminCreateValidation/csrf_is_checked_before_field_validation`).
++5. **Vacuous assertions removed.**
++   - Validation cases assert the exact frozen message is inside a visible
++     `role="alert"` element (`assertVisibleAlert`), not just anywhere in the
++     page.
++   - The unnumbered duplicate test extracts `#dup-panel` before asserting
++     `Save anyway`, so the always-present hidden low-accuracy button cannot
++     satisfy it.
++   - The merge-photo test no longer blesses the replaced photo as a required
++     200 response; it asserts the survivor references the new photo and does
++     not reference the old URL.
++6. **Dead code removed:** `listData.Page` and `badSubmission.Error`.
++7. **Tap target:** the SVG pin keeps its 22 px visual circle but gains an
++   invisible r=22 hit circle, so its box is ≥44 px on the mobile viewports.
 +
 +## Routes (all `AdminOnly`, registered from this task's `init()`s)
 +
@@ -90,98 +64,313 @@ index 0000000..eee37fc
 +|---|---|
 +| `GET /admin` | list page (`admin-list`), `page` 1-based, 50 rows/page + Older detector |
 +| `GET /admin/rows` | rows fragment ONLY for `HX-Request` (root `id="rows"`); else 303 `/admin?page=N` |
-+| `GET /admin/walk` | walk page with a fresh CSRF token + bbox for the client pre-flight |
++| `GET /admin/walk` | walk page with a fresh CSRF token + bbox |
 +| `GET /admin/lights/{id}` | detail/edit page; `ErrNotFound` → 404; `#light-pos` at 6 dp |
-+| `POST /admin/lights` | `LimitBody` first, then parse → CSRF → bbox 422 → photo 413/415 → duplicates; numbered: Merge + Cancel; unnumbered: Merge + Save anyway (numbered+save 422); merge applies label AND photo, no new row; success → role=status `Saved` (HX) / 303 `/admin` |
++| `POST /admin/lights` | `LimitBody` first, parse → CSRF → validate → bbox 422 → photo 413/415 → duplicates; numbered: Merge + Cancel; unnumbered: Merge + Save anyway (numbered+save 422); merge applies label AND photo atomically; success → role=status `Saved` (HX) / 303 `/admin` |
 +| `POST /admin/lights/{id}` | edit (label, asset_no; unspecified fields keep values) → 303 detail |
 +| `POST /admin/lights/{id}/delete` | soft delete → 303 `/admin` |
 +
-+Templates: `pages/admin-walk.html`, `pages/admin-list.html`,
-+`pages/admin-detail.html`, `pages/admin-login.html`;
-+`partials/admin-rows.html`, `partials/admin-dup.html`,
-+`partials/admin-alert.html`. `base.html`, `pages/index.html`,
-+`partials/probe.html` untouched.
++## Template inventory
++
++Pages: `pages/admin-walk.html`, `pages/admin-list.html`,
++`pages/admin-detail.html`, `pages/admin-login.html`.
++Partials: `partials/admin-rows.html`, `partials/admin-dup.html`,
++`partials/admin-alert.html`.
++`base.html`, `pages/index.html`, `partials/probe.html` untouched.
 +
 +JS: `web/static/js/walk.js` (200 lines, `// @ts-check`, ES module, no
 +`console.log`) + `web/static/js/globals.d.ts`.
-+
-+Files changed by this task (committed diff):
-+
-+- `internal/web/admin.go`, `admin_create.go`, `admin_merge.go`,
-+  `admin_test.go`, `web_test.go`
-+- `web/templates/pages/admin-{walk,list,detail,login}.html`,
-+  `web/templates/partials/admin-{rows,dup,alert}.html`
-+- `web/static/js/walk.js`, `web/static/js/globals.d.ts`
-+
-+No `internal/store` changes remain (reverted to `main`), no new dependencies, no
-+protected path touched.
 +
 +## Verification (this attempt, exit codes)
 +
 +| Command | Exit | Result |
 +|---|---|---|
 +| `make check-fast` | 0 | fmt-check, vet, golangci-lint 0 issues, `go test -race -shuffle` all green |
-+| `go test ./internal/web/... -run TestMergeAttachPhotoBranches -v` | 0 | all five merge-write branches pass |
 +| `make templates-check` | 0 | `TestRenderAll` snapshots + `npx html-validate testdata/rendered` |
 +| `make js-check` | 0 | `tsc --noEmit` strict checkJs |
-+| `make e2e-task TASK=T-205` | 0 | greps `@A-202|@A-203|@A-208|@A-209`; only inert drafts (T-207 activates them) |
-+| `npx playwright test --config web/templates/pw.config.ts --project=pixel-9` | 0 | 1/1 visual-evidence test (walk → duplicate → list → photo detail) |
-+| `npx playwright test --config web/templates/pw.config.ts --project=iphone-se-320` | 0 | 1/1 same flow at 320 px |
++| `make build` | 0 | `bin/server` |
++| `make e2e-task TASK=T-205` | 0 | grep pattern printed, **0 tests executed** (only inert `.txt` drafts; T-207 activates them) |
++| `npx playwright test --grep "@A-2"` | 1 | **No tests found** — no activated admin specs exist in this branch. This is NOT presented as verification. |
++| scratch visual flow (packet-sanctioned, deleted before commit) | 0 | 1/1 pixel-9, 1/1 iphone-se-320; see screenshots below. |
 +
-+The temporary visual harness lived only under the owned `web/templates/**` glob,
-+used the repo's server env with a unique gitignored `test-run.db-visual-*`, wrote
-+screenshots to `test-results/`, and removed itself before commit (a temporary
-+`tmp_cleanup.go` deleted the spec, config and its own source).
++The only claims oracle available before T-207 is the frozen drafts plus the
++packet. The scratch spec drove the real server + real store + real photo
++pipeline and asserted: 6-dp `#walk-pos`/`#pin-pos`, `accuracy 8 m`, enabled
++`Add light here`, CSRF form, portrait-orient6 preview intrinsic width > height,
++success `Saved`, list alt `GP-017 Ball field lamp`, numbered `#dup-panel` with
++the existing label/asset/distance, merge leaves one row with the twin label,
++detail `#light-pos` 6 dp and a landscape detail photo, no horizontal overflow,
++44×44 minimum for buttons/inputs/selects/pin, and attribution visible.
 +
-+## Visual evidence (regenerated this attempt and reviewed with vision)
++## Visual evidence (kept under `test-results/`, gitignored)
 +
-+Kept under `test-results/` (gitignored, as the packet specifies), both a
-+`pixel-9` and an `iphone-se-320` copy:
++- `test-results/t205-walk-{pixel-9,iphone-se-320}.png`
++- `test-results/t205-dup-{pixel-9,iphone-se-320}.png`
++- `test-results/t205-list-{pixel-9,iphone-se-320}.png`
++- `test-results/t205-detail-{pixel-9,iphone-se-320}.png`
 +
-+- `test-results/t205-walk-{pixel-9,iphone-se-320}.png` — `#walk-pos` at
-+  `42.761700, -71.030300`, `accuracy 8 m`, ±25 m pin pad with the labelled pin,
-+  `#pin-pos` at 6 dp, full-width `Add light here` in the lower third,
-+  attribution visible, nothing clipped, no horizontal overflow.
-+- `test-results/t205-dup-{pixel-9,iphone-se-320}.png` — amber warning icon +
-+  `Possible duplicate`, the EXISTING light's label, asset number and distance,
-+  full-width `Merge`, `Cancel` link, no `Save anyway` (numbered case).
-+- `test-results/t205-list-{pixel-9,iphone-se-320}.png` — `Lights` heading, a
-+  photo thumbnail (landscape) and a placeholder row, asset + label text, the
-+  status dot is accompanied by the word `unknown` (never colour-only).
-+- `test-results/t205-detail-{pixel-9,iphone-se-320}.png` — the
-+  `portrait-orient6-gps.jpg` upload renders **landscape** (`naturalWidth >
-+  naturalHeight`, asserted in the spec), 6-dp `#light-pos`, labelled edit form,
-+  `Save changes`, separated outline `Delete light`, no overflow at 320 px.
-+
-+Checked programmatically by the evidence spec: no horizontal overflow, and
-+every control in `#main` (buttons, links, the file input, the pin) has a
-+bounding box of at least 44×44 px. The global header nav (`base.html`, outside
-+this task's owns) is excluded.
++Checked with vision: `Add light here` sits in the lower third; accuracy text is
++readable; the pin and ±25 m scale are clear; numbered duplicate shows the
++EXISTING `Ball field lamp` + `GP-017` + distance, Merge and Cancel only; list
++thumbnails are visible with asset+label and the text status `unknown` (never
++colour-only); detail photo for `portrait-orient6-gps.jpg` renders landscape;
++`Delete light` is separated from `Save changes`; nothing is clipped and there
++is no horizontal overflow at 320 px; attribution is visible on every page.
 +
 +## Open issues / notes
 +
-+1. **Merge-photo store method is the follow-up.** `internal/store` is outside
-+   this task's `owns`; adding `EditLightPhoto` there trips the guard (exit 4).
-+   The owned `attachPhoto` implementation plus its branch tests are the
-+   in-scope equivalent. A later store-scoped task should absorb the write.
-+2. **`Cancel` in the numbered dup panel is a text link below 44 px** — frozen as
-+   a link named `Cancel`; changing it to a button would change the ARIA role and
-+   break the contract. All actual buttons meet the floor.
-+3. **`Delete light` is an outline button with a red warning icon, not a red
-+   filled button** — `web/static/css/app.css` is outside this task's owns and
-+   the CSP blocks inline styles; separation from `Save changes` is implemented
-+   (separate form).
-+4. **`walk.js` is at the 200-line budget ceiling** (exactly 200 lines).
-+5. **Visual screenshots are gitignored test artifacts.** They are present in the
-+   worktree under `test-results/` but are not part of the commit, matching the
-+   packet's "kept screenshots" instruction. A later `make e2e`/Playwright run
-+   clears `test-results/`.
++1. **`npx playwright test --grep "@A-2"` has no runnable specs yet.** The four
++   claim specs are inert `.txt` drafts by design; T-207 activates them. The
++   scratch run above is visual/handler evidence, not a substitute for those
++   frozen specs.
++2. **`installLoginPage` still installs the styled page over auth.go's
++   `loginPageTmpl`.** `internal/web/auth.go` is frozen for this task and the
++   packet requires `pages/admin-login.html` to replace T-203's minimal page;
++   the override is now loud (panic on parse/render error) and the live route is
++   driven by `TestAdminLoginPageIsTheStyledPipelinePage`. A future auth-owned
++   task should own the template variable directly.
++3. **The replaced merge photo is not garbage-collected.** The survivor points
++   at the new photo and no longer references the old URL; the old row/file is
++   left for a retention decision. A-207's no-stray-file rule covers a FAILED
++   upload (the pipeline removes its own file), not a deliberately replaced one.
++4. **Cancel in the numbered duplicate panel is a text link** below 44 px by
++   contract; it is the frozen accessible link, not a button. All buttons,
++   inputs, selects and the pin meet the 44 px floor.
++5. **`walk.js` is at the 200-line budget ceiling** (exactly 200 lines).
++6. Screenshots are gitignored test artifacts under `test-results/` and are not
++   part of the commit; a later Playwright run may clear them.
+diff --git a/internal/store/lights_photo.go b/internal/store/lights_photo.go
+new file mode 100644
+index 0000000..2a0fea9
+--- /dev/null
++++ b/internal/store/lights_photo.go
+@@ -0,0 +1,74 @@
++package store
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/amscotti/groveland-lights/internal/store/gen"
++)
++
++// EditLightPhoto applies the duplicate-merge write (A-205): it updates a live
++// light's label, asset number and photo reference in ONE transaction, stamps
++// updated_at and returns the row as read back. The label and photo either both
++// land or neither does, so a failed photo write cannot leave a half-applied
++// merge behind.
++//
++// A missing or soft-deleted id wraps ErrNotFound. Reusing another live light's
++// asset number wraps ErrDuplicateAssetNo and rolls the whole update back; any
++// other driver failure wraps the underlying error. The photo reference is
++// checked by the schema's foreign key, so an unknown photo id fails the update
++// (and therefore the transaction) rather than storing a dangling reference.
++func (db *DB) EditLightPhoto(ctx context.Context, id LightID, label string, assetNo *string, photoID PhotoID) (Light, error) {
++	tx, err := db.sql.BeginTx(ctx, nil)
++	if err != nil {
++		return Light{}, fmt.Errorf("store: edit light photo %d: begin: %w", id, err)
++	}
++	// Commit's error is authoritative; Rollback after a successful Commit is a
++	// harmless no-op returned by the driver.
++	defer func() { _ = tx.Rollback() }()
++
++	q := db.q.WithTx(tx)
++	now := time.Now().UTC().Format(time.RFC3339)
++	if _, err := q.UpdateLight(ctx, gen.UpdateLightParams{
++		Label:     label,
++		AssetNo:   toNullString(assetNo),
++		UpdatedAt: now,
++		ID:        int64(id),
++	}); err != nil {
++		switch {
++		case errors.Is(err, sql.ErrNoRows):
++			return Light{}, ErrNotFound
++		case isDuplicateAssetNo(err):
++			return Light{}, fmt.Errorf("store: edit light photo %d: %w: %w", id, ErrDuplicateAssetNo, err)
++		default:
++			return Light{}, fmt.Errorf("store: edit light photo %d: %w", id, err)
++		}
++	}
++	res, err := tx.ExecContext(ctx,
++		`UPDATE lights SET photo_id = ?1 WHERE id = ?2 AND deleted_at IS NULL`,
++		int64(photoID), int64(id))
++	if err != nil {
++		return Light{}, fmt.Errorf("store: edit light photo %d: photo: %w", id, err)
++	}
++	n, err := res.RowsAffected()
++	if err != nil {
++		return Light{}, fmt.Errorf("store: edit light photo %d: photo rows: %w", id, err)
++	}
++	if n == 0 {
++		return Light{}, ErrNotFound
++	}
++	row, err := q.GetLight(ctx, int64(id))
++	if err != nil {
++		if errors.Is(err, sql.ErrNoRows) {
++			return Light{}, ErrNotFound
++		}
++		return Light{}, fmt.Errorf("store: edit light photo %d: read back: %w", id, err)
++	}
++	if err := tx.Commit(); err != nil {
++		return Light{}, fmt.Errorf("store: edit light photo %d: commit: %w", id, err)
++	}
++	return lightFromGen(row)
++}
+diff --git a/internal/store/lights_photo_test.go b/internal/store/lights_photo_test.go
+new file mode 100644
+index 0000000..d9ca2b5
+--- /dev/null
++++ b/internal/store/lights_photo_test.go
+@@ -0,0 +1,140 @@
++package store
++
++import (
++	"context"
++	"errors"
++	"testing"
++)
++
++// TestEditLightPhoto covers the duplicate-merge store write (A-205): the label,
++// asset number and photo reference update together, and every failure branch
++// leaves the row untouched.
++func TestEditLightPhoto(t *testing.T) {
++	tests := []struct {
++		name  string
++		check func(t *testing.T)
++	}{
++		{"updates label asset and photo in one call", checkEditLightPhotoRoundTrip},
++		{"unknown id wraps ErrNotFound", checkEditLightPhotoMissing},
++		{"soft-deleted id wraps ErrNotFound", checkEditLightPhotoDeleted},
++		{"duplicate asset rolls the label and photo back", checkEditLightPhotoDuplicateAsset},
++		{"unknown photo id fails and rolls the label back", checkEditLightPhotoUnknownPhoto},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, tt.check)
++	}
++}
++
++func checkEditLightPhotoRoundTrip(t *testing.T) {
++	t.Helper()
++	ctx := context.Background()
++	db, _ := openFresh(t)
++	first := mustCreatePhoto(t, ctx, db, "photos/first.jpg", 320, 200)
++	second := mustCreatePhoto(t, ctx, db, "photos/second.jpg", 800, 600)
++	light := mustCreateLight(t, ctx, db, NewLight{
++		AssetNo: strPtr("GP-001"), Kind: KindPark, Label: "Original",
++		Lat: grovelandLat, Lon: grovelandLon, PhotoID: photoPtr(first.ID),
++	})
++
++	got, err := db.EditLightPhoto(ctx, light.ID, "Merged label", strPtr("GP-002"), second.ID)
++	if err != nil {
++		t.Fatalf("EditLightPhoto: %v", err)
++	}
++	if got.Label != "Merged label" {
++		t.Errorf("Label = %q, want Merged label", got.Label)
++	}
++	if got.AssetNo == nil || *got.AssetNo != "GP-002" {
++		t.Errorf("AssetNo = %v, want GP-002", got.AssetNo)
++	}
++	if got.PhotoID == nil || *got.PhotoID != second.ID {
++		t.Errorf("PhotoID = %v, want %d", got.PhotoID, second.ID)
++	}
++
++	readBack, err := db.GetLight(ctx, light.ID)
++	if err != nil {
++		t.Fatalf("GetLight: %v", err)
++	}
++	if readBack.Label != "Merged label" || readBack.PhotoID == nil || *readBack.PhotoID != second.ID {
++		t.Errorf("read back = %+v, want the merged label and photo", readBack)
++	}
++}
++
++func checkEditLightPhotoMissing(t *testing.T) {
++	t.Helper()
++	ctx := context.Background()
++	db, _ := openFresh(t)
++	photo := mustCreatePhoto(t, ctx, db, "photos/missing.jpg", 10, 10)
++	if _, err := db.EditLightPhoto(ctx, LightID(9_999_999), "Nope", nil, photo.ID); !errors.Is(err, ErrNotFound) {
++		t.Fatalf("EditLightPhoto(missing) = %v, want ErrNotFound", err)
++	}
++}
++
++func checkEditLightPhotoDeleted(t *testing.T) {
++	t.Helper()
++	ctx := context.Background()
++	db, _ := openFresh(t)
++	photo := mustCreatePhoto(t, ctx, db, "photos/deleted.jpg", 10, 10)
++	light := mustCreateLight(t, ctx, db, NewLight{
++		Kind: KindPark, Label: "Deleted", Lat: grovelandLat, Lon: grovelandLon,
++	})
++	mustSoftDelete(t, ctx, db, light.ID)
++	if _, err := db.EditLightPhoto(ctx, light.ID, "Nope", nil, photo.ID); !errors.Is(err, ErrNotFound) {
++		t.Fatalf("EditLightPhoto(deleted) = %v, want ErrNotFound", err)
++	}
++}
++
++func checkEditLightPhotoDuplicateAsset(t *testing.T) {
++	t.Helper()
++	ctx := context.Background()
++	db, _ := openFresh(t)
++	first := mustCreatePhoto(t, ctx, db, "photos/keep.jpg", 320, 200)
++	second := mustCreatePhoto(t, ctx, db, "photos/new.jpg", 640, 480)
++	mustCreateLight(t, ctx, db, NewLight{
++		AssetNo: strPtr("GP-100"), Kind: KindPark, Label: "Taken",
++		Lat: grovelandLat, Lon: grovelandLon,
++	})
++	target := mustCreateLight(t, ctx, db, NewLight{
++		AssetNo: strPtr("GP-101"), Kind: KindPark, Label: "Target",
++		Lat: grovelandLat, Lon: grovelandLon, PhotoID: photoPtr(first.ID),
++	})
++
++	if _, err := db.EditLightPhoto(ctx, target.ID, "Changed", strPtr("GP-100"), second.ID); !errors.Is(err, ErrDuplicateAssetNo) {
++		t.Fatalf("EditLightPhoto(duplicate asset) = %v, want ErrDuplicateAssetNo", err)
++	}
++	after, err := db.GetLight(ctx, target.ID)
++	if err != nil {
++		t.Fatalf("GetLight: %v", err)
++	}
++	if after.Label != "Target" {
++		t.Errorf("rolled-back Label = %q, want Target", after.Label)
++	}
++	if after.PhotoID == nil || *after.PhotoID != first.ID {
++		t.Errorf("rolled-back PhotoID = %v, want %d", after.PhotoID, first.ID)
++	}
++}
++
++func checkEditLightPhotoUnknownPhoto(t *testing.T) {
++	t.Helper()
++	ctx := context.Background()
++	db, _ := openFresh(t)
++	photo := mustCreatePhoto(t, ctx, db, "photos/original.jpg", 320, 200)
++	target := mustCreateLight(t, ctx, db, NewLight{
++		Kind: KindPark, Label: "Original", Lat: grovelandLat, Lon: grovelandLon,
++		PhotoID: photoPtr(photo.ID),
++	})
++
++	_, err := db.EditLightPhoto(ctx, target.ID, "Changed", nil, PhotoID(9_999_999))
++	if err == nil {
++		t.Fatal("EditLightPhoto(unknown photo) succeeded, want a foreign-key error")
++	}
++	if errors.Is(err, ErrNotFound) {
++		t.Fatalf("unknown photo = %v, want a DB error not ErrNotFound", err)
++	}
++	after, err := db.GetLight(ctx, target.ID)
++	if err != nil {
++		t.Fatalf("GetLight: %v", err)
++	}
++	if after.Label != "Original" || after.PhotoID == nil || *after.PhotoID != photo.ID {
++		t.Errorf("failed photo write left %+v, want the original label/photo", after)
++	}
++}
 diff --git a/internal/web/admin.go b/internal/web/admin.go
 new file mode 100644
-index 0000000..aef7d15
+index 0000000..0c78c26
 --- /dev/null
 +++ b/internal/web/admin.go
-@@ -0,0 +1,554 @@
+@@ -0,0 +1,561 @@
 +// Admin UI (A-202/A-203/A-208/A-209): the walk-the-town page, the light
 +// detail/edit page, the admin list with HTMX pagination and the soft-delete
 +// flow. Every route is wrapped in AdminOnly; every request is parsed once at
@@ -218,16 +407,25 @@ index 0000000..aef7d15
 +// data, so the styled pipeline output is captured once at startup and installed
 +// as that template. The frozen strings are unchanged; the served page now uses
 +// base.html (pico.css, 44 px button) instead of auth.go's minimal markup.
++//
++// A parse/render failure is a build defect, not a runtime condition: panic with
++// the template name rather than silently serving the legacy minimal page, which
++// would make TestRenderAll/visual checks green against a page production never
++// serves.
 +func installLoginPage() {
 +	tpl, err := parseTemplates()
 +	if err != nil {
-+		return // New will report the parse failure; keep the minimal page.
++		panic("web: admin login: parse templates: " + err.Error())
 +	}
 +	var buf bytes.Buffer
 +	if err := tpl.renderPage(&buf, "admin-login.html", pageData{Title: "Admin login"}); err != nil {
-+		return
++		panic("web: admin login: render: " + err.Error())
 +	}
-+	loginPageTmpl = template.Must(template.New("admin-login").Parse(buf.String()))
++	parsed, err := template.New("admin-login").Parse(buf.String())
++	if err != nil {
++		panic("web: admin login: parse rendered page: " + err.Error())
++	}
++	loginPageTmpl = parsed
 +}
 +
 +// adminPageSize is the frozen admin list page size: the 50 most recent
@@ -265,7 +463,6 @@ index 0000000..aef7d15
 +type listData struct {
 +	pageData
 +	Rows      []rowView
-+	Page      int
 +	OlderPage int
 +	NewerPage int
 +	HasOlder  bool
@@ -333,7 +530,6 @@ index 0000000..aef7d15
 +	}
 +	data := listData{
 +		pageData:  pageData{Title: "Lights"},
-+		Page:      page,
 +		NewerPage: page - 1,
 +		OlderPage: page + 1,
 +		HasNewer:  page > 1,
@@ -738,10 +934,10 @@ index 0000000..aef7d15
 +}
 diff --git a/internal/web/admin_create.go b/internal/web/admin_create.go
 new file mode 100644
-index 0000000..6f7a4bb
+index 0000000..fcfe162
 --- /dev/null
 +++ b/internal/web/admin_create.go
-@@ -0,0 +1,443 @@
+@@ -0,0 +1,454 @@
 +// POST /admin/lights — the add-light submission (A-202/A-204/A-205/A-206).
 +// Frozen check order: parse → CSRF → town bbox → photo validation →
 +// duplicates. The one multipart parse happens in the boundary parser (after
@@ -781,16 +977,24 @@ index 0000000..6f7a4bb
 +	message string
 +}
 +
-+func (b *badSubmission) Error() string { return b.message }
-+
 +func bad(status int, message string) *badSubmission {
 +	return &badSubmission{status: status, message: message}
 +}
 +
 +// walkSubmission is a POST /admin/lights body parsed once at the boundary;
-+// after parseWalkSubmission no handler touches the form.
++// after parseWalkSubmission no handler touches the form. The Raw fields hold
++// exactly what the admin typed, so every error re-render can echo them; the
++// typed fields are filled by validateWalkSubmission only after CSRF passes.
 +type walkSubmission struct {
 +	CSRFToken string
++	LabelRaw  string
++	AssetRaw  string
++	KindRaw   string
++	LatRaw    string
++	LonRaw    string
++	AccRaw    string
++	DupRaw    string
++
 +	Label     string
 +	AssetNo   *string
 +	Kind      store.Kind
@@ -798,12 +1002,13 @@ index 0000000..6f7a4bb
 +	Lon       float64
 +	AccuracyM *float64
 +	DupChoice string
-+	HTMX      bool
 +}
 +
 +// parseWalkSubmission lifts the multipart form into a typed submission.
 +// LimitBody(r) MUST have been called first (the handler does); the parse here
 +// is the request's single multipart parse, and the photo pipeline reuses it.
++// This step is syntactic only: field validation runs after CSRF so the frozen
++// parse → CSRF → bbox order always answers 403 to a bad token.
 +func parseWalkSubmission(r *http.Request) (walkSubmission, *badSubmission) {
 +	if err := r.ParseMultipartForm(adminFormMemory); err != nil {
 +		// A body over the LimitBody cap surfaces as *http.MaxBytesError and
@@ -817,57 +1022,53 @@ index 0000000..6f7a4bb
 +	}
 +	v := r.MultipartForm.Value
 +	val := func(key string) string { return firstValue(v, key) }
-+	sub := walkSubmission{
++	return walkSubmission{
 +		CSRFToken: strings.TrimSpace(val(CSRFTokenName)),
-+		HTMX:      r.Header.Get("HX-Request") != "",
-+	}
-+	if perr := parseWalkCore(&sub, val); perr != nil {
-+		return walkSubmission{}, perr
-+	}
-+	if perr := parseWalkOptional(&sub, val); perr != nil {
-+		return walkSubmission{}, perr
-+	}
-+	return sub, nil
++		LabelRaw:  val("label"),
++		AssetRaw:  val("asset_no"),
++		KindRaw:   val("kind"),
++		LatRaw:    val("lat"),
++		LonRaw:    val("lon"),
++		AccRaw:    val("accuracy_m"),
++		DupRaw:    val("dup_choice"),
++	}, nil
 +}
 +
-+// parseWalkCore parses the required fields: label, asset number, kind, position.
-+func parseWalkCore(sub *walkSubmission, val func(string) string) *badSubmission {
-+	sub.Label = strings.TrimSpace(val("label"))
++// validateWalkSubmission parses the required fields (label, asset number, kind,
++// position) and the optional ones (accuracy, dup_choice) into their typed form.
++// It runs after CSRF verification.
++func validateWalkSubmission(sub *walkSubmission) *badSubmission {
++	sub.Label = strings.TrimSpace(sub.LabelRaw)
 +	if len(sub.Label) < 1 || len(sub.Label) > 120 {
 +		return bad(http.StatusUnprocessableEntity, "Label must be 1 to 120 characters")
 +	}
-+	if raw := strings.TrimSpace(val("asset_no")); raw != "" {
++	if raw := strings.TrimSpace(sub.AssetRaw); raw != "" {
 +		if !assetNoPattern.MatchString(raw) {
 +			return bad(http.StatusUnprocessableEntity, "Asset number must be 1-32 letters, digits or dashes")
 +		}
 +		asset := raw
 +		sub.AssetNo = &asset
 +	}
-+	kind, err := store.ParseKind(strings.TrimSpace(val("kind")))
++	kind, err := store.ParseKind(strings.TrimSpace(sub.KindRaw))
 +	if err != nil || kind == store.KindStreet {
 +		// street is reserved for the later import; the walk form offers
 +		// park|building only (frozen reconciliation 3).
 +		return bad(http.StatusUnprocessableEntity, "Choose a kind: park or building")
 +	}
 +	sub.Kind = kind
-+	lat, lon, perr := parseLatLon(val("lat"), val("lon"))
++	lat, lon, perr := parseLatLon(sub.LatRaw, sub.LonRaw)
 +	if perr != nil {
 +		return bad(http.StatusUnprocessableEntity, "A position is required — wait for a fix or type one in")
 +	}
 +	sub.Lat, sub.Lon = lat, lon
-+	return nil
-+}
-+
-+// parseWalkOptional parses the optional fields: accuracy and dup_choice.
-+func parseWalkOptional(sub *walkSubmission, val func(string) string) *badSubmission {
-+	if raw := strings.TrimSpace(val("accuracy_m")); raw != "" {
++	if raw := strings.TrimSpace(sub.AccRaw); raw != "" {
 +		acc, err := strconv.ParseFloat(raw, 64)
 +		if err != nil || acc < 0 || !finite(acc) {
 +			return bad(http.StatusUnprocessableEntity, "Accuracy must be a metre value of zero or more")
 +		}
 +		sub.AccuracyM = &acc
 +	}
-+	switch dc := val("dup_choice"); dc {
++	switch dc := sub.DupRaw; dc {
 +	case "", "merge", "save":
 +		sub.DupChoice = dc
 +	default:
@@ -917,8 +1118,11 @@ index 0000000..6f7a4bb
 +		s.walkReject(w, r, nil, perr.status, perr.message)
 +		return
 +	}
-+	if err := VerifyCSRF(r, sub.CSRFToken); err != nil {
-+		http.Error(w, "forbidden", http.StatusForbidden)
++	if !s.verifyWalkCSRF(w, r, sub) {
++		return
++	}
++	if perr := validateWalkSubmission(&sub); perr != nil {
++		s.walkReject(w, r, &sub, perr.status, perr.message)
 +		return
 +	}
 +	if !s.Cfg.TownBBox.Contains(sub.Lat, sub.Lon) {
@@ -926,34 +1130,76 @@ index 0000000..6f7a4bb
 +			"That position is outside Groveland town bounds")
 +		return
 +	}
-+	photo, err := s.Photo(r) // reuses the boundary parse; validates the upload
-+	if err != nil {
-+		status, message := PhotoProblem(err)
-+		if status == http.StatusInternalServerError {
-+			s.Log.Error("admin create: photo", "err", err)
-+			http.Error(w, "internal error", status)
-+			return
-+		}
-+		s.walkReject(w, r, &sub, status, message)
++	photo, ok := s.walkPhoto(w, r, &sub)
++	if !ok {
 +		return
 +	}
-+	decision, dup := s.classifyDuplicate(r, sub)
-+	if dup {
-+		switch {
-+		case sub.DupChoice == "merge":
-+			s.mergeDuplicate(w, r, sub, decision, photo)
-+			return
-+		case sub.DupChoice == "save" && decision.Numbered:
-+			// Frozen: save-anyway is unnumbered-only.
-+			s.walkReject(w, r, &sub, http.StatusUnprocessableEntity,
-+				"This fixture has an asset number — merge it or cancel instead")
-+			return
-+		case sub.DupChoice == "":
-+			s.respondDuplicate(w, r, sub, decision)
-+			return
-+		}
++	if s.respondWalkDuplicate(w, r, sub, photo) {
++		return
 +	}
-+	_, err = s.Store.CreateLight(r.Context(), store.NewLight{
++	s.createWalkLight(w, r, sub, photo)
++}
++
++// verifyWalkCSRF answers 403 for a bad or missing token. It runs before any
++// semantic field validation (frozen parse → CSRF → bbox order).
++func (s *Server) verifyWalkCSRF(w http.ResponseWriter, r *http.Request, sub walkSubmission) bool {
++	if err := VerifyCSRF(r, sub.CSRFToken); err != nil {
++		http.Error(w, "forbidden", http.StatusForbidden)
++		return false
++	}
++	return true
++}
++
++// walkPhoto runs the photo pipeline and maps its errors. ok is false when a
++// response has already been written.
++func (s *Server) walkPhoto(w http.ResponseWriter, r *http.Request, sub *walkSubmission) (*UploadedPhoto, bool) {
++	photo, err := s.Photo(r) // reuses the boundary parse; validates the upload
++	if err == nil {
++		return photo, true
++	}
++	status, message := PhotoProblem(err)
++	if status == http.StatusInternalServerError {
++		s.Log.Error("admin create: photo", "err", err)
++		http.Error(w, "internal error", status)
++		return nil, false
++	}
++	s.walkReject(w, r, sub, status, message)
++	return nil, false
++}
++
++// respondWalkDuplicate handles a classified duplicate. It reports true when it
++// has written the response and the caller must stop.
++func (s *Server) respondWalkDuplicate(w http.ResponseWriter, r *http.Request, sub walkSubmission, photo *UploadedPhoto) bool {
++	decision, dup, err := s.classifyDuplicate(r, sub)
++	if err != nil {
++		s.Log.Error("admin create: duplicate lookup", "err", err)
++		http.Error(w, "internal error", http.StatusInternalServerError)
++		return true
++	}
++	if !dup {
++		return false
++	}
++	switch {
++	case sub.DupChoice == "merge":
++		s.mergeDuplicate(w, r, sub, decision, photo)
++		return true
++	case sub.DupChoice == "save" && decision.Numbered:
++		// Frozen: save-anyway is unnumbered-only.
++		s.walkReject(w, r, &sub, http.StatusUnprocessableEntity,
++			"This fixture has an asset number — merge it or cancel instead")
++		return true
++	case sub.DupChoice == "":
++		s.respondDuplicate(w, r, sub, decision)
++		return true
++	default:
++		// dup_choice=save on an unnumbered duplicate: fall through and create.
++		return false
++	}
++}
++
++// createWalkLight inserts the light and answers success (or the race panel).
++func (s *Server) createWalkLight(w http.ResponseWriter, r *http.Request, sub walkSubmission, photo *UploadedPhoto) {
++	_, err := s.Store.CreateLight(r.Context(), store.NewLight{
 +		AssetNo:   sub.AssetNo,
 +		Kind:      sub.Kind,
 +		Label:     sub.Label,
@@ -962,24 +1208,30 @@ index 0000000..6f7a4bb
 +		AccuracyM: sub.AccuracyM,
 +		PhotoID:   photoIDOf(photo),
 +	})
-+	if errors.Is(err, store.ErrDuplicateAssetNo) {
-+		// Lost a race against a concurrent create with the same asset number:
-+		// show the numbered duplicate panel for the row that won.
-+		if existing, gerr := s.Store.LightByAssetNo(r.Context(), *sub.AssetNo); gerr == nil {
-+			s.respondDuplicate(w, r, sub, geo.DupDecision{
-+				Numbered:   true,
-+				ExistingID: int64(existing.ID),
-+				DistanceM:  geo.DistanceM(geo.Point{Lat: sub.Lat, Lon: sub.Lon}, geo.Point{Lat: existing.Lat, Lon: existing.Lon}),
-+			})
-+			return
-+		}
-+	}
-+	if err != nil {
-+		s.Log.Error("admin create", "err", err)
-+		http.Error(w, "internal error", http.StatusInternalServerError)
++	if err == nil {
++		s.respondWalkOK(w, r)
 +		return
 +	}
-+	s.respondWalkOK(w, r)
++	if errors.Is(err, store.ErrDuplicateAssetNo) && s.respondCreateRace(w, r, sub) {
++		return
++	}
++	s.Log.Error("admin create", "err", err)
++	http.Error(w, "internal error", http.StatusInternalServerError)
++}
++
++// respondCreateRace shows the numbered duplicate panel for the row that won a
++// concurrent same-asset-number create.
++func (s *Server) respondCreateRace(w http.ResponseWriter, r *http.Request, sub walkSubmission) bool {
++	existing, err := s.Store.LightByAssetNo(r.Context(), *sub.AssetNo)
++	if err != nil {
++		return false
++	}
++	s.respondDuplicate(w, r, sub, geo.DupDecision{
++		Numbered:   true,
++		ExistingID: int64(existing.ID),
++		DistanceM:  geo.DistanceM(geo.Point{Lat: sub.Lat, Lon: sub.Lon}, geo.Point{Lat: existing.Lat, Lon: existing.Lon}),
++	})
++	return true
 +}
 +
 +// photoIDOf converts an optional uploaded photo into its typed id reference.
@@ -992,23 +1244,30 @@ index 0000000..6f7a4bb
 +}
 +
 +// classifyDuplicate gathers the near candidates (plus the asset-number hit,
-+// which is distance-independent) and lets geo.ClassifyDuplicate decide.
-+func (s *Server) classifyDuplicate(r *http.Request, sub walkSubmission) (geo.DupDecision, bool) {
++// which is distance-independent) and lets geo.ClassifyDuplicate decide. A
++// store failure is returned to the caller, never swallowed: falling through
++// would create a light with duplicate detection silently disabled.
++func (s *Server) classifyDuplicate(r *http.Request, sub walkSubmission) (geo.DupDecision, bool, error) {
 +	newPt := geo.Point{Lat: sub.Lat, Lon: sub.Lon}
 +	var candidates []geo.Candidate
 +	if sub.AssetNo != nil {
-+		if existing, err := s.Store.LightByAssetNo(r.Context(), *sub.AssetNo); err == nil {
++		existing, err := s.Store.LightByAssetNo(r.Context(), *sub.AssetNo)
++		switch {
++		case err == nil:
 +			candidates = append(candidates, geo.Candidate{
 +				LightID: int64(existing.ID),
 +				AssetNo: *sub.AssetNo,
 +				Point:   geo.Point{Lat: existing.Lat, Lon: existing.Lon},
 +			})
++		case errors.Is(err, store.ErrNotFound):
++			// No numbered duplicate; the proximity check still runs.
++		default:
++			return geo.DupDecision{}, false, fmt.Errorf("light by asset_no: %w", err)
 +		}
 +	}
 +	nearby, err := s.Store.NearbyLights(r.Context(), sub.Lat, sub.Lon, geo.NumberedRadiusM)
 +	if err != nil {
-+		s.Log.Error("admin create: nearby", "err", err)
-+		return geo.DupDecision{}, false
++		return geo.DupDecision{}, false, fmt.Errorf("nearby lights: %w", err)
 +	}
 +	for _, l := range nearby {
 +		asset := ""
@@ -1025,46 +1284,8 @@ index 0000000..6f7a4bb
 +	if sub.AssetNo != nil {
 +		newAsset = *sub.AssetNo
 +	}
-+	return geo.ClassifyDuplicate(newAsset, newPt, candidates)
-+}
-+
-+// mergeDuplicate applies the new submission's label and photo onto the
-+// existing row (frozen: no new light row is created).
-+func (s *Server) mergeDuplicate(w http.ResponseWriter, r *http.Request, sub walkSubmission, decision geo.DupDecision, photo *UploadedPhoto) {
-+	existing, err := s.Store.GetLight(r.Context(), store.LightID(decision.ExistingID))
-+	if err != nil {
-+		// The duplicate vanished between the check and the merge: save as a
-+		// plain new light instead (keeping the uploaded photo).
-+		_, cerr := s.Store.CreateLight(r.Context(), store.NewLight{
-+			AssetNo:   sub.AssetNo,
-+			Kind:      sub.Kind,
-+			Label:     sub.Label,
-+			Lat:       sub.Lat,
-+			Lon:       sub.Lon,
-+			AccuracyM: sub.AccuracyM,
-+			PhotoID:   photoIDOf(photo),
-+		})
-+		if cerr != nil {
-+			s.Log.Error("admin merge: create", "err", cerr)
-+			http.Error(w, "internal error", http.StatusInternalServerError)
-+			return
-+		}
-+		s.respondWalkOK(w, r)
-+		return
-+	}
-+	if _, err := s.Store.EditLight(r.Context(), existing.ID, sub.Label, existing.AssetNo); err != nil {
-+		s.Log.Error("admin merge", "err", err)
-+		http.Error(w, "internal error", http.StatusInternalServerError)
-+		return
-+	}
-+	if photo != nil {
-+		if err := s.attachPhoto(r.Context(), existing.ID, photo.ID); err != nil {
-+			s.Log.Error("admin merge: attach photo", "err", err)
-+			http.Error(w, "internal error", http.StatusInternalServerError)
-+			return
-+		}
-+	}
-+	s.respondWalkOK(w, r)
++	decision, dup := geo.ClassifyDuplicate(newAsset, newPt, candidates)
++	return decision, dup, nil
 +}
 +
 +// respondDuplicate answers 409 with the duplicate panel: the fragment for
@@ -1087,7 +1308,7 @@ index 0000000..6f7a4bb
 +		Numbered: decision.Numbered,
 +	}
 +	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-+	if sub.HTMX {
++	if r.Header.Get("HX-Request") != "" {
 +		w.WriteHeader(http.StatusConflict)
 +		if err := s.tpl.renderPartial(w, "partials/admin-dup.html", view); err != nil {
 +			s.Log.Error("admin create: dup render", "err", err)
@@ -1115,7 +1336,7 @@ index 0000000..6f7a4bb
 +		}
 +		return
 +	}
-+	submitted := walkSubmission{Kind: store.KindPark}
++	submitted := walkSubmission{Kind: store.KindPark, KindRaw: string(store.KindPark)}
 +	if sub != nil {
 +		submitted = *sub
 +	}
@@ -1131,37 +1352,23 @@ index 0000000..6f7a4bb
 +}
 +
 +// walkPageDataOf rebuilds the walk page data from a parsed submission so the
-+// no-JS error re-render keeps the admin's typed values.
++// no-JS error re-render keeps the admin's typed values exactly as submitted
++// (Raw fields), even when validation stopped before every typed field was
++// filled. A parse failure has no submission, so the caller passes park.
 +func (s *Server) walkPageDataOf(w http.ResponseWriter, r *http.Request, sub walkSubmission) walkPageData {
 +	return walkPageData{
 +		pageData:  pageData{Title: "Walk the town", TestEnv: s.Cfg.IsTest()},
 +		CSRFToken: IssueCSRFToken(w, r),
 +		BBox:      formatBBox(s.Cfg.TownBBox),
 +		Values: walkValues{
-+			Label:     sub.Label,
-+			AssetNo:   assetString(sub.AssetNo),
-+			Kind:      string(sub.Kind),
-+			Lat:       strconv.FormatFloat(sub.Lat, 'f', -1, 64),
-+			Lon:       strconv.FormatFloat(sub.Lon, 'f', -1, 64),
-+			AccuracyM: accuracyString(sub.AccuracyM),
++			Label:     sub.LabelRaw,
++			AssetNo:   sub.AssetRaw,
++			Kind:      sub.KindRaw,
++			Lat:       sub.LatRaw,
++			Lon:       sub.LonRaw,
++			AccuracyM: sub.AccRaw,
 +		},
 +	}
-+}
-+
-+// assetString renders an optional asset number for re-render.
-+func assetString(asset *string) string {
-+	if asset == nil {
-+		return ""
-+	}
-+	return *asset
-+}
-+
-+// accuracyString renders an optional accuracy for re-render.
-+func accuracyString(acc *float64) string {
-+	if acc == nil {
-+		return ""
-+	}
-+	return strconv.FormatFloat(*acc, 'f', -1, 64)
 +}
 +
 +// respondWalkOK answers success: role=status "Saved" fragment for HTMX, the
@@ -1187,97 +1394,77 @@ index 0000000..6f7a4bb
 +}
 diff --git a/internal/web/admin_merge.go b/internal/web/admin_merge.go
 new file mode 100644
-index 0000000..29680b7
+index 0000000..a9ac7e8
 --- /dev/null
 +++ b/internal/web/admin_merge.go
-@@ -0,0 +1,81 @@
-+// Photo attach for the duplicate merge (A-205): dup_choice=merge must apply
-+// the new submission's label AND photo onto the surviving row.
-+//
-+// internal/store is outside this task's owns and the store API merged with
-+// T-201 has no photo-update method (EditLight writes label/asset only), so the
-+// one UPDATE the merge needs runs against the same SQLite file through a short
-+// auxiliary connection. Moving this into the store as EditLightPhoto is the
-+// follow-up once internal/store is in scope.
+@@ -0,0 +1,61 @@
++// Duplicate merge (A-205): dup_choice=merge applies the new submission's label
++// AND photo onto the surviving row, never creating a second row.
 +package web
 +
 +import (
-+	"context"
-+	"database/sql"
 +	"errors"
-+	"fmt"
-+	"time"
++	"net/http"
 +
-+	_ "modernc.org/sqlite" // the store's pure-Go driver; same database file
-+
++	"github.com/amscotti/groveland-lights/internal/geo"
 +	"github.com/amscotti/groveland-lights/internal/store"
 +)
 +
-+// mergeUpdateTimeout bounds the auxiliary attach write; the store's own DSN
-+// uses the same 5 s busy timeout, so lock contention behaves identically.
-+const mergeUpdateTimeout = 5 * time.Second
-+
-+// errMergeDBPath mirrors the store's DSN-path rule: '?', '#' and '%' would be
-+// reinterpreted by the driver's URL parsing, so the attach write refuses such
-+// a path instead of quietly updating a different file.
-+var errMergeDBPath = errors.New("admin merge: DB_PATH has a character the SQLite DSN cannot carry")
-+
-+// checkMergeDBPath validates the auxiliary connection's file path before it is
-+// spliced into a DSN.
-+func checkMergeDBPath(p string) error {
-+	if p == "" {
-+		return errors.New("admin merge: DB_PATH is not configured")
-+	}
-+	for _, r := range p {
-+		if r == '?' || r == '#' || r == '%' {
-+			return fmt.Errorf("%w: %q", errMergeDBPath, string(r))
++// mergeDuplicate applies the new submission's label and photo onto the
++// existing row. With a photo the write goes through store.EditLightPhoto,
++// which updates the label, asset number and photo in one transaction: if the
++// photo write fails, the label is rolled back too. Without a photo the plain
++// EditLight path is used.
++//
++// The replaced photo row/file is intentionally not deleted here: A-207's
++// no-stray-file contract covers a FAILED upload (the pipeline removes its own
++// file), while garbage-collecting a replaced, still-served photo is a separate
++// retention decision.
++func (s *Server) mergeDuplicate(w http.ResponseWriter, r *http.Request, sub walkSubmission, decision geo.DupDecision, photo *UploadedPhoto) {
++	existing, err := s.Store.GetLight(r.Context(), store.LightID(decision.ExistingID))
++	if err != nil {
++		if !errors.Is(err, store.ErrNotFound) {
++			s.Log.Error("admin merge: read existing", "err", err)
++			http.Error(w, "internal error", http.StatusInternalServerError)
++			return
 +		}
++		// The duplicate vanished between the check and the merge: save as a
++		// plain new light instead (keeping the uploaded photo).
++		_, cerr := s.Store.CreateLight(r.Context(), store.NewLight{
++			AssetNo:   sub.AssetNo,
++			Kind:      sub.Kind,
++			Label:     sub.Label,
++			Lat:       sub.Lat,
++			Lon:       sub.Lon,
++			AccuracyM: sub.AccuracyM,
++			PhotoID:   photoIDOf(photo),
++		})
++		if cerr != nil {
++			s.Log.Error("admin merge: create", "err", cerr)
++			http.Error(w, "internal error", http.StatusInternalServerError)
++			return
++		}
++		s.respondWalkOK(w, r)
++		return
 +	}
-+	return nil
-+}
-+
-+// attachPhoto sets one live light's photo_id, mirroring the store's ownership
-+// of the live-row guard and the updated_at stamp. A missing or soft-deleted id
-+// wraps store.ErrNotFound; every other failure is a wrapped DB error (never
-+// mistaken for a missing row).
-+func (s *Server) attachPhoto(ctx context.Context, id store.LightID, photo store.PhotoID) error {
-+	if err := checkMergeDBPath(s.Cfg.DBPath); err != nil {
-+		return err
++	if photo != nil {
++		_, err = s.Store.EditLightPhoto(r.Context(), existing.ID, sub.Label, existing.AssetNo, photo.ID)
++	} else {
++		_, err = s.Store.EditLight(r.Context(), existing.ID, sub.Label, existing.AssetNo)
 +	}
-+	dsn := "file:" + s.Cfg.DBPath +
-+		"?_pragma=journal_mode(WAL)" +
-+		"&_pragma=busy_timeout(5000)" +
-+		"&_pragma=foreign_keys(1)"
-+	db, err := sql.Open("sqlite", dsn)
 +	if err != nil {
-+		return fmt.Errorf("admin merge: open db: %w", err)
++		s.Log.Error("admin merge", "err", err)
++		http.Error(w, "internal error", http.StatusInternalServerError)
++		return
 +	}
-+	defer func() { _ = db.Close() }()
-+	ctx, cancel := context.WithTimeout(ctx, mergeUpdateTimeout)
-+	defer cancel()
-+	res, err := db.ExecContext(ctx, `
-+		UPDATE lights
-+		SET photo_id = ?1, updated_at = ?2
-+		WHERE id = ?3 AND deleted_at IS NULL`,
-+		int64(photo), time.Now().UTC().Format(time.RFC3339), int64(id))
-+	if err != nil {
-+		return fmt.Errorf("admin merge: update photo: %w", err)
-+	}
-+	n, err := res.RowsAffected()
-+	if err != nil {
-+		return fmt.Errorf("admin merge: update photo: %w", err)
-+	}
-+	if n == 0 {
-+		return store.ErrNotFound
-+	}
-+	return nil
++	s.respondWalkOK(w, r)
 +}
 diff --git a/internal/web/admin_test.go b/internal/web/admin_test.go
 new file mode 100644
-index 0000000..a5e7d92
+index 0000000..9c0bf55
 --- /dev/null
 +++ b/internal/web/admin_test.go
-@@ -0,0 +1,1155 @@
+@@ -0,0 +1,1154 @@
 +package web
 +
 +// Admin UI handler tests (A-202/A-203/A-208/A-209). Every route is exercised
@@ -1289,7 +1476,7 @@ index 0000000..a5e7d92
 +
 +import (
 +	"context"
-+	"errors"
++	"database/sql"
 +	"fmt"
 +	"io"
 +	"log/slog"
@@ -1805,14 +1992,14 @@ index 0000000..a5e7d92
 +		fields map[string]string
 +		want   string
 +	}{
-+		{"empty label", map[string]string{"label": "", "kind": "park", "lat": "42.76", "lon": "-71.03"}, "Label must be"},
-+		{"over-long label", map[string]string{"label": long, "kind": "park", "lat": "42.76", "lon": "-71.03"}, "Label must be"},
-+		{"bad asset", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "-71.03", "asset_no": "bad space"}, "Asset number"},
-+		{"street kind reserved", map[string]string{"label": "L", "kind": "street", "lat": "42.76", "lon": "-71.03"}, "park or building"},
-+		{"missing kind", map[string]string{"label": "L", "lat": "42.76", "lon": "-71.03"}, "park or building"},
-+		{"bad lat", map[string]string{"label": "L", "kind": "park", "lat": "abc", "lon": "-71.03"}, "position is required"},
-+		{"bad lon", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "1e999"}, "position is required"},
-+		{"negative accuracy", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "-71.03", "accuracy_m": "-1"}, "Accuracy"},
++		{"empty label", map[string]string{"label": "", "kind": "park", "lat": "42.76", "lon": "-71.03"}, "Label must be 1 to 120 characters"},
++		{"over-long label", map[string]string{"label": long, "kind": "park", "lat": "42.76", "lon": "-71.03"}, "Label must be 1 to 120 characters"},
++		{"bad asset", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "-71.03", "asset_no": "bad space"}, "Asset number must be 1-32 letters, digits or dashes"},
++		{"street kind reserved", map[string]string{"label": "L", "kind": "street", "lat": "42.76", "lon": "-71.03"}, "Choose a kind: park or building"},
++		{"missing kind", map[string]string{"label": "L", "lat": "42.76", "lon": "-71.03"}, "Choose a kind: park or building"},
++		{"bad lat", map[string]string{"label": "L", "kind": "park", "lat": "abc", "lon": "-71.03"}, "A position is required — wait for a fix or type one in"},
++		{"bad lon", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "1e999"}, "A position is required — wait for a fix or type one in"},
++		{"negative accuracy", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "-71.03", "accuracy_m": "-1"}, "Accuracy must be a metre value of zero or more"},
 +		{"unknown dup_choice", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "-71.03", "dup_choice": "nope"}, "Unknown duplicate choice"},
 +	}
 +	for _, tc := range tests {
@@ -1821,9 +2008,9 @@ index 0000000..a5e7d92
 +			if rec.Code != http.StatusUnprocessableEntity {
 +				t.Fatalf("status = %d, want 422; body:\n%s", rec.Code, rec.Body.String())
 +			}
-+			if !strings.Contains(rec.Body.String(), tc.want) {
-+				t.Errorf("body lacks %q; body:\n%s", tc.want, rec.Body.String())
-+			}
++			// The message must be the visible server alert, not the page's
++			// always-present "Asset number" label (or the hidden placeholder).
++			assertVisibleAlert(t, rec.Body.String(), tc.want)
 +		})
 +	}
 +	t.Run("missing csrf 403", func(t *testing.T) {
@@ -1840,6 +2027,16 @@ index 0000000..a5e7d92
 +		}, "", "", nil, session, mustCSRFToken(t), false)
 +		if rec.Code != http.StatusForbidden {
 +			t.Fatalf("status = %d, want 403", rec.Code)
++		}
++	})
++	t.Run("csrf is checked before field validation", func(t *testing.T) {
++		// A malformed label must NOT turn a missing token into a 422: the
++		// frozen order is parse → CSRF → bbox.
++		rec := adminPostMultipart(t, s, "/admin/lights", map[string]string{
++			"label": "", "kind": "nope", "lat": "not-a-coordinate", "lon": "x",
++		}, "", "", nil, session, "", false)
++		if rec.Code != http.StatusForbidden {
++			t.Fatalf("status = %d, want 403; body:\n%s", rec.Code, rec.Body.String())
 +		}
 +	})
 +	t.Run("non-multipart body 400 rerenders a usable form", func(t *testing.T) {
@@ -2080,75 +2277,58 @@ index 0000000..a5e7d92
 +	if newPhoto == oldPhoto {
 +		t.Errorf("survivor kept its old photo %q; the merge must apply the uploaded one", oldPhoto)
 +	}
-+	for _, src := range []string{newPhoto, oldPhoto} {
-+		if served := adminGet(t, s, src, session, false); served.Code != http.StatusOK {
-+			t.Errorf("photo %s status = %d, want 200", src, served.Code)
-+		}
++	if served := adminGet(t, s, newPhoto, session, false); served.Code != http.StatusOK {
++		t.Errorf("merged photo %s status = %d, want 200", newPhoto, served.Code)
++	}
++	// The survivor no longer references the replaced photo. Its old row/file is
++	// intentionally left for a future retention/GC decision (documented in
++	// admin_merge.go); this test must not bless or require that leak.
++	body := adminGet(t, s, detailURL, session, false).Body.String()
++	if strings.Contains(body, oldPhoto) {
++		t.Errorf("detail still references the replaced photo %q; body:\n%s", oldPhoto, body)
 +	}
 +}
 +
-+// TestMergeAttachPhotoBranches covers the auxiliary merge write's edge paths:
-+// the unhappy configurations are refused before touching SQLite, an unknown or
-+// soft-deleted light wraps ErrNotFound, and a canceled context surfaces a DB
-+// error rather than masquerading as a vanished row.
-+func TestMergeAttachPhotoBranches(t *testing.T) {
-+	s, session := newAdminServer(t)
-+	csrf := adminCSRF(t)
-+	ctx := context.Background()
-+
-+	t.Run("unset DB_PATH refuses", func(t *testing.T) {
-+		empty := *s
-+		empty.Cfg.DBPath = ""
-+		if err := empty.attachPhoto(ctx, 1, 1); err == nil {
-+			t.Fatal("attachPhoto with no DB_PATH succeeded")
-+		} else if errors.Is(err, store.ErrNotFound) {
-+			t.Fatalf("misconfigured DB_PATH = %v, want a config error not ErrNotFound", err)
-+		}
-+	})
-+	t.Run("ambiguous DB_PATH refuses", func(t *testing.T) {
-+		for _, bad := range []string{"/tmp/a?b.db", "/tmp/a#b.db", "/tmp/a%b.db"} {
-+			amb := *s
-+			amb.Cfg.DBPath = bad
-+			if err := amb.attachPhoto(ctx, 1, 1); !errors.Is(err, errMergeDBPath) {
-+				t.Errorf("attachPhoto(%q) = %v, want errMergeDBPath", bad, err)
++// TestAdminCreateDuplicateLookupFailure pins the no-swallow rule: a store
++// failure during duplicate classification answers 500 instead of silently
++// creating the light with duplicate detection disabled.
++func TestAdminCreateDuplicateLookupFailure(t *testing.T) {
++	tests := []struct {
++		name   string
++		fields map[string]string
++	}{
++		{
++			name:   "nearby lookup failure",
++			fields: map[string]string{"label": "Unchecked lamp", "kind": "park", "lat": "42.7617", "lon": "-71.0303"},
++		},
++		{
++			name: "asset lookup failure",
++			fields: map[string]string{
++				"label": "Unchecked lamp", "kind": "park", "lat": "42.7617", "lon": "-71.0303",
++				"asset_no": "GP-500",
++			},
++		},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			s, session := newAdminServer(t)
++			csrf := adminCSRF(t)
++			// Break ONLY the lights table: sessions must keep working so the
++			// request reaches the handler, and the duplicate lookup fails.
++			raw, err := sql.Open("sqlite", "file:"+s.Cfg.DBPath+"?_pragma=busy_timeout(5000)")
++			if err != nil {
++				t.Fatalf("open raw db: %v", err)
 +			}
-+		}
-+	})
-+	t.Run("unknown light wraps ErrNotFound", func(t *testing.T) {
-+		if err := s.attachPhoto(ctx, store.LightID(9_999_999), store.PhotoID(1)); !errors.Is(err, store.ErrNotFound) {
-+			t.Fatalf("attachPhoto(missing) = %v, want ErrNotFound", err)
-+		}
-+	})
-+	t.Run("soft-deleted light wraps ErrNotFound", func(t *testing.T) {
-+		createLight(t, s, session, csrf, map[string]string{
-+			"label": "Deleted merge target", "kind": "park", "lat": "42.7617", "lon": "-71.0303",
++			t.Cleanup(func() { _ = raw.Close() })
++			if _, err := raw.ExecContext(context.Background(), "DROP TABLE lights"); err != nil {
++				t.Fatalf("drop lights: %v", err)
++			}
++			rec := postCreate(t, s, session, csrf, tc.fields)
++			if rec.Code != http.StatusInternalServerError {
++				t.Fatalf("status = %d, want 500; body:\n%s", rec.Code, rec.Body.String())
++			}
 +		})
-+		list := adminGet(t, s, "/admin", session, false).Body.String()
-+		detailURL := regexp.MustCompile(`href="(/admin/lights/\d+)"`).FindStringSubmatch(list)[1]
-+		var id int64
-+		if _, err := fmt.Sscanf(detailURL, "/admin/lights/%d", &id); err != nil {
-+			t.Fatalf("parse detail url %q: %v", detailURL, err)
-+		}
-+		del := adminPostMultipart(t, s, detailURL+"/delete",
-+			map[string]string{CSRFTokenName: csrf}, "", "", nil, session, csrf, false)
-+		if del.Code != http.StatusSeeOther {
-+			t.Fatalf("delete status = %d, want 303", del.Code)
-+		}
-+		if err := s.attachPhoto(ctx, store.LightID(id), store.PhotoID(1)); !errors.Is(err, store.ErrNotFound) {
-+			t.Fatalf("attachPhoto(deleted) = %v, want ErrNotFound", err)
-+		}
-+	})
-+	t.Run("canceled context is a DB error, not ErrNotFound", func(t *testing.T) {
-+		canceled, cancel := context.WithCancel(ctx)
-+		cancel()
-+		err := s.attachPhoto(canceled, 1, 1)
-+		if err == nil {
-+			t.Fatal("attachPhoto with a canceled context succeeded")
-+		}
-+		if errors.Is(err, store.ErrNotFound) {
-+			t.Fatalf("canceled context = %v, want a DB error not ErrNotFound", err)
-+		}
-+	})
++	}
 +}
 +
 +func TestAdminDuplicateUnnumbered(t *testing.T) {
@@ -2164,15 +2344,21 @@ index 0000000..a5e7d92
 +		if rec.Code != http.StatusConflict {
 +			t.Fatalf("status = %d, want 409; body:\n%s", rec.Code, rec.Body.String())
 +		}
-+		body := rec.Body.String()
-+		if !strings.Contains(body, `value="save"`) || !strings.Contains(body, "Save anyway") {
-+			t.Errorf("unnumbered panel lacks Save anyway; body:\n%s", body)
++		// Scope to #dup-panel: the walk page always renders the hidden
++		// low-accuracy "Save anyway" button, so a page-wide search cannot
++		// prove the duplicate panel offers it.
++		panel := dupPanelOf(t, rec.Body.String())
++		if !strings.Contains(panel, `value="save"`) || !strings.Contains(panel, "Save anyway") {
++			t.Errorf("unnumbered panel lacks Save anyway; panel:\n%s", panel)
 +		}
-+		if !strings.Contains(body, "Possible duplicate") {
++		if !strings.Contains(panel, "Possible duplicate") {
 +			t.Error("panel lacks the frozen heading")
 +		}
-+		if !strings.Contains(body, "m away") {
++		if !strings.Contains(panel, "m away") {
 +			t.Error("panel lacks the distance")
++		}
++		if !strings.Contains(panel, "<strong>Path light one</strong>") {
++			t.Errorf("panel does not show the existing light; panel:\n%s", panel)
 +		}
 +	})
 +	t.Run("save-anyway keeps both lights", func(t *testing.T) {
@@ -2434,7 +2620,7 @@ index 0000000..a5e7d92
 +	return fmt.Sprintf("Boundary lamp %02d", i)
 +}
 diff --git a/internal/web/web_test.go b/internal/web/web_test.go
-index d08c54c..a1b53e3 100644
+index d08c54c..7113bd6 100644
 --- a/internal/web/web_test.go
 +++ b/internal/web/web_test.go
 @@ -107,7 +107,9 @@ func TestStaticServed(t *testing.T) {
@@ -2448,7 +2634,7 @@ index d08c54c..a1b53e3 100644
  func TestRenderAll(t *testing.T) {
  	s := newTestServer(t, config.EnvTest)
  	outDir := filepath.Join("..", "..", "testdata", "rendered")
-@@ -117,14 +119,77 @@ func TestRenderAll(t *testing.T) {
+@@ -117,14 +119,76 @@ func TestRenderAll(t *testing.T) {
  	if err := os.MkdirAll(outDir, 0o755); err != nil {
  		t.Fatal(err)
  	}
@@ -2482,7 +2668,6 @@ index d08c54c..a1b53e3 100644
 +					Status:    "on",
 +				},
 +			},
-+			Page:      1,
 +			OlderPage: 2,
 +			HasOlder:  true,
 +		},
@@ -2832,10 +3017,10 @@ index 0000000..1d044b8
 +{{end}}
 diff --git a/web/templates/pages/admin-walk.html b/web/templates/pages/admin-walk.html
 new file mode 100644
-index 0000000..8809854
+index 0000000..2e751c9
 --- /dev/null
 +++ b/web/templates/pages/admin-walk.html
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,71 @@
 +{{define "content"}}
 +<section id="walk" data-bbox="{{.BBox}}">
 +  <h1>Walk the town</h1>
@@ -2852,6 +3037,7 @@ index 0000000..8809854
 +    <path d="M50 2V198M100 2V198M150 2V198M2 50H198M2 100H198M2 150H198" stroke="#dde1e6" stroke-width="1" fill="none" aria-hidden="true"></path>
 +    <text x="6" y="14" font-size="9" fill="#5b6470" aria-hidden="true">±25 m</text>
 +    <g id="pin" role="button" tabindex="0" aria-label="position pin" transform="translate(100 100)">
++      <circle cx="0" cy="0" r="22" fill="transparent"></circle>
 +      <circle cx="0" cy="0" r="11" fill="#0b5c8f" stroke="#ffffff" stroke-width="2"></circle>
 +      <circle cx="0" cy="0" r="3.5" fill="#ffffff"></circle>
 +    </g>
