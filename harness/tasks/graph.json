@@ -424,8 +424,8 @@
       ],
       "ui": true,
       "allow_deps": [],
-      "status": "review",
-      "attempts": 2,
+      "status": "blocked",
+      "attempts": 3,
       "model": "deepseek",
       "budget": {
         "steps": 200,
