@@ -139,7 +139,7 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "review",
+      "status": "merging",
       "attempts": 0,
       "budget": {
         "steps": 200,
