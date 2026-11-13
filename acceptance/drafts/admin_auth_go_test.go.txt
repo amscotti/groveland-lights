@@ -25,7 +25,8 @@
 //	GET  /admin/login?token=<ADMIN_TOKEN>    -> 302 Location: /admin AND a
 //	                                             Set-Cookie for gl_session
 //	                                             carrying HttpOnly,
-//	                                             SameSite=Lax and Path=/
+//	                                             SameSite=Lax, Path=/ and
+//	                                             Max-Age=86400 (24 h)
 //	GET  /admin/login?token=<ADMIN_TOKEN>    -> 403 (the token is one-time
 //	    (replay, from a SECOND                  and GLOBAL: consumption is
 //	     cookie-less client)                    server-side, so replay from
@@ -96,7 +97,8 @@ func TestA201AdminLogin(t *testing.T) {
 	}
 
 	// A wrong token is rejected; a BLANK token just renders the form page
-	// again (T-203 freezes no/blank -> 200; only a wrong value is 403).
+	// again (T-203 freezes no/blank -> 200; only a wrong value is 403) —
+	// the full frozen form, not merely a 200 status.
 	status, _, _ = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin/login?token=definitely-not-the-token", nil, false)
 	if status != http.StatusForbidden {
 		t.Fatalf("GET /admin/login?token=<wrong>: status %d, want 403", status)
@@ -104,6 +106,11 @@ func TestA201AdminLogin(t *testing.T) {
 	status, _, body = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin/login?token=", nil, false)
 	if status != http.StatusOK {
 		t.Fatalf("GET /admin/login?token= (blank): status %d, want 200 (the form page); body:\n%s", status, body)
+	}
+	for _, re := range []*regexp.Regexp{aaReHeading, aaReLabel, aaReInput, aaReButton} {
+		if !re.MatchString(body) {
+			t.Errorf("GET /admin/login?token= (blank): markup missing the frozen %q element; body:\n%s", re.String(), body)
+		}
 	}
 
 	// The valid token exchanges for an admin session exactly once.
@@ -123,10 +130,30 @@ func TestA201AdminLogin(t *testing.T) {
 	if sessionCookie == "" {
 		t.Fatalf("GET /admin/login?token=<valid>: no Set-Cookie for gl_session; got %q", header.Values("Set-Cookie"))
 	}
-	for _, want := range []string{"httponly", "samesite=lax", "path=/"} {
-		if !strings.Contains(strings.ToLower(sessionCookie), want) {
-			t.Errorf("gl_session cookie lacks %s: %q", want, sessionCookie)
+	// The cookie attributes are parsed EXACTLY (not substring-matched:
+	// "path=/" as a substring would also accept Path=/admin). T-203 freezes
+	// Path=/, HttpOnly, SameSite=Lax and MaxAge 24 h. (Secure is frozen as
+	// prod-only and this server runs APP_ENV=test, so it is deliberately
+	// NOT asserted either way.)
+	attrs := map[string]string{}
+	for _, part := range strings.Split(sessionCookie, ";")[1:] {
+		kv := strings.SplitN(strings.ToLower(strings.TrimSpace(part)), "=", 2)
+		attrs[kv[0]] = ""
+		if len(kv) == 2 {
+			attrs[kv[0]] = kv[1]
 		}
+	}
+	if attrs["path"] != "/" {
+		t.Errorf("gl_session cookie Path = %q, want exactly \"/\"; cookie: %q", attrs["path"], sessionCookie)
+	}
+	if attrs["max-age"] != "86400" {
+		t.Errorf("gl_session cookie Max-Age = %q, want 86400 (24 h); cookie: %q", attrs["max-age"], sessionCookie)
+	}
+	if attrs["samesite"] != "lax" {
+		t.Errorf("gl_session cookie SameSite = %q, want lax; cookie: %q", attrs["samesite"], sessionCookie)
+	}
+	if _, ok := attrs["httponly"]; !ok {
+		t.Errorf("gl_session cookie lacks the HttpOnly flag; cookie: %q", sessionCookie)
 	}
 
 	// Replaying the same token is refused — it was consumed. The replay

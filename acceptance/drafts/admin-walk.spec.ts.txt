@@ -187,7 +187,9 @@ async function deleteAllByLabel(page: Page, label: string): Promise<void> {
  * before the form opens — a submit racing an empty position 422s. */
 async function openWalkForm(page: Page): Promise<void> {
   await page.goto('/admin/walk');
-  await expect(page.locator('#walk-pos')).toHaveText(/\d+\.\d+, -?\d+\.\d+/);
+  // #walk-pos is frozen at 6 decimal places (T-205) — assert that exact
+  // form, not just "some decimals".
+  await expect(page.locator('#walk-pos')).toHaveText(/\d+\.\d{6}, -?\d+\.\d{6}/);
   await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy \d+ m/);
   await page.getByRole('button', { name: 'Add light here', exact: true }).click();
 }
@@ -219,8 +221,9 @@ test('@A-202 @A-203 add a light from current position', async (
 
   await page.goto('/admin/walk');
 
-  // Live position and accuracy are shown (accuracy 12 m from the context).
-  await expect(page.locator('#walk-pos')).toHaveText(/\d+\.\d+, -?\d+\.\d+/);
+  // Live position and accuracy are shown (accuracy 12 m from the context),
+  // at the frozen 6 decimal places.
+  await expect(page.locator('#walk-pos')).toHaveText(/\d+\.\d{6}, -?\d+\.\d{6}/);
   await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy 12 m/);
 
   // Open the add-light form, then "walk a few metres": the watchPosition
@@ -259,8 +262,12 @@ test('@A-202 low accuracy gates saving behind an explicit save-anyway choice', a
   await expect(add).toBeVisible();
   // Over the 30 m threshold the primary action is disabled until the admin
   // explicitly accepts the low-accuracy risk. `Add light here` is the only
-  // in-UI submit path, so while it is disabled NOTHING can be saved.
+  // in-UI submit path, so while it is disabled NOTHING can be saved — and
+  // the gate must be the platform's disabled ATTRIBUTE (asserted below),
+  // which suppresses activation entirely; an aria-disabled look or a CSS
+  // class alone would leave the click path live.
   await expect(add).toBeDisabled();
+  await expect(add).toHaveAttribute('disabled');
 
   // Choosing save-anyway re-enables the button AND unlocks a REAL save at
   // 80 m — proving the gate is wired to the form, not a painted attribute.
@@ -406,7 +413,10 @@ test('@A-205 duplicate panels: numbered Merge, unnumbered Save anyway', async (
   await page.goto('/admin');
   await expect(page.locator('img[alt*="Dup panel lamp twin"]')).toHaveCount(0);
 
-  // Choosing Merge collapses the pair into exactly one row.
+  // Choosing Merge collapses the pair into exactly one row — and APPLIES
+  // the twin's label onto the survivor (frozen alt format
+  // "<asset_no> <label>"): a no-op "merge" that kept the original row
+  // would fail the second selector.
   await openWalkForm(page);
   await page.getByLabel('Asset number').fill(asset);
   await page.getByLabel('Label').fill('Dup panel lamp twin');
@@ -416,6 +426,7 @@ test('@A-205 duplicate panels: numbered Merge, unnumbered Save anyway', async (
   await expect(page.getByRole('status')).toContainText('Saved');
   await page.goto('/admin');
   await expect(page.locator(`img[alt^="${asset}"]`)).toHaveCount(1);
+  await expect(page.locator(`img[alt="${asset} Dup panel lamp twin"]`)).toHaveCount(1);
 
   // Unnumbered duplicate: a second unnumbered light ~4.4 m away raises the
   // panel WITH both buttons; Save anyway keeps both lights.
@@ -498,8 +509,14 @@ test('@A-206 served photo is re-encoded, oriented and metadata-free', async (
   // wide container could game.
   await openWalkForm(page);
   await page.getByLabel('Label').fill(label);
-  await page.getByLabel('Photo').setInputFiles('testdata/photos/portrait-orient6-gps.jpg');
   const preview = page.locator('#photo-preview');
+  // A STATIC landscape placeholder must not pass: capture what #photo-preview
+  // shows before the pick; whatever mechanism the page uses (object URL,
+  // data URL, processed thumbnail), picking a file must change (or first
+  // produce) the rendered source.
+  const hadPreview = (await preview.count()) === 1;
+  const srcBefore = hadPreview ? await preview.getAttribute('src') : null;
+  await page.getByLabel('Photo').setInputFiles('testdata/photos/portrait-orient6-gps.jpg');
   await expect(preview).toBeVisible();
   // naturalWidth/naturalHeight are 0 until the preview image has LOADED —
   // CSS visibility alone does not imply decode — so poll for a decoded frame
@@ -519,6 +536,10 @@ test('@A-206 served photo is re-encoded, oriented and metadata-free', async (
     )
     .toBeGreaterThan(0);
   expect(naturalW, 'preview intrinsic dims (EXIF orientation applied)').toBeGreaterThan(naturalH);
+  if (hadPreview) {
+    const srcAfter = await preview.getAttribute('src');
+    expect(srcAfter, 'the preview must track the picked file (a static placeholder cannot)').not.toBe(srcBefore);
+  }
 
   await deleteAllByLabel(page, label);
 });
@@ -549,6 +570,9 @@ test('@A-208 edit relabels and delete removes the light', async ({ page }, testI
   expect(await page.content()).toContain(asset);
 
   await page.getByRole('button', { name: 'Delete light' }).click();
+  // The delete answers 303 → /admin (frozen); wait for that navigation
+  // before leaving the page, so the goto cannot cancel the in-flight POST.
+  await page.waitForURL(/\/admin$/);
   await page.goto('/admin');
   await expect(page.getByRole('link', { name: /Edited lamp/ })).toHaveCount(0);
   await expect(page.locator('img[alt*="Edited lamp"]')).toHaveCount(0);

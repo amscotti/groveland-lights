@@ -57,15 +57,15 @@ T-203/T-205, which the server will be built to) is:
 | Element | Contract |
 |---|---|
 | `/admin/login` | heading `Admin login`; label `Token`; button `Sign in` |
-| `/admin/walk` `#walk-pos` | text matching `\d+\.\d+, -?\d+\.\d+` (rendered at 6 decimal places) |
+| `/admin/walk` `#walk-pos` | text matching `\d+\.\d+, -?\d+\.\d+` (rendered at 6 decimal places; the e2e asserts the 6 dp form `\d+\.\d{6}, -?\d+\.\d{6}`) |
 | `#walk-accuracy` | text matching `/accuracy \d+ m/` |
 | `#pin` (draggable pin) | `aria-label="position pin"`, keyboard-movable (focusable; arrow keys nudge the effective position — asserted by the visible e2e suite) |
 | `#pin-pos` | current pin coords, same format — rendered at exactly 6 decimal places, so its text equals `#light-pos` for the same position |
-| buttons | `Add light here` (exact), `Save anyway (low accuracy)`, `Confirm pin`, `Merge`, `Save anyway` (duplicate panel: `Merge` always; `Save anyway` unnumbered-only, see reconciliation 2) |
+| buttons | `Add light here` (exact; when gated by low accuracy it carries the platform `disabled` ATTRIBUTE — asserted, so an aria-disabled look or CSS class alone fails), `Save anyway (low accuracy)`, `Confirm pin`, `Merge`, `Save anyway` (duplicate panel: `Merge` always; `Save anyway` unnumbered-only, see reconciliation 2) |
 | form labels | `Asset number`, `Label`, `Kind` (select: `Park`, `Building`), `Photo` |
 | success | role=status containing `Saved` (HTMX fragment for create; edit/delete answer 303 redirects) |
 | bbox rejection | role=alert containing `outside Groveland town bounds` |
-| duplicate panel | `#dup-panel` with heading `Possible duplicate`; numbered case adds a link named `Cancel`; nothing is saved until a button is chosen |
+| duplicate panel | `#dup-panel` with heading `Possible duplicate`; numbered case adds a link named `Cancel`; nothing is saved until a button is chosen; `Merge` APPLIES the new submission's label/photo onto the existing row (the survivor carries the merged-in label — asserted in both suites via the frozen alt format) |
 | list `/admin` | heading `Lights`; row per light with thumbnail `img[alt=<label>]`; link or button `Older`; a row may repeat its detail href (e.g. thumbnail + label link) — href consumers dedupe |
 
 Additional selectors frozen by the drafts (needed by specific tests):
@@ -73,7 +73,7 @@ Additional selectors frozen by the drafts (needed by specific tests):
 | Element | Contract |
 |---|---|
 | `#manual-lat`, `#manual-lon` | number inputs, visible when geolocation is denied |
-| `#photo-preview` | in-form preview `img`; renders EXIF orientation applied — its INTRINSIC dimensions (`naturalWidth`/`naturalHeight`) must be wider than tall for the portrait fixtures (a processed preview or the browser's EXIF-aware intrinsic sizing both qualify; the e2e waits for a decoded frame first — naturalWidth > 0); the CSS box is not the proof (a stretched portrait games it) |
+| `#photo-preview` | in-form preview `img`; renders EXIF orientation applied — its INTRINSIC dimensions (`naturalWidth`/`naturalHeight`) must be wider than tall for the portrait fixtures (a processed preview or the browser's EXIF-aware intrinsic sizing both qualify; the e2e waits for a decoded frame first — naturalWidth > 0); the CSS box is not the proof (a stretched portrait games it), and neither is a static placeholder: the preview's rendered source must appear/change when a file is picked (asserted) |
 | `#light-pos` | admin detail coordinates as `lat, lon` at 6 decimal places |
 | login markup | `<h1>Admin login</h1>`, `<label ..>Token</label>` + `<input name="token">`, `<button>Sign in</button>` |
 | list row link | the label text links to `/admin/lights/{id}` (accessible name contains the label) |
@@ -87,12 +87,13 @@ Additional selectors frozen by the drafts (needed by specific tests):
 |---|---|
 | `GET /admin` (no session) | 302 → `/admin/login`; with `HX-Request: true` and no session: 401 + `HX-Redirect: /admin/login` |
 | `GET /admin/login` | 200 form page (see markup above) |
-| `GET /admin/login?token=X` | valid `ADMIN_TOKEN` → 302 → `/admin` + `Set-Cookie: gl_session=...` with `HttpOnly`, `SameSite=Lax`, `Path=/` (one-time, GLOBAL: replay from any client → 403); wrong token → 403; missing/blank token → 200 (the form page — only a wrong value is refused) |
+| `GET /admin/login?token=X` | valid `ADMIN_TOKEN` → 302 → `/admin` + `Set-Cookie: gl_session=...` with `HttpOnly`, `SameSite=Lax`, `Path=/`, `Max-Age=86400` (24 h; the attributes are parsed and compared exactly — `Path=/admin` does not satisfy `Path=/`; `Secure` is prod-only and unasserted under APP_ENV=test) (one-time, GLOBAL: replay from any client → 403); wrong token → 403; missing/blank token → 200 (the form page, full frozen markup — only a wrong value is refused) |
 | `POST /admin/lights` | multipart `csrf_token, label, kind(park\|building), lat, lon, asset_no? (^[A-Za-z0-9-]{1,32}$), photo?, accuracy_m?, dup_choice?("" \| merge \| save)`; success → role=status `Saved` for HX-Request, else 303 `Location: /admin`; duplicate → 409 body contains `Possible duplicate` (numbered+save → 422); outside `TOWN_BBOX` → 422 body contains `outside Groveland town bounds`; >15 MB → 413; wrong type / HEIC / >40 MP → 415 (HEIC body contains `please choose JPEG`) |
 | `GET /admin/lights/{id}` | 200 detail; photo referenced as `src="/photos/..."`; 404 after soft delete |
 | `POST /admin/lights/{id}` | edit (multipart `csrf_token` + changed fields; **unspecified fields keep values**) → 303 back to the detail |
 | `POST /admin/lights/{id}/delete` | soft delete (multipart `csrf_token`) → 303 `/admin` |
 | `GET /admin` | list: heading `Lights`, the 50 most recent lights, one `img alt` per row (alt format above; placeholder thumbnails for photo-less lights are fine) |
+| `GET /admin?page=N` | the same list page for page N (full page; the cleanup sweeps rely on it) |
 | `GET /admin/rows?page=N` | HTMX rows fragment (root element id `rows`); without `HX-Request` → 303 → `/admin?page=N` |
 | `GET /photos/...` | served photo: `Content-Type: image/jpeg`, long edge ≤ 1600, NO APP1 segment at all — so no EXIF, no GPS (the Go draft byte-scans for APP1; the e2e draft asserts `hasAPP1 === false` as well as `hasExifGps === false`), EXIF orientation applied (the 600×800 Orientation=6/8 fixtures serve as EXACTLY 800×600 — asserted by the Go drafts, matching the fixture table and T-202's no-upscale rule) |
 
@@ -185,10 +186,11 @@ iphone-se-320 viewport (320×640) unless stated.
 - **A-202 walk page** (320×640): top strip shows `#walk-pos` and
   `#walk-accuracy` ("accuracy 12 m") in readable type; the middle is the map
   canvas; **"Add light here" sits in the bottom third, full-width, thumb-
-  reachable**. With accuracy 80 m the button is visibly disabled and "Save
-  anyway (low accuracy)" appears beside/below it; choosing it re-enables the
-  button AND unlocks a real save at 80 m (the e2e completes the whole save
-  after the choice — a painted-but-unwired gate fails). Geolocation denied:
+  reachable**. With accuracy 80 m the button is genuinely disabled (the
+  platform `disabled` attribute — asserted) and "Save anyway (low
+  accuracy)" appears beside/below it; choosing it re-enables the button
+  AND unlocks a real save at 80 m (the e2e completes the whole save after
+  the choice — a painted-but-unwired gate fails). Geolocation denied:
   `#manual-lat` / `#manual-lon` number inputs appear (manual pin-drop
   fallback), still no horizontal scroll.
 - **A-203 pin**: a pin marker with `aria-label="position pin"` centred on the
@@ -203,7 +205,9 @@ iphone-se-320 viewport (320×640) unless stated.
   "Possible duplicate" showing the existing light (label, asset number,
   distance); numbered case: "Merge" (primary) + a "Cancel" link and NO
   "Save anyway"; unnumbered case: "Merge" + "Save anyway". **Nothing is
-  saved until one is chosen.**
+  saved until one is chosen**, and choosing "Merge" leaves ONE row whose
+  text/thumbnail carry the newly submitted label (the merge is applied,
+  not a discarded submission).
 - **A-206 photo**: after picking the portrait fixture, `#photo-preview`
   renders **wider than tall** (orientation already applied — the intrinsic
   dimensions must be landscape, not just the CSS box); the served photo
@@ -211,7 +215,9 @@ iphone-se-320 viewport (320×640) unless stated.
   ≤ 1600).
 - **A-208 detail/edit**: the admin detail shows the photo, `#light-pos` and a
   labelled form ("Label" filled) with "Save changes"; "Delete light" is a
-  visually destructive (red) action separated from the save button.
+  visually destructive (red) action separated from the save button. A
+  label-only edit keeps the asset number, position AND stored photo (the
+  Go draft proves the photo by URL before/after the edit).
 - **A-209 list**: heading "Lights"; one row per light with a small square
   thumbnail (`img alt=<label>`), asset number + label text, status chip;
   "Older" at the bottom swaps in the next 50 via HTMX (no full reload);

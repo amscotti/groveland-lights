@@ -205,6 +205,17 @@ func TestA205Duplicates(t *testing.T) {
 	if got := len(alAltAssetRe("GP-017").FindAllString(list, -1)); got != 1 {
 		t.Errorf("after merge the list shows %d rows for asset GP-017, want exactly 1;\n%s", got, list)
 	}
+	// The merge must APPLY the twin onto the surviving row (T-205 freezes
+	// dup_choice=merge as "apply photo/label onto ExistingID"), not merely
+	// keep the original row: the survivor's alt carries the twin's label
+	// and no longer the original's. (The alt strings are closing-quote
+	// anchored, so "…lamp twin" cannot satisfy the "…lamp" check.)
+	if !strings.Contains(list, `alt="GP-017 Ball field lamp twin"`) {
+		t.Errorf("after merge the surviving row does not carry the twin's label (frozen alt \"<asset_no> <label>\"); body:\n%s", list)
+	}
+	if strings.Contains(list, `alt="GP-017 Ball field lamp"`) {
+		t.Errorf("after merge the surviving row still carries the original label; the twin's label must be applied; body:\n%s", list)
+	}
 
 	// Unnumbered fixture, then a second unnumbered one ~4.5 m away.
 	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
@@ -403,8 +414,9 @@ func TestA207NoStrayFiles(t *testing.T) {
 	}
 }
 
-// TestA208EditSoftDelete: a label edit shows on the detail page; a delete
-// makes the detail 404 and removes the light from the list.
+// TestA208EditSoftDelete: a label edit shows on the detail page while the
+// unposted fields (asset number, position, stored photo) keep their values;
+// a delete makes the detail 404 and removes the light from the list.
 func TestA208EditSoftDelete(t *testing.T) {
 	s := alSpawnDir(t, "", "")
 	t.Cleanup(func() { alKill(t, s) })
@@ -413,15 +425,22 @@ func TestA208EditSoftDelete(t *testing.T) {
 	status, header, body := alCreate(t, c, s.baseURL, map[string]string{
 		"csrf_token": csrf, "asset_no": "GP-018", "label": "Old label",
 		"kind": "park", "lat": "42.7620", "lon": "-71.0290",
-	}, "", nil)
+	}, "landscape.jpg", alFixture(t, "landscape.jpg"))
 	if status != http.StatusSeeOther {
 		t.Fatalf("create GP-018: status %d, want 303; body:\n%s", status, body)
 	}
 	detailURL := alDetailURL(t, c, s.baseURL, "Old label")
 
+	// The photo the create stored (its /photos/ URL on the detail page).
+	detailBefore := alGet(t, c, s.baseURL+detailURL)
+	photoSrc := alRePhotoSw.FindStringSubmatch(detailBefore)
+	if photoSrc == nil {
+		t.Fatalf("detail page has no photo src=\"/photos/...\"; body:\n%s", detailBefore)
+	}
+
 	// Edit: relabel; the detail page shows the new label, redirects back to
-	// itself, and fields NOT sent keep their values (asset number and
-	// position survive a label-only edit).
+	// itself, and fields NOT sent keep their values (asset number, position
+	// AND the stored photo survive a label-only edit).
 	status, header, body = alPostMultipart(t, c, s.baseURL+detailURL, map[string]string{
 		"csrf_token": csrf, "label": "New label",
 	}, "", "", nil, false)
@@ -440,6 +459,9 @@ func TestA208EditSoftDelete(t *testing.T) {
 	}
 	if !strings.Contains(detail, "42.7620") || !strings.Contains(detail, "-71.0290") {
 		t.Errorf("detail page after label-only edit lost the position; body:\n%s", detail)
+	}
+	if !strings.Contains(detail, photoSrc[1]) {
+		t.Errorf("detail page after label-only edit lost the stored photo %q; body:\n%s", photoSrc[1], detail)
 	}
 
 	// Soft delete: detail 404s, list no longer mentions the light.
