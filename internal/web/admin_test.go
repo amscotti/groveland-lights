@@ -33,12 +33,14 @@ var adminTownBBox = config.BBox{MinLat: 42.70, MinLon: -71.09, MaxLat: 42.82, Ma
 // already minted; it returns the server and the session cookie value.
 func newAdminServer(t *testing.T) (*Server, string) {
 	t.Helper()
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "admin.db"))
+	dbPath := filepath.Join(t.TempDir(), "admin.db")
+	db, err := store.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	cfg := testConfig(config.EnvTest)
+	cfg.DBPath = dbPath
 	cfg.SessionKey = []byte("0123456789abcdef0123456789abcdef")
 	cfg.TownBBox = adminTownBBox
 	cfg.PhotoDir = filepath.Join(t.TempDir(), "photos")
@@ -162,6 +164,79 @@ func createLight(t *testing.T, s *Server, session, csrf string, fields map[strin
 // reRowsRoot matches a fragment whose ROOT element carries id="rows" (frozen).
 var reRowsRoot = regexp.MustCompile(`\A\s*<[a-zA-Z][^>]*\bid="rows"`)
 
+// reCSRFInput captures the rendered hidden csrf_token input's value.
+var reCSRFInput = regexp.MustCompile(`<input[^>]*name="csrf_token"[^>]*value="([^"]+)"`)
+
+// csrfInputValue extracts the form's double-submit token, failing when the
+// rendered form has none.
+func csrfInputValue(t *testing.T, body string) string {
+	t.Helper()
+	m := reCSRFInput.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("rendered form has no csrf_token value; body:\n%s", body)
+	}
+	return m[1]
+}
+
+// dupPanelOf extracts the exact #dup-panel element from a rendered page, so
+// assertions cannot accidentally match text from the rest of the form (the
+// submitted label appears in the label input too).
+func dupPanelOf(t *testing.T, body string) string {
+	t.Helper()
+	start := strings.Index(body, `id="dup-panel"`)
+	if start < 0 {
+		t.Fatalf("no #dup-panel in body:\n%s", body)
+	}
+	end := strings.Index(body[start:], "</article>")
+	if end < 0 {
+		t.Fatalf("#dup-panel is not closed:\n%s", body)
+	}
+	return body[start : start+end+len("</article>")]
+}
+
+// adminRowCount counts the rendered list rows (one <tr> per light).
+func adminRowCount(body string) int { return strings.Count(body, "<tr>") }
+
+// assertLampPage checks one rendered list page holds exactly the expected
+// boundary lamps (and none of the excluded ones).
+func assertLampPage(t *testing.T, page, body string, present, absent []int) {
+	t.Helper()
+	if got := adminRowCount(body); got != len(present) {
+		t.Errorf("%s rows = %d, want exactly %d", page, got, len(present))
+	}
+	for _, i := range present {
+		if !strings.Contains(body, padLamp(i)) {
+			t.Errorf("%s lacks %q", page, padLamp(i))
+		}
+	}
+	for _, i := range absent {
+		if strings.Contains(body, padLamp(i)) {
+			t.Errorf("%s unexpectedly shows %q", page, padLamp(i))
+		}
+	}
+}
+
+// assertNumberedPanel checks the numbered duplicate panel against the frozen
+// contract: the EXISTING light's label/asset/distance, Merge + Cancel, no
+// Save anyway, and no echo of the submitted twin label.
+func assertNumberedPanel(t *testing.T, panel string) {
+	t.Helper()
+	for _, want := range []string{
+		"Possible duplicate", "Merge", "Cancel",
+		"<strong>Ball field lamp</strong>", "asset number GP-017", "m away",
+	} {
+		if !strings.Contains(panel, want) {
+			t.Errorf("panel missing %q; panel:\n%s", want, panel)
+		}
+	}
+	if strings.Contains(panel, "Ball field lamp twin") {
+		t.Errorf("panel echoes the submitted label instead of the existing light; panel:\n%s", panel)
+	}
+	if strings.Contains(panel, "Save anyway") || strings.Contains(panel, `value="save"`) {
+		t.Errorf("numbered panel offers Save anyway; panel:\n%s", panel)
+	}
+}
+
 // --- guard ---
 
 func TestAdminRoutesGuard(t *testing.T) {
@@ -203,6 +278,30 @@ func TestAdminRoutesGuard(t *testing.T) {
 	})
 }
 
+// --- login page (T-203's frozen strings on T-205's styled pipeline page) ---
+
+func TestAdminLoginPageIsTheStyledPipelinePage(t *testing.T) {
+	s := newTestServer(t, config.EnvTest)
+	rec := adminGet(t, s, "/admin/login", "", false)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body:\n%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`href="/static/vendor/pico-2.1.1.min.css"`,
+		`id="admin-login"`,
+		`<h1>Admin login</h1>`,
+		`<label for="token">Token</label>`,
+		`name="token"`,
+		`Sign in`,
+		`</html>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("live login page missing %q; body:\n%s", want, body)
+		}
+	}
+}
+
 // --- walk page ---
 
 func TestAdminWalkPage(t *testing.T) {
@@ -224,20 +323,17 @@ func TestAdminWalkPage(t *testing.T) {
 		}
 	}
 	// The double-submit cookie accompanies the rendered token.
-	sawCSRF := false
+	var cookieToken string
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == CSRFTokenName && c.Value != "" {
-			sawCSRF = true
+		if c.Name == CSRFTokenName {
+			cookieToken = c.Value
 		}
 	}
-	if !sawCSRF {
-		t.Error("walk page set no csrf_token cookie")
+	if cookieToken == "" {
+		t.Fatal("walk page set no csrf_token cookie")
 	}
-	// The rendered hidden csrf input carries a value attribute (the drafts
-	// parse it), and it matches the cookie.
-	reInput := regexp.MustCompile(`<input[^>]*name="csrf_token"[^>]*value="([^"]+)"`)
-	if reInput.FindStringSubmatch(body) == nil {
-		t.Errorf("csrf_token input has no value attribute; body:\n%s", body)
+	if inputToken := csrfInputValue(t, body); inputToken != cookieToken {
+		t.Errorf("csrf_token input = %q, cookie = %q; the double-submit pair must match", inputToken, cookieToken)
 	}
 }
 
@@ -376,11 +472,23 @@ func TestAdminCreateValidation(t *testing.T) {
 			t.Fatalf("status = %d, want 403", rec.Code)
 		}
 	})
-	t.Run("non-multipart body 400", func(t *testing.T) {
+	t.Run("non-multipart body 400 rerenders a usable form", func(t *testing.T) {
 		rec := adminDo(t, s, http.MethodPost, "/admin/lights", session, false,
 			strings.NewReader("label=x"), "application/x-www-form-urlencoded")
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+		body := rec.Body.String()
+		// A parse failure has no submitted values to echo, but the page must
+		// still be a retryable form: a fresh CSRF pair and the town bbox.
+		if csrfInputValue(t, body) == "" {
+			t.Error("parse-error page has an empty csrf_token")
+		}
+		if !strings.Contains(body, `data-bbox="42.7,-71.09,42.82,-70.96"`) {
+			t.Errorf("parse-error page lost the bbox; body:\n%s", body)
+		}
+		if !strings.Contains(body, `value="park" selected`) {
+			t.Errorf("parse-error page does not default the kind to park; body:\n%s", body)
 		}
 	})
 }
@@ -388,16 +496,33 @@ func TestAdminCreateValidation(t *testing.T) {
 func TestAdminCreateOutsideBBox(t *testing.T) {
 	s, session := newAdminServer(t)
 	csrf := adminCSRF(t)
-	fields := map[string]string{"label": "Out lamp", "kind": "park", "lat": "42.36", "lon": "-71.06"}
+	fields := map[string]string{
+		"label": "Out lamp", "asset_no": "OUT-1", "kind": "building",
+		"lat": "42.36", "lon": "-71.06", "accuracy_m": "7",
+	}
 	rec := postCreate(t, s, session, csrf, fields)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422; body:\n%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "outside Groveland town bounds") {
-		t.Errorf("body lacks the frozen message; body:\n%s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "outside Groveland town bounds") {
+		t.Errorf("body lacks the frozen message; body:\n%s", body)
 	}
-	if !strings.Contains(rec.Body.String(), `role="alert"`) {
+	if !strings.Contains(body, `role="alert"`) {
 		t.Error("rejection page lacks role=alert")
+	}
+	// The no-JS re-render keeps every typed value (asset number included) and
+	// remains a usable form (fresh token + bbox).
+	if csrfInputValue(t, body) == "" {
+		t.Error("rejection page has an empty csrf_token")
+	}
+	for _, want := range []string{
+		`value="OUT-1"`, `value="Out lamp"`, `value="42.36"`, `value="-71.06"`,
+		`value="7"`, `value="building" selected`, `data-bbox="42.7,-71.09,42.82,-70.96"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rejection page lost %q; body:\n%s", want, body)
+		}
 	}
 	hx := adminPostMultipart(t, s, "/admin/lights", map[string]string{
 		CSRFTokenName: csrf, "label": "Out lamp", "kind": "park", "lat": "42.36", "lon": "-71.06",
@@ -469,27 +594,35 @@ func TestAdminCreatePhotoPipeline(t *testing.T) {
 
 // --- duplicates ---
 
+// seedNumberedDupLight creates GP-017 with a photo and returns its detail URL
+// and current photo src (the numbered-duplicate tests all start from it).
+func seedNumberedDupLight(t *testing.T, s *Server, session, csrf string) (detailURL, photoSrc string) {
+	t.Helper()
+	rec := adminPostMultipart(t, s, "/admin/lights", map[string]string{
+		CSRFTokenName: csrf, "asset_no": "GP-017", "label": "Ball field lamp",
+		"kind": "park", "lat": "42.7617", "lon": "-71.0303",
+	}, "photo", "landscape.jpg", adminFixture(t, "landscape.jpg"), session, csrf, false)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("seed create: status %d, want 303; body:\n%s", rec.Code, rec.Body.String())
+	}
+	detailURL = adminDetailURLOf(t, s, session, "GP-017 Ball field lamp")
+	photoSrc = adminDetailPhotoSrc(t, s, session, detailURL)
+	if photoSrc == "" {
+		t.Fatal("seed light has no photo")
+	}
+	return detailURL, photoSrc
+}
+
 func TestAdminDuplicateNumbered(t *testing.T) {
 	s, session := newAdminServer(t)
 	csrf := adminCSRF(t)
-	createLight(t, s, session, csrf, map[string]string{
-		"asset_no": "GP-017", "label": "Ball field lamp", "kind": "park", "lat": "42.7617", "lon": "-71.0303",
-	})
-	t.Run("same asset raises the panel (409)", func(t *testing.T) {
+	seedNumberedDupLight(t, s, session, csrf)
+	t.Run("same asset raises 409", func(t *testing.T) {
 		rec := postCreate(t, s, session, csrf, map[string]string{
 			"asset_no": "GP-017", "label": "Ball field lamp twin", "kind": "park", "lat": "42.76175", "lon": "-71.03035",
 		})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body:\n%s", rec.Code, rec.Body.String())
-		}
-		body := rec.Body.String()
-		for _, want := range []string{"Possible duplicate", "Merge", "Cancel", `id="dup-panel"`, "Ball field lamp", "GP-017"} {
-			if !strings.Contains(body, want) {
-				t.Errorf("panel missing %q; body:\n%s", want, body)
-			}
-		}
-		if strings.Contains(body, `value="save"`) {
-			t.Error("numbered panel offers Save anyway")
 		}
 	})
 	t.Run("nothing saved while the panel is up", func(t *testing.T) {
@@ -521,6 +654,67 @@ func TestAdminDuplicateNumbered(t *testing.T) {
 			t.Error("survivor still carries the original label")
 		}
 	})
+}
+
+// TestAdminDuplicatePanelContent asserts the panel shows the EXISTING light —
+// not the submitted values echoed elsewhere on the page — in both the full-page
+// and HTMX responses.
+func TestAdminDuplicatePanelContent(t *testing.T) {
+	s, session := newAdminServer(t)
+	csrf := adminCSRF(t)
+	seedNumberedDupLight(t, s, session, csrf)
+	fields := map[string]string{
+		"asset_no": "GP-017", "label": "Ball field lamp twin", "kind": "park", "lat": "42.76175", "lon": "-71.03035",
+	}
+	full := postCreate(t, s, session, csrf, fields)
+	if full.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body:\n%s", full.Code, full.Body.String())
+	}
+	assertNumberedPanel(t, dupPanelOf(t, full.Body.String()))
+
+	hxFields := map[string]string{CSRFTokenName: csrf}
+	for k, v := range fields {
+		hxFields[k] = v
+	}
+	hx := adminPostMultipart(t, s, "/admin/lights", hxFields, "", "", nil, session, csrf, true)
+	if hx.Code != http.StatusConflict {
+		t.Fatalf("HX status = %d, want 409; body:\n%s", hx.Code, hx.Body.String())
+	}
+	assertNumberedPanel(t, dupPanelOf(t, hx.Body.String()))
+	if strings.Contains(hx.Body.String(), "<html") {
+		t.Error("HX duplicate response is a full page, not a fragment")
+	}
+}
+
+// TestAdminDuplicateMergePhoto pins the A-205 clause that merge applies the new
+// submission's PHOTO onto the surviving row, not just its label.
+func TestAdminDuplicateMergePhoto(t *testing.T) {
+	s, session := newAdminServer(t)
+	csrf := adminCSRF(t)
+	detailURL, oldPhoto := seedNumberedDupLight(t, s, session, csrf)
+	rec := adminPostMultipart(t, s, "/admin/lights", map[string]string{
+		CSRFTokenName: csrf, "asset_no": "GP-017", "label": "Ball field lamp twin",
+		"kind": "park", "lat": "42.76175", "lon": "-71.03035", "dup_choice": "merge",
+	}, "photo", "portrait-orient6-gps.jpg", adminFixture(t, "portrait-orient6-gps.jpg"), session, csrf, false)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303; body:\n%s", rec.Code, rec.Body.String())
+	}
+	list := adminGet(t, s, "/admin", session, false).Body.String()
+	if got := adminRowCount(list); got != 1 {
+		t.Fatalf("merge created a new row: %d rows, want 1; body:\n%s", got, list)
+	}
+	newPhoto := adminDetailPhotoSrc(t, s, session, detailURL)
+	if newPhoto == "" {
+		t.Fatal("survivor detail has no photo after the merge")
+	}
+	if newPhoto == oldPhoto {
+		t.Errorf("survivor kept its old photo %q; the merge must apply the uploaded one", oldPhoto)
+	}
+	for _, src := range []string{newPhoto, oldPhoto} {
+		if served := adminGet(t, s, src, session, false); served.Code != http.StatusOK {
+			t.Errorf("photo %s status = %d, want 200", src, served.Code)
+		}
+	}
 }
 
 func TestAdminDuplicateUnnumbered(t *testing.T) {
@@ -573,17 +767,44 @@ func TestAdminDuplicateUnnumbered(t *testing.T) {
 
 // --- detail / edit / delete ---
 
-// adminDetailFixture creates one numbered light and returns its detail URL.
+// adminDetailFixture creates one numbered, photo-bearing light and returns its
+// detail URL.
 func adminDetailFixture(t *testing.T, s *Server, session, csrf string) string {
 	t.Helper()
-	createLight(t, s, session, csrf, map[string]string{
-		"asset_no": "GP-018", "label": "Old label", "kind": "park", "lat": "42.7620", "lon": "-71.0290",
-	})
+	rec := adminPostMultipart(t, s, "/admin/lights", map[string]string{
+		CSRFTokenName: csrf, "asset_no": "GP-018", "label": "Old label",
+		"kind": "park", "lat": "42.7620", "lon": "-71.0290",
+	}, "photo", "landscape.jpg", adminFixture(t, "landscape.jpg"), session, csrf, false)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("create fixture: status %d, want 303; body:\n%s", rec.Code, rec.Body.String())
+	}
+	return adminDetailURLOf(t, s, session, "GP-018 Old label")
+}
+
+// adminDetailURLOf returns the detail href of the list row whose thumbnail alt
+// is exactly altText (the frozen "<asset_no> <label>" / "<label>" format).
+func adminDetailURLOf(t *testing.T, s *Server, session, altText string) string {
+	t.Helper()
 	list := adminGet(t, s, "/admin", session, false).Body.String()
-	re := regexp.MustCompile(`href="(/admin/lights/\d+)"`)
+	re := regexp.MustCompile(`href="(/admin/lights/\d+)"><img[^>]*alt="` + regexp.QuoteMeta(altText) + `"`)
 	m := re.FindStringSubmatch(list)
 	if m == nil {
-		t.Fatalf("list has no detail link; body:\n%s", list)
+		t.Fatalf("no list row with alt %q; body:\n%s", altText, list)
+	}
+	return m[1]
+}
+
+// adminDetailPhotoSrc returns the detail page's served /photos/... URL ("" for
+// a photo-less light).
+func adminDetailPhotoSrc(t *testing.T, s *Server, session, detailURL string) string {
+	t.Helper()
+	body := adminGet(t, s, detailURL, session, false).Body.String()
+	if !strings.Contains(body, `class="detail-photo"`) {
+		return ""
+	}
+	m := regexp.MustCompile(`<img src="(/photos/[^"]+)"`).FindStringSubmatch(body)
+	if m == nil {
+		return ""
 	}
 	return m[1]
 }
@@ -624,7 +845,11 @@ func TestAdminEdit(t *testing.T) {
 	s, session := newAdminServer(t)
 	csrf := adminCSRF(t)
 	detailURL := adminDetailFixture(t, s, session, csrf)
-	t.Run("label-only edit keeps asset and position", func(t *testing.T) {
+	t.Run("label-only edit keeps asset, position and photo", func(t *testing.T) {
+		oldPhoto := adminDetailPhotoSrc(t, s, session, detailURL)
+		if oldPhoto == "" {
+			t.Fatal("fixture has no photo; the survival check would be vacuous")
+		}
 		rec := adminPostMultipart(t, s, detailURL, map[string]string{
 			CSRFTokenName: csrf, "label": "New label",
 		}, "", "", nil, session, csrf, false)
@@ -635,8 +860,13 @@ func TestAdminEdit(t *testing.T) {
 			t.Fatalf("Location = %q, want %q", loc, detailURL)
 		}
 		body := adminGet(t, s, detailURL, session, false).Body.String()
-		if !strings.Contains(body, "New label") || !strings.Contains(body, "GP-018") || !strings.Contains(body, "42.762000") {
-			t.Errorf("detail after edit lost values; body:\n%s", body)
+		for _, want := range []string{"New label", "GP-018", "42.762000", "-71.029000"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("detail after edit lost %q; body:\n%s", want, body)
+			}
+		}
+		if got := adminDetailPhotoSrc(t, s, session, detailURL); got != oldPhoto {
+			t.Errorf("label-only edit changed the photo: %q -> %q, want %q", oldPhoto, got, oldPhoto)
 		}
 	})
 	t.Run("edit reusing another asset 409", func(t *testing.T) {
@@ -718,16 +948,18 @@ func TestAdminPaginationBoundary(t *testing.T) {
 		}
 	}
 	seed(50)
-	t.Run("50 lights: one page, no Older", func(t *testing.T) {
+	t.Run("50 lights: one page holding all 50, no Older", func(t *testing.T) {
 		body := adminGet(t, s, "/admin", session, false).Body.String()
 		if strings.Contains(body, "Older") {
 			t.Error("page 1 with exactly 50 rows shows Older")
 		}
-		if !strings.Contains(body, padLamp(50)) || !strings.Contains(body, padLamp(1)) {
-			t.Errorf("page 1 lacks all 50 rows; body:\n%s", body)
+		all := make([]int, 0, 50)
+		for i := 1; i <= 50; i++ {
+			all = append(all, i)
 		}
+		assertLampPage(t, "page 1 (50 lights)", body, all, nil)
 	})
-	t.Run("51st light: Older appears, page 2 holds the oldest", func(t *testing.T) {
+	t.Run("51st light: Older appears, page 2 holds exactly the oldest", func(t *testing.T) {
 		createLight(t, s, session, csrf, map[string]string{
 			"label": padLamp(51), "kind": "park",
 			"lat": strconv.FormatFloat(42.76+51*0.0005, 'f', 7, 64),
@@ -737,25 +969,24 @@ func TestAdminPaginationBoundary(t *testing.T) {
 		if !strings.Contains(body, "Older") {
 			t.Error("page 1 with 51 lights lacks Older")
 		}
-		if strings.Contains(body, padLamp(1)) {
-			t.Error("page 1 shows the oldest light")
+		// The 50 newest are lights 51..2; the oldest (1) moved to page 2.
+		newest := make([]int, 0, 50)
+		for i := 2; i <= 51; i++ {
+			newest = append(newest, i)
 		}
+		assertLampPage(t, "page 1 (51 lights)", body, newest, []int{1})
 		page2 := adminGet(t, s, "/admin?page=2", session, false)
 		if page2.Code != http.StatusOK {
 			t.Fatalf("page 2 status = %d, want 200", page2.Code)
 		}
-		if !strings.Contains(page2.Body.String(), padLamp(1)) {
-			t.Errorf("page 2 lacks the oldest light; body:\n%s", page2.Body.String())
-		}
+		assertLampPage(t, "page 2", page2.Body.String(), []int{1}, []int{51})
 	})
-	t.Run("rows fragment page 2 carries the oldest only", func(t *testing.T) {
+	t.Run("rows fragment page 2 carries exactly the oldest", func(t *testing.T) {
 		frag := adminGet(t, s, "/admin/rows?page=2", session, true)
 		if frag.Code != http.StatusOK || !reRowsRoot.MatchString(frag.Body.String()) {
 			t.Fatalf("fragment status = %d", frag.Code)
 		}
-		if !strings.Contains(frag.Body.String(), padLamp(1)) || strings.Contains(frag.Body.String(), padLamp(51)) {
-			t.Errorf("fragment page 2 content wrong; body:\n%s", frag.Body.String())
-		}
+		assertLampPage(t, "rows fragment page 2", frag.Body.String(), []int{1}, []int{51})
 	})
 }
 

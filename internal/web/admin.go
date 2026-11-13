@@ -6,6 +6,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -25,6 +26,24 @@ func init() {
 	register(route{pattern: "GET /admin/lights/{id}", handler: AdminOnly(adminDetail)})
 	register(route{pattern: "POST /admin/lights/{id}", handler: AdminOnly(adminEdit)})
 	register(route{pattern: "POST /admin/lights/{id}/delete", handler: AdminOnly(adminDelete)})
+	installLoginPage()
+}
+
+// installLoginPage makes pages/admin-login.html the live login page without
+// touching auth.go (frozen for T-203): auth.go renders loginPageTmpl with nil
+// data, so the styled pipeline output is captured once at startup and installed
+// as that template. The frozen strings are unchanged; the served page now uses
+// base.html (pico.css, 44 px button) instead of auth.go's minimal markup.
+func installLoginPage() {
+	tpl, err := parseTemplates()
+	if err != nil {
+		return // New will report the parse failure; keep the minimal page.
+	}
+	var buf bytes.Buffer
+	if err := tpl.renderPage(&buf, "admin-login.html", pageData{Title: "Admin login"}); err != nil {
+		return
+	}
+	loginPageTmpl = template.Must(template.New("admin-login").Parse(buf.String()))
 }
 
 // adminPageSize is the frozen admin list page size: the 50 most recent

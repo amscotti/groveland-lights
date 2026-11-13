@@ -197,7 +197,7 @@ func adminCreate(w http.ResponseWriter, r *http.Request) {
 	if dup {
 		switch {
 		case sub.DupChoice == "merge":
-			s.mergeDuplicate(w, r, sub, decision)
+			s.mergeDuplicate(w, r, sub, decision, photo)
 			return
 		case sub.DupChoice == "save" && decision.Numbered:
 			// Frozen: save-anyway is unnumbered-only.
@@ -284,13 +284,13 @@ func (s *Server) classifyDuplicate(r *http.Request, sub walkSubmission) (geo.Dup
 	return geo.ClassifyDuplicate(newAsset, newPt, candidates)
 }
 
-// mergeDuplicate applies the new submission's label onto the existing row
-// (frozen: no new light row is created).
-func (s *Server) mergeDuplicate(w http.ResponseWriter, r *http.Request, sub walkSubmission, decision geo.DupDecision) {
+// mergeDuplicate applies the new submission's label and photo onto the
+// existing row (frozen: no new light row is created).
+func (s *Server) mergeDuplicate(w http.ResponseWriter, r *http.Request, sub walkSubmission, decision geo.DupDecision, photo *UploadedPhoto) {
 	existing, err := s.Store.GetLight(r.Context(), store.LightID(decision.ExistingID))
 	if err != nil {
 		// The duplicate vanished between the check and the merge: save as a
-		// plain new light instead.
+		// plain new light instead (keeping the uploaded photo).
 		_, cerr := s.Store.CreateLight(r.Context(), store.NewLight{
 			AssetNo:   sub.AssetNo,
 			Kind:      sub.Kind,
@@ -298,6 +298,7 @@ func (s *Server) mergeDuplicate(w http.ResponseWriter, r *http.Request, sub walk
 			Lat:       sub.Lat,
 			Lon:       sub.Lon,
 			AccuracyM: sub.AccuracyM,
+			PhotoID:   photoIDOf(photo),
 		})
 		if cerr != nil {
 			s.Log.Error("admin merge: create", "err", cerr)
@@ -311,6 +312,13 @@ func (s *Server) mergeDuplicate(w http.ResponseWriter, r *http.Request, sub walk
 		s.Log.Error("admin merge", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+	if photo != nil {
+		if err := s.attachPhoto(r.Context(), existing.ID, photo.ID); err != nil {
+			s.Log.Error("admin merge: attach photo", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 	}
 	s.respondWalkOK(w, r)
 }
@@ -351,7 +359,9 @@ func (s *Server) respondDuplicate(w http.ResponseWriter, r *http.Request, sub wa
 }
 
 // walkReject answers a validation failure with the frozen status: an alert
-// fragment for HTMX, the re-rendered walk page (values kept) otherwise.
+// fragment for HTMX, the re-rendered walk page (values kept) otherwise. A
+// parse failure has no submission to echo, but the page it returns is still a
+// usable form: it carries a fresh CSRF token and the bbox.
 func (s *Server) walkReject(w http.ResponseWriter, r *http.Request, sub *walkSubmission, status int, message string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if r.Header.Get("HX-Request") != "" {
@@ -361,9 +371,13 @@ func (s *Server) walkReject(w http.ResponseWriter, r *http.Request, sub *walkSub
 		}
 		return
 	}
-	data := walkPageData{pageData: pageData{Title: "Walk the town", TestEnv: s.Cfg.IsTest()}}
+	submitted := walkSubmission{Kind: store.KindPark}
 	if sub != nil {
-		data = s.walkPageDataOf(w, r, *sub)
+		submitted = *sub
+	}
+	data := s.walkPageDataOf(w, r, submitted)
+	if data.CSRFToken == "" {
+		return // IssueCSRFToken already answered 500.
 	}
 	data.Alert = message
 	w.WriteHeader(status)
@@ -381,12 +395,21 @@ func (s *Server) walkPageDataOf(w http.ResponseWriter, r *http.Request, sub walk
 		BBox:      formatBBox(s.Cfg.TownBBox),
 		Values: walkValues{
 			Label:     sub.Label,
+			AssetNo:   assetString(sub.AssetNo),
 			Kind:      string(sub.Kind),
 			Lat:       strconv.FormatFloat(sub.Lat, 'f', -1, 64),
 			Lon:       strconv.FormatFloat(sub.Lon, 'f', -1, 64),
 			AccuracyM: accuracyString(sub.AccuracyM),
 		},
 	}
+}
+
+// assetString renders an optional asset number for re-render.
+func assetString(asset *string) string {
+	if asset == nil {
+		return ""
+	}
+	return *asset
 }
 
 // accuracyString renders an optional accuracy for re-render.
