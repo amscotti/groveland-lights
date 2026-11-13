@@ -139,8 +139,8 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "merging",
-      "attempts": 0,
+      "status": "rework",
+      "attempts": 1,
       "budget": {
         "steps": 200,
         "wall_min": 90
