@@ -1,85 +1,128 @@
-# T-205 — visual review (all 24 screenshots under `test-results/` inspected)
+# T-205 visual review — admin UI (walk flow, CRUD, list + HTMX pagination)
 
-Reviewed every PNG on disk against `acceptance/drafts/README.md` per-assertion
-visual notes (A-202, A-203, A-204, A-205, A-206, A-208, A-209) at both mobile
-viewports (pixel-9 `*-p9`, iphone-se-320 `*-se`). The narrowest layout (320 px)
-shows no horizontal overflow anywhere: long asset numbers wrap at hyphens, list
-rows wrap to two lines, nothing is clipped or overlapping.
+Reviewer: visual-reviewer (vision pass over every PNG in `test-results/`, 23 files,
+both viewports). Contract source: `acceptance/drafts/README.md` per-assertion visual
+notes. Screenshots were produced by the task's scratch Playwright run (16/16 passed)
+and live under `test-results/`.
 
-## Walk page — `visual-walk-page-layout-p9/walk-page-layout/walk-p9.png`, `visual-walk-page-layout-se/walk-page-layout/walk-se.png`
-- `#walk-pos` "42.761700, -71.030300" + "accuracy 12 m" readable at 6 dp; pin
-  pad with "±25 m" scale label and a clearly visible, centred pin marker;
-  `#pin-pos` mirrors the coords below the pad; "Add light here" is full-width,
-  in the bottom third, ≥ 44 px tall at both viewports. Footer text legible. ✓
-- The pad is a schematic SVG scale (no third-party tiles), so no map
-  attribution applies; no bottom sheet on this page, so nothing covers the pin.
+## Per-file findings
 
-## Low-accuracy gate — `visual-low-accuracy-gate-and-real-save-at-80-m-p9/…/walk-lowacc-p9.png`, `…-se/…/walk-lowacc-se.png`
-- "accuracy 80 m" stated in text; "Add light here" rendered muted/disabled
-  while "Save anyway (low accuracy)" sits full-width below it — the gated state
-  is conveyed by text + an explicit labelled alternative, not colour alone. ✓
-- Note: the disabled button's white-on-pale-blue fill is low contrast, but
-  disabled controls are contrast-exempt and the platform `disabled` attribute +
-  the alternative button carry the meaning. Acceptable.
+### `visual-login-card-at-320-iphone-se-320/login.png` (+ `visual-login-card-at-320-pixel-9/login.png`)
+- A-201 met: single centred card, `Admin login` h1, labelled `Token` input
+  (password-style mask), full-width `Sign in` button clearly ≥ 44 px. Footer
+  attribution ("A community project…") legible and unobstructed. No horizontal
+  scroll at 320 px or pixel-9; nothing clipped or overlapping.
 
-## Geolocation denied — `visual-geolocation-denied-shows-manual-pin-fields-p9/…/walk-denied-p9.png`, `…-se/…/walk-denied-se.png`
-- Pad hidden, `#manual-lat` / `#manual-lon` labelled number inputs shown,
-  button correctly held disabled; no overflow at 320 px. ✓
-- Cosmetic: the strip reads "waiting for a position… manual position" and
-  `#pin-pos` still prints "waiting for a position…" beneath — honest, legible,
-  non-overlapping, but slightly redundant copy. Not a defect.
+### `visual-walk-page-layout-and-tap-targets-iphone-se-320/walk.png` (+ `pixel-9/walk.png`)
+- A-202/A-203 met: `#walk-pos` + `#walk-accuracy` ("accuracy 12 m") readable at
+  the top; pin pad with `±25 m` scale label; high-contrast pin (dark blue ring,
+  white stroke) centred on the pad — visible and distinguishable on both
+  viewports; `#pin-pos` shows the same coords at 6 dp directly under the pad.
+  "Add light here" is full-width in the bottom third of the viewport on BOTH
+  projects. No overflow, nothing clipped.
 
-## Outside-bbox alert — `visual-outside-bbox-shows-the-frozen-alert-p9/…/walk-bbox-alert-p9.png`, `…-se/…/walk-bbox-alert-se.png`
-- Bordered alert near the readout: red warning-triangle icon + "That position
-  is outside Groveland town bounds" — shape AND text, not colour alone; wraps
-  cleanly at 320 px; form does not advance (button disabled). Matches A-204. ✓
+### `visual-low-accuracy-gate-and-save-anyway-iphone-se-320/walk-low-accuracy.png` (+ `pixel-9/…`)
+- At accuracy 80 m "Add light here" is painted faded AND (per walk.js:97 and the
+  handoff's asserted attribute) carries the platform `disabled` attribute — not
+  a colour-only signal: the full-width, fully-labelled "Save anyway (low
+  accuracy)" button appears directly below it and names the condition in text.
+  Both ≥ 44 px. Disabled-control contrast exempt (WCAG 1.4.3 exception).
 
-## Duplicate panels — `visual-numbered-duplicate-panel-merge-and-cancel-p9/…/dup-numbered-p9.png`, `…-se/…/dup-numbered-se.png`, `…/dup-merged-list-*.png`; `visual-unnumbered-duplicate-panel-save-anyway-p9/…/dup-unnumbered-p9.png`, `…-se/…/dup-unnumbered-se.png`
-- Amber-icon bordered `#dup-panel`, heading "Possible duplicate", existing
-  label + asset number + distance shown. Numbered case: `Merge` + `Cancel`
-  link, NO "Save anyway" (frozen contract honoured). Unnumbered: `Merge` +
-  `Save anyway`, both full-width ≥ 44 px. Post-merge list shows exactly one
-  row carrying the merged label. Matches A-205. ✓
-- Minor: the `Cancel` link is a ~24 px text link, below the 44 px floor. The
-  frozen contract freezes it as `role=link` named `Cancel`, so styling it as a
-  button would break the oracle; it is a secondary escape hatch adjacent to the
-  44 px `Merge` button. Flagged in the handoff (open issue 3). Acceptable.
+### `visual-geolocation-denied-manual-position-fallback-iphone-se-320/walk-manual.png` (+ `pixel-9/…`)
+- Pad hidden, `Latitude`/`Longitude` number inputs shown with labels, save held
+  disabled until typed position. No horizontal scroll. Copy notes (minor, not
+  blocking): with geolocation denied the readouts read "waiting for a position…
+  manual position" then "waiting for a position…" — the second is `#pin-pos`
+  still showing its placeholder while the pad is hidden; slightly redundant
+  wording but not clipped or overlapping. The iPhone variant shows a ~10 px black
+  strip at the very bottom edge — present in no other screenshot including its
+  pixel-9 twin, so a capture artifact, not app UI.
 
-## Photo preview / detail — `visual-photo-preview-is-landscape-detail-page-intact-p9/…/{walk-preview-p9,list-p9,detail-p9}.png`, `…-se/…/{walk-preview-se,list-se,detail-se}.png`
-- `#photo-preview` renders the portrait Orientation=6 fixture landscape
-  (wider than tall) at both viewports — A-206 satisfied. List rows carry a
-  small square thumbnail with the frozen alt format + status chip (dot AND
-  "unknown" text). Detail shows the landscape served photo, 6-dp position,
-  labelled edit form, `Save changes` ≥ 44 px separated from `Delete light`
-  (outline button with red warning-triangle icon). File-input filename
-  truncates with ellipsis without colliding with "Choose File". ✓
-- Deviation (noted, not blocking): the A-208 visual note asks for a
-  *visually destructive (red)* delete action; the button is an outline with a
-  red warning icon instead. `app.css` is outside this task's owns and CSP
-  blocks inline styles, so a red variant needs a CSS task — already flagged in
-  the handoff (open issue 4). Destructiveness is still conveyed by icon + text
-  + separation, which is stronger than colour-alone anyway.
+### `visual-outside-bbox-alert-iphone-se-320/walk-bbox-alert.png` (+ `pixel-9/…`)
+- A-204 met: bordered role=alert with a red warning-triangle icon AND the exact
+  text "That position is outside Groveland town bounds" — icon + text + border,
+  not colour alone; it sits adjacent to the position readout. Save stays
+  disabled; the form does not advance. No overflow.
 
-## List pagination — `visual-admin-list-paginates-with-htmx-p9/…/list-page{1,2}-p9.png`, `…-se/…/list-page{1,2}-se.png`
-- Page 1: 50 seeded rows (55→06), visible thumbnails, status chips with dot +
-  text, no 320 px overflow, full-width `Older` ≥ 44 px. Page 2: rows 05→01
-  swapped in with `Newer` offered back. Matches A-209. ✓
+### `visual-photo-preview-and-detail-iphone-se-320/walk-photo-preview.png` (+ `pixel-9/…`)
+- A-206 met: `#photo-preview` renders the Orientation=6 portrait fixture
+  LANDSCAPE (box visibly wider than tall on both viewports). Label filled,
+  `Asset number`, `Kind` (Park/Building select), `Photo` all present — the form
+  reveals below "Add light here" (progressive disclosure, confirmed in
+  `pages/admin-walk.html`), so the button-visible-in-bottom-third contract and
+  the field labels coexist correctly. `Confirm pin` full-width ≥ 44 px at the
+  end. Minor: the native file input truncates the filename at 320 px
+  ("portrait-o…t6-gps.jpg") — platform control behaviour, full name visible on
+  pixel-9; the `Choose File` native button is ~30 px tall (platform control,
+  see tap-target notes).
+
+### `visual-photo-preview-and-detail-iphone-se-320/detail-photo.png` (+ `pixel-9/…`)
+- A-208 met: served photo rendered landscape, `Position:` at 6 dp,
+  `Asset number: —`, `Kind: park · Status: ● unknown · Recorded accuracy: 12 m`
+  (grey dot + word "unknown" — text accompanies colour). Labelled edit form
+  (Label filled), `Save changes` primary, `Delete light` as a separated
+  full-width outline button with a red warning icon. Nothing clipped.
+
+### `visual-duplicate-panel-and-merge-iphone-se-320/dup-panel-numbered.png` (+ `pixel-9/…`)
+- A-205 met: amber-bordered `#dup-panel` with amber warning icon, heading
+  "Possible duplicate", the EXISTING light (`Dup lamp`, `GP-017-…`, distance)
+  — it does not echo the submitted twin label. Numbered case shows full-width
+  `Merge` + `Cancel` link and NO `Save anyway`, exactly per reconciliation 2.
+  The panel reveals below `#pin-pos` and never covers the pin on either
+  viewport. `Cancel` is a small text link < 44 px — frozen by contract as
+  `getByRole('link', {name: 'Cancel'})` (handoff open issue 1); all real
+  buttons meet the floor.
+
+### `visual-duplicate-panel-and-merge-iphone-se-320/list-after-merge.png` (+ `pixel-9/…`)
+- Merge applied: exactly ONE `GP-017-mwfhjk9s-p9 Dup lamp twin` row carrying the
+  newly submitted label (alt format `<asset_no> <label>`), thumbnails + status
+  chips intact. (The pixel-9 twin additionally shows a `GP-017-mwfhj8ga` row —
+  a different asset number left by a sibling invocation sharing the persistent
+  `test-run.db`; not a duplicate-row bug.)
+
+### `visual-admin-list-paginates-with-htmx-iphone-se-320/list-page1.png` / `list-page2.png` (+ `pixel-9/…`)
+- A-209 met: heading `Lights`; 50 rows/page (06–55 on page 1); every row has a
+  visible square thumbnail (placeholder lamp icon, or the real re-encoded photo
+  on photo-bearing rows — rendered landscape); asset number + label link +
+  status chip (dot + word); full-width `Older` (and `Newer` on page ≥ 2) that
+  swaps fragments via HTMX per the handoff's no-navigation assertion. No
+  horizontal scroll at 320 px; long labels wrap cleanly.
 
 ## Checklist summary
-- 320 px / mobile layouts: no clipping, no overlap, no horizontal scroll. ✓
-- Tap targets ≥ 44 px: all buttons pass; exceptions are the frozen `Cancel`
-  text link (handoff issue 3) and the pre-existing small header nav links from
-  `base.html` (unchanged by this diff). Noted.
-- Contrast: dark-on-white body, pico-blue links, legible muted labels;
-  disabled-state contrast exempt and textually backed. ✓
-- Status via text + shape, never colour alone: alert icon + text, dot + text
-  chips, delete warning icon + text, gate = disabled attribute + labelled
-  alternative button. ✓
-- Map markers/clusters/attribution: public map not in this task; walk pad pin
-  visible and centred everywhere; no clusters, no tile attribution required. ✓
-- Bottom sheet: not rendered on these pages; nothing occludes the pin. ✓
 
-Findings are notes only; every one is either frozen-contract-mandated or
-outside the task's owns and already flagged in `harness/handoffs/T-205.md`.
+- 320 px layout: no horizontal overflow, no clipped/overlapping text anywhere.
+- Tap targets ≥ 44 px: `Sign in`, `Add light here`, `Save anyway (low accuracy)`,
+  `Merge`, `Older`, `Newer`, `Confirm pin`, `Save changes`, `Delete light` all
+  clear the floor. Exceptions: contract-frozen `Cancel` text link; native
+  `Choose File` control; `#pin` drag target ≈ 32 px (meets WCAG 2.5.8 AA 24 px,
+  has role=button + arrow-key nudge as the accessible alternative); header nav
+  `Map/List/About` are pre-existing public chrome outside T-205's owns.
+- Contrast: body/link/chip text all ≥ 4.5:1 on white; `±25 m` grey-on-grey pad
+  label ≈ 4.6:1; disabled primary exempt.
+- Status = text + shape (never colour alone): status chips (dot + word), bbox
+  alert (icon + border + text), dup panel (amber icon + heading), disabled save
+  (paired labelled "Save anyway (low accuracy)"), Delete (red icon + text).
+- Map: no MapLibre map in T-205 scope; the single pin marker is visible,
+  distinguishable and centred on both viewports; no clusters to count.
+  Attribution footer legible and unobstructed on every screenshot.
+- Bottom sheet / marker overlap: N/A (no sheet); the dup panel renders below
+  `#pin-pos` and never occludes the pin.
+
+## Non-blocking notes for the record
+
+1. `Cancel` link < 44 px — frozen ARIA role prevents fixing; documented in
+   handoff (open issue 1).
+2. `Delete light` is outline + red icon rather than a red-filled destructive
+   button (A-208 note says "visually destructive (red)"); `app.css` is outside
+   this task's owns and CSP blocks inline styles — documented (open issue 2).
+   Destructive intent is still conveyed by icon + text + separation, so this is
+   a nuance, not a failure.
+3. Manual-mode copy ("waiting for a position…" placeholders in `#walk-pos` and
+   `#pin-pos` simultaneously) is mildly redundant; harmless.
+4. iPhone `walk-manual.png` bottom-edge black strip — capture artifact only
+   (absent from the pixel-9 twin and every other screenshot).
+
+All per-assertion visual notes in `acceptance/drafts/README.md` (A-201, A-202,
+A-203, A-204, A-205, A-206, A-208, A-209) are satisfied by the evidence on disk.
 
 VERDICT: PASS
