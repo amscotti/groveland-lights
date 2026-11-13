@@ -524,6 +524,11 @@ func TestAdminCreateOutsideBBox(t *testing.T) {
 			t.Errorf("rejection page lost %q; body:\n%s", want, body)
 		}
 	}
+	// A no-JS client must SEE the rejection: the form section cannot stay
+	// hidden when the server re-rendered it with an alert (or dup panel).
+	if strings.Contains(body, `id="add-form" hidden`) {
+		t.Error("rejection page leaves the form hidden; the alert is unreachable")
+	}
 	hx := adminPostMultipart(t, s, "/admin/lights", map[string]string{
 		CSRFTokenName: csrf, "label": "Out lamp", "kind": "park", "lat": "42.36", "lon": "-71.06",
 	}, "", "", nil, session, csrf, true)
@@ -975,11 +980,20 @@ func TestAdminPaginationBoundary(t *testing.T) {
 			newest = append(newest, i)
 		}
 		assertLampPage(t, "page 1 (51 lights)", body, newest, []int{1})
+		// No-JS pager contract: a GET form submission replaces the action
+		// URL's query, so the page number must travel in a hidden input, not
+		// only in formaction.
+		if !strings.Contains(body, `<input type="hidden" name="page" value="2">`) {
+			t.Errorf("page 1 Older control has no hidden page input; body:\n%s", body)
+		}
 		page2 := adminGet(t, s, "/admin?page=2", session, false)
 		if page2.Code != http.StatusOK {
 			t.Fatalf("page 2 status = %d, want 200", page2.Code)
 		}
 		assertLampPage(t, "page 2", page2.Body.String(), []int{1}, []int{51})
+		if !strings.Contains(page2.Body.String(), `<input type="hidden" name="page" value="1">`) {
+			t.Errorf("page 2 Newer control has no hidden page input; body:\n%s", page2.Body.String())
+		}
 	})
 	t.Run("rows fragment page 2 carries exactly the oldest", func(t *testing.T) {
 		frag := adminGet(t, s, "/admin/rows?page=2", session, true)
@@ -987,6 +1001,9 @@ func TestAdminPaginationBoundary(t *testing.T) {
 			t.Fatalf("fragment status = %d", frag.Code)
 		}
 		assertLampPage(t, "rows fragment page 2", frag.Body.String(), []int{1}, []int{51})
+		if !strings.Contains(frag.Body.String(), `<input type="hidden" name="page" value="1">`) {
+			t.Errorf("rows fragment Newer control has no hidden page input; body:\n%s", frag.Body.String())
+		}
 	})
 }
 

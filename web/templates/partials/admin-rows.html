@@ -12,9 +12,9 @@
   <p>No lights recorded yet — walk the town to add the first one.</p>
   {{end}}
   {{if or .HasNewer .HasOlder}}
-  <form class="pager" method="get">
-    {{if .HasNewer}}<button type="submit" formaction="/admin/rows?page={{.NewerPage}}" hx-get="/admin/rows?page={{.NewerPage}}" hx-target="#rows" hx-swap="outerHTML">Newer</button>{{end}}
-    {{if .HasOlder}}<button type="submit" formaction="/admin/rows?page={{.OlderPage}}" hx-get="/admin/rows?page={{.OlderPage}}" hx-target="#rows" hx-swap="outerHTML">Older</button>{{end}}
-  </form>
+  <div class="pager">
+    {{if .HasNewer}}<form method="get" action="/admin/rows"><input type="hidden" name="page" value="{{.NewerPage}}"><button type="submit" hx-get="/admin/rows?page={{.NewerPage}}" hx-target="#rows" hx-swap="outerHTML">Newer</button></form>{{end}}
+    {{if .HasOlder}}<form method="get" action="/admin/rows"><input type="hidden" name="page" value="{{.OlderPage}}"><button type="submit" hx-get="/admin/rows?page={{.OlderPage}}" hx-target="#rows" hx-swap="outerHTML">Older</button></form>{{end}}
+  </div>
   {{end}}
 </div>

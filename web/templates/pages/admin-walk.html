@@ -30,7 +30,7 @@
     <button type="button" id="add-light">Add light here</button>
     <button type="button" id="save-lowacc" hidden>Save anyway (low accuracy)</button>
   </div>
-  <section id="add-form" hidden>
+  <section id="add-form"{{if and (not .Alert) (not .Dup)}} hidden{{end}}>
     <h2>New light at the pin</h2>
     <form id="walk-form" method="post" action="/admin/lights" enctype="multipart/form-data" hx-post="/admin/lights" hx-target="#dup-slot" hx-swap="innerHTML" hx-encoding="multipart/form-data">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
