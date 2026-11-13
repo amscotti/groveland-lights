@@ -31,35 +31,35 @@ calls `New` with two arguments and that file is outside `owns`, so a literal
 chose the variadic third parameter instead of editing the unowned test and
 documented the contradiction (`harness/handoffs/T-208.md:53-69, 90-115`).
 
-Test-integrity impact: none directly — no test was changed to accommodate it,
-and `New(cfg, log, db)` still compiles and wires the store. The cost is that the
-compiler no longer enforces the packet's frozen arity: a future caller can omit
-the store and get a silent nil-`Server.Store` (every store-backed route 500s)
-instead of a compile error. The planner should either accept the variadic form
-or extend `owns` and restore the fixed arity; I do not block on this because the
-handoff discloses it and the requested call form works.
+Test-integrity impact: no test assertion was weakened to accommodate it, and
+`New(cfg, log, db)` still compiles and wires the store. `web_test.go:30-32` adds
+the explicit `nil` argument, which is a test-file edit but not a narrowing.
+The cost is that the compiler no longer enforces the packet's frozen arity: a
+future caller can omit the store and get a silent nil-`Server.Store` (every
+store-backed route 500s) instead of a compile error. The planner should either
+accept the variadic form or extend `owns` and restore the fixed arity; I do not
+block on this because the handoff discloses it and the requested call form
+works.
 
-### 2. [Medium, coverage of the new API] No unit test exercises `New(cfg, log, db)`'s positive store-wiring branch
+### 2. [Low, unit coverage of the new API] No unit test calls `New(cfg, log, db)` with a non-nil store
 
 `internal/web/probe_test.go:34-43` builds the probe server with
 `newTestServer(t, config.EnvTest)` and then assigns `s.Store = db` directly at
-line 42. `internal/web/web_test.go:30-32` passes `nil`. So no unit test calls
-the production form with a non-nil store, and the `len(db) > 0` / `Store: st`
-branch in `internal/web/web.go:51-55` is not exercised inside the gate.
+line 42. `internal/web/web_test.go:30-32` passes `nil`. So no test in
+`internal/web` exercises the production call form's positive branch
+(`internal/web/web.go:51-55`).
 
-The only test that runs that branch is the smoke-tagged
-`cmd/server/boot_test.go` (spawned binary, `main.go` calls
-`web.New(cfg, logger, db)`), and the handoff lists
-`go test -tags smoke -count=1 ./cmd/server/` as a separate command
-(`harness/handoffs/T-208.md` "Commands run"), not part of `make check-fast` /
-`make check`. If `New` stopped copying `db` into `Server.Store`, all unit tests
-would still pass; only the manual smoke test would catch it. This is the same
-gate-visibility class of gap that the T-103 alt review raised for the boot tests.
-
-Fix: either have `newProbeServer` construct through
-`New(testConfig(config.EnvTest), logger, db)` (the frozen call form) or add a
-small `TestNewWiresStore` asserting `s.Store == db`. That would also make the
-new probe tests exercise the API they are supposed to protect.
+The branch is still covered end-to-end by the gate's spawned-binary suites:
+the acceptance Go probe test (`acceptance/go/probe_test.go`, which `make check`
+runs as `acceptance-go`) and the Playwright probe spec start `bin/server`, whose
+`main.go` calls `web.New(cfg, logger, db)`; if `New` stopped copying `db` into
+`Server.Store`, those suites would 500 and fail. The additional smoke-tagged
+`cmd/server/boot_test.go` covers it too but is not in the gate
+(`harness/handoffs/T-208.md` lists it as a separate command). So this is not a
+missing coverage hole so much as a missing unit-level assertion: a
+`check-fast` run alone would not catch a `New` wiring regression. Adding
+`TestNewWiresStore` (or constructing `newProbeServer` through
+`New(testConfig(config.EnvTest), logger, db)`) would close the gap cheaply.
 
 ### 3. [Medium–Low, coverage theatre] The nil-store 500 row cannot fail if the nil guard is deleted
 
