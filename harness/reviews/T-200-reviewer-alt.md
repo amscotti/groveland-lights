@@ -30,7 +30,7 @@ for _, want := range []string{"httponly", "samesite=lax", "path=/"} {
 ```
 
 `"path=/"` is a substring of `"path=/admin"`, so a cookie scoped to `/admin`
-passes the check. The README freezes `Path=/` (`acceptance/drafts/README.md:96`),
+passes the check. The README freezes `Path=/` (`acceptance/drafts/README.md:90`),
 and T-203 freezes `Path=/` and `MaxAge` 24 h (`harness/tasks/T-203.md:62-64`);
 the handoff explicitly claims this closes the attempt-3 finding
 (`harness/handoffs/T-200.md` fix-map row "alt 7 / reviewer 1"). It does not.
@@ -48,7 +48,7 @@ terminator (`; path=/;` / end-of-string) and checking `max-age=86400`.
 
 `acceptance/drafts/admin_auth_go_test.go.txt:104-107` asserts only
 `status == 200` for `GET /admin/login?token=` (blank). The README freezes that
-blank renders the form page (`acceptance/drafts/README.md:96`), and the
+blank renders the form page (`acceptance/drafts/README.md:90`), and the
 no-token branch checks the four markup regexes
 (`admin_auth_go_test.go.txt:92-96`). An implementation that answers an empty
 200 for a blank `token` passes this draft while violating the frozen form-page
@@ -59,8 +59,8 @@ contract. Re-run the markup regexes on the blank-token body.
 The README freezes `#walk-pos` as "rendered at 6 decimal places"
 (`acceptance/drafts/README.md:66`), but every `#walk-pos` assertion in the e2e
 draft uses the loose packet regex `\d+\.\d+, -?\d+\.\d+`
-(`admin-walk.spec.ts.txt:188-194, 223-224, 466-467, 607`; the `openWalkForm`
-wait is the first of these). A walk page that renders `42.76, -71.03` (2 dp)
+(`admin-walk.spec.ts.txt:190, 223`; the `openWalkForm` wait is the first of
+these). A walk page that renders `42.76, -71.03` (2 dp)
 passes the wait and test 1; the `#pin-pos` and `#light-pos` checks separately
 use six decimals. Use `\d+\.\d{6}, -?\d+\.\d{6}` (or assert the exact rendered
 text) so the README's 6 dp clause is actually frozen.
@@ -74,7 +74,7 @@ uploaded portrait fixture at all; the test never checks the preview's
 `src`/object URL or its expected dimensions. The Go test does prove the served
 photo's exact 800×600 (`acceptance/drafts/admin_lights_go_test.go.txt:298-302`),
 but the preview claim is weaker than the README's "in-form preview ... renders
-EXIF orientation applied" (`README.md:82`). Assert `naturalW === 800 &&
+EXIF orientation applied" (`README.md:76`). Assert `naturalW === 800 &&
 naturalH === 600` for this fixture (or assert the preview `src` is a
 blob/data URL derived from the selected file).
 
@@ -89,7 +89,7 @@ await page.goto('/admin');
 
 `click()` does not wait for a navigation triggered by the button; the
 immediate `goto` can cancel the in-flight delete POST/303. The frozen contract
-is a 303 to `/admin` (`README.md:100`); wait for the URL/navigation (or the
+is a 303 to `/admin` (`README.md:94`); wait for the URL/navigation (or the
 row's disappearance) before asserting the list. This is a mechanical
 `expect.poll`/`waitForURL` fix, but it should not ship frozen.
 
@@ -99,7 +99,7 @@ row's disappearance) before asserting the list. This is a mechanical
 and checks that the asset number and position survive. The light has no photo,
 and `kind` is already the default `park`, so a server that resets
 `kind`/`photo` on every edit still passes. The README freezes "unspecified
-fields keep values" (`README.md:99`). Create the edit fixture with a photo
+fields keep values" (`README.md:93`). Create the edit fixture with a photo
 (and/or assert the kind round-trip) so the preservation clause is actually
 proven.
 
@@ -108,7 +108,7 @@ proven.
 `acceptance/drafts/admin_lights_go_test.go.txt:204-207` asserts exactly one row
 whose alt starts `GP-017 ` after `dup_choice=merge`. A server that receives
 `dup_choice=merge` and does nothing (keeps the original row) also passes. The
-e2e twin is the same (`admin-walk.spec.ts.txt:653-661`). T-205 freezes
+e2e twin is the same (`admin-walk.spec.ts.txt:410-418`). T-205 freezes
 "dup_choice==merge → apply photo/label onto ExistingID"
 (`harness/tasks/T-205.md:67-68`); assert the merged row carries the twin's
 label (or the photo) to prove the merge, not just the row count.
@@ -120,7 +120,7 @@ disabled, clicks `Save anyway (low accuracy)`, then completes a real save. It
 never attempts a submit while the gate is active, so an implementation that
 disables the button but still accepts a form submit by another path (Enter,
 another button, direct POST) passes. The frozen contract is "save gated at
-≤30 m or explicit save-anyway" (`acceptance/contract.json`; `README.md:194-197`).
+≤30 m or explicit save-anyway" (`acceptance/contract.json`; `README.md:188-191`).
 This is the same class the attempt-2 review raised, only partially addressed.
 
 ### 8. [Info] Client-side bbox alert is a new reconciliation, not a T-205 behaviour
@@ -138,7 +138,7 @@ handoff says).
 
 `acceptance/drafts/admin-walk.spec.ts.txt:141-154` sweeps `/admin?page=2` to
 find `Scroll lamp`/`Edge lamp` rows. The frozen HTTP table
-(`README.md:94-103`) explicitly freezes `GET /admin`, the 50-newest list, and
+(`README.md:88-97`) explicitly freezes `GET /admin`, the 50-newest list, and
 `GET /admin/rows?page=N` (303 target `/admin?page=N`), but not the full-page
 `GET /admin?page=N`. T-205's `GET /admin` query-page implementation makes this
 fine; the table could state it to remove the ambiguity.
@@ -174,8 +174,8 @@ is not scheduler-generated it should be dropped. No test-integrity impact.
   asserted 200 (`admin_auth_go_test.go.txt:104-107`); the served photo is
   asserted exactly 800×600 (`admin_lights_go_test.go.txt:298-302`); `jpegSize`
   has the truncated-SOF guard (`images.ts:98-100`); @A-209 sweeps the stable
-  `Scroll lamp` prefix (`admin-walk.spec.ts.txt:557-559`); and the heading
-  regexes tolerate whitespace (`admin_lights_go_test.go.txt:329-331`).
+  `Scroll lamp` prefix (`admin-walk.spec.ts.txt:564, 616`); and the heading
+  regexes tolerate whitespace (`admin_lights_go_test.go.txt:83-85`).
 - **Rerun safety under the real topology is coherent.** `playwright.config.ts`
   pins `workers: 1`/`fullyParallel: false`; one webServer shares
   `./test-run.db`; `admin.ts` exchanges the one-time token at most once per DB
