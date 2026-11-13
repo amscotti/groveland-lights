@@ -75,7 +75,7 @@ replay, so the visible oracle is weaker than the contract it claims to freeze.
 `GP-017-<run>-<projectCode>`. `@A-202` (`:194`), `@A-205` (`:300`) and
 `@A-206` (`:388`) all use that same value. Pre-clean deletes by **label**
 (`:142-164`), not by asset. If `@A-202` creates its light and then fails
-before cleanup (`:223`), `@A-205`'s first create (once Finding 1 is fixed)
+before cleanup (`:201`), `@A-205`'s first create (once Finding 1 is fixed)
 sees a live numbered duplicate instead of saving; if `@A-205` leaves its
 light, `@A-206` inherits the collision. The handoff's “Each test is
 self-contained” (`harness/handoffs/T-200.md:18`) is therefore false. A
@@ -101,7 +101,7 @@ then choose save-anyway and assert a real save.
 with `width: 100%` in a wide container is wider than tall **without** any EXIF
 correction, so the test can pass for the wrong reason. The README freezes
 that the preview renders EXIF orientation applied
-(`acceptance/drafts/README.md:76`). Assert the preview image's
+(`acceptance/drafts/README.md:66`). Assert the preview image's
 `naturalWidth > naturalHeight` (and/or its intrinsic dimensions) instead of
 only the CSS box.
 
@@ -110,7 +110,7 @@ only the CSS box.
 `acceptance/drafts/admin-walk.spec.ts.txt:321-323` asserts `Merge` is visible
 but never asserts `Save anyway` is absent, nor that the cancel link exists.
 The README freezes the numbered panel as `Merge` + a cancel link, with
-`Save anyway` unnumbered-only (`acceptance/drafts/README.md:58`, `:60`). An
+`Save anyway` unnumbered-only (`acceptance/drafts/README.md:54`, `:58`). An
 implementation that also shows `Save anyway` on numbered is not caught by the
 e2e; the Go test catches the server's 422 but not the UI. Add
 `expect(panel.getByRole('button', { name: 'Save anyway' })).toHaveCount(0)`.
@@ -122,13 +122,13 @@ has no GPS IFD. `acceptance/drafts/admin-walk.spec.ts.txt:422` only asserts
 `hasExifGps(bytes) === false`, so a served photo that retains EXIF orientation
 or other metadata (without GPS) passes the e2e. The README freezes “NO APP1
 segment (so no EXIF, no GPS)” (`acceptance/drafts/README.md:86`), and the Go
-test catches any APP1 (`admin_lights_go_test.go.txt:229` region). The e2e
+test catches any APP1 (`admin_lights_go_test.go.txt:270`). The e2e
 assertion is weaker than the frozen contract; add an APP1-segment check or
 state that the Go test is the only proof.
 
 ### 9. [Low] `@A-203` does not exercise the frozen keyboard-movable pin
 
-`acceptance/drafts/admin-walk.spec.ts.txt:447-495` only drags with the mouse.
+`acceptance/drafts/admin-walk.spec.ts.txt:236-284` only drags with the mouse.
 The UI contract freezes `#pin` as “keyboard-movable”
 (`acceptance/drafts/README.md:52`). The holdout reportedly has a
 keyboard-moved pin, but the visible oracle does not; a worker could omit arrow
@@ -157,7 +157,7 @@ The fallback should surface the error or the comment should state that the
 `acceptance/drafts/admin_lights_go_test.go.txt:448` onward checks the page-2
 fragment's contents but never asserts the root element id `rows`, although the
 README freezes “fragment root element id `rows`”
-(`acceptance/drafts/README.md:90`). The e2e may catch a bad root indirectly via
+(`acceptance/drafts/README.md:85`). The e2e may catch a bad root indirectly via
 HTMX, but the Go oracle is weaker than the contract.
 
 ## What is sound (checked)
