@@ -144,11 +144,11 @@ so this is a static review of the diff, not a local re-run.
    rejects `?`, `#`, `%` but not a space; the prior F4 review mentioned
    spaces. No test covers a space in `dbPath`. The guard is still an
    improvement; T-103 can normalize at the config boundary.
-7. **Handoff count.** `harness/handoffs/T-101.md:225` says "10 top-level
+7. **Handoff count.** `harness/handoffs/T-101.md:133` says "10 top-level
    store tests"; the diff contains 11 top-level `Test*` functions in
    `internal/store`. Trivial documentation inaccuracy, not a test issue.
 8. **Process note (disclosed, not a coverage change).**
-   `harness/handoffs/T-101.md:179` documents that the rename/old-file removal
+   `harness/handoffs/T-101.md:87` documents that the rename/old-file removal
    was done with a self-deleting `go run` helper placed under
    `internal/store/testdata/` because `mv`/`rm`/`git mv` were denied. The
    helper left no tracked artifact (the diff contains no testdata file and the
