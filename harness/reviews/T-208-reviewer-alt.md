@@ -152,7 +152,7 @@ The diff includes `harness/tasks/graph.json` `"status": "review"` →
 scheduler-owned and guard-exempt (`cmd/harness/guard.go:117-125,146-148`);
 `finalizeMerge` restores main's copy before merging
 (`cmd/harness/gate.go:122-128`). The handoff attributes it to the gate's
-bookkeeping commit, and the commit subject/subject history in the worker
+bookkeeping commit, and the commit's subject/short history in the worker
 transcript is consistent with that account. Even if a worker had authored it,
 the guard exempts the path and the gate replaces the content; it is not
 authoritative branch content. Not a rule-1 violation in effect.
