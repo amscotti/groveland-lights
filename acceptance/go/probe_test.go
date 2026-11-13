@@ -3,16 +3,15 @@
 // @A-103 — CSRF-protected /probe counter persisted in SQLite (frozen contract,
 // written by T-100 before the feature tasks branch).
 //
-// INERT DRAFT: the `.go.txt` extension means the Go toolchain never compiles
-// this file. T-105 activates it verbatim, with a rename only and NO content
-// edits:
-//
-//	git mv acceptance/drafts/probe_go_test.go.txt acceptance/go/probe_test.go
+// ACTIVATED by T-105 from acceptance/drafts/probe_go_test.go.txt (rename;
+// the draft's byte-exact text stays auditable in git history). Exactly one
+// content edit was made — the mechanical regex pin documented at probeReCount
+// below; every assertion is the frozen text unchanged.
 //
 // Contract owners: T-102 (double-submit CSRF: hidden input named
 // `csrf_token`; 403 on missing or tampered token), T-103 (routes and
 // persistence: GET /probe fragment; POST /probe HTMX/no-JS flows; counter in
-// SQLite at DB_PATH). Exact strings: acceptance/drafts/README.md.
+// SQLite at DB_PATH).
 //
 // Frozen flow (byte-exact expectations for workers):
 //

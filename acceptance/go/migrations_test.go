@@ -3,18 +3,13 @@
 // @A-104 — migration runner refuses to boot on a checksum mismatch (frozen
 // contract, written by T-100 before the feature tasks branch).
 //
-// INERT DRAFT: the `.go.txt` extension means the Go toolchain never compiles
-// this file. T-105 activates it verbatim, with a rename only:
-//
-//	git mv acceptance/drafts/migrations_go_test.go.txt acceptance/go/migrations_test.go
-//
-// NO content edits are allowed at activation, with exactly ONE sanctioned
-// exception: if TestA104RefusesTamperedChecksum fails because the FIRST
-// 64-char lowercase-hex token found in the DB file is not the migration
-// checksum recorded in schema_migrations, T-105 may pin a different token
-// index in migTamperFirstHex (the `0` in `locs[0]`). That is the ONLY edit
-// allowed. Any such pin MUST be documented in harness/handoffs/T-105.md with
-// the observed token offsets.
+// ACTIVATED by T-105 from acceptance/drafts/migrations_go_test.go.txt
+// (rename; the draft's byte-exact text stays auditable in git history). The
+// ONE sanctioned edit (pinning a different hex-token index in
+// migTamperFirstHex) was NOT needed: the first 64-char lowercase-hex token in
+// the DB file after a clean boot IS the recorded migration checksum (pinned
+// by internal/store/dbfile_layout_test.go), so the frozen locs[0] index
+// holds. No content edits were made.
 //
 // Contract owners: T-101 (migration runner). Exact contract strings: the
 // first migration file is migrations/0001_init.sql; its sha256 checksum is
@@ -22,8 +17,8 @@
 // startup must refuse to boot (non-zero exit) with output naming both
 // "0001_init.sql" and the word "checksum".
 //
-// This draft FAILS against the current skeleton by design (no migrations:
-// DB_PATH is never even created, so the tamper step cannot run).
+// (The draft failed against the pre-T-101 skeleton by design: no migrations,
+// DB_PATH never even created. T-101 landed them; the assertions now hold.)
 //
 // Driver-free by necessity: go.mod has no sqlite driver at T-100 and none may
 // be added, so tampering is done by byte-editing the DB file, keeping the
