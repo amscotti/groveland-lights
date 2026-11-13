@@ -63,7 +63,7 @@ esac
 
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/gl-smoke.XXXXXXXX") \
     || die "cannot create temp dir"
-trap "rm -rf \"$WORKDIR\"" EXIT
+trap 'rm -rf "$WORKDIR"' EXIT
 BODY="$WORKDIR/body.out"
 HDR="$WORKDIR/headers.txt"
 JAR="$WORKDIR/cookies.txt"
@@ -211,7 +211,7 @@ ok "bogus csrf rejected 403, count unchanged ($n2)"
 
 # 5. Optional @smoke Playwright suite via the repo `make smoke` target.
 if [ "$RUN_SUITE" -eq 1 ]; then
-    ROOT=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
+    ROOT=$(CDPATH='' cd "$(dirname "$0")/.." && pwd)
     if [ ! -d "$ROOT/node_modules" ]; then
         printf "smoke: suite SKIPPED (node_modules absent; run npm ci first)\n"
     else
