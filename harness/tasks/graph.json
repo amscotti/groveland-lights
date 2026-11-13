@@ -512,7 +512,7 @@
       "claims": [],
       "ui": false,
       "allow_deps": [],
-      "status": "ready",
+      "status": "running",
       "attempts": 0,
       "budget": {
         "steps": 200,
