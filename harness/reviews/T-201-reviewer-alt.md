@@ -106,13 +106,15 @@ presence here.
 `spanM := latDelta * metersPerDegree` where `latDelta` itself is
 `nearbySafety*rM/metersPerDegree` from the production constants
 (`internal/store/lights.go:328-346`). The checks only prove `nearbySafety >= 1`
-and that `lonDelta` receives the same constant; a wrong `metersPerDegree` (or any
-formula using that same wrong value) passes. The real bbox coverage is the
-seeded `TestNearbyLights`, which would catch a tight/loose box for the current
-fixture points. If the absolute metre conversion is part of the contract, add a
-row with an independently computed latitude/longitude delta (using the Earth
-radius in `haversineM`, not `metersPerDegree`) and assert a near-boundary point
-is inside/outside.
+and that `lonDelta` receives the same constant; a wrong `metersPerDegree` used
+consistently by both the test and the implementation passes this helper. The
+seeded `TestNearbyLights` partially compensates: a too-large constant is caught
+by the `haversineM` check on the 8.1 m row (`:606-615`), but a too-small constant
+(which makes the bbox a larger true-metre superset) is not caught, and the bbox
+formula itself is never independently pinned. If the absolute metre conversion is
+part of the contract, add a row with a latitude/longitude delta computed from an
+independent Earth radius (the one in `haversineM`) and assert a near-boundary
+point is inside/outside.
 
 ### 5. [Low — non-specific error assertion] Invalid-kind test only checks `err != nil`
 
@@ -130,8 +132,8 @@ test names the boundary parser it claims to cover.
 - The handoff describes the duplicate seeds as "Haversine-derived"
   (`harness/handoffs/T-201.md:47-50`; helpers at `lights_test.go:1207-1229`), but
   `offsetNorth`/`offsetEast` use the production `metersPerDegree`; only
-  `haversineM` is independent. For the current constant the 8.1 m/25.1 m points
-  agree with Haversine, but the test cannot detect a wrong production constant
+  `haversineM` is independent. The points are consistent with Haversine for the
+  current constant, but the seeding is not independent of the implementation
   (see #4).
 - `harness/handoffs/T-201.md` says `TestSchemaMatchesExpected` compares "probe
   and bookkeeping excluded", but the test excludes only `schema_migrations` and
