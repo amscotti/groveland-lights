@@ -81,7 +81,7 @@
         "github.com/remyoudompheng/bigfft",
         "modernc.org/libc"
       ],
-      "status": "rework",
+      "status": "running",
       "attempts": 3,
       "model": "glm",
       "budget": {
