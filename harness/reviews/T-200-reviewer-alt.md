@@ -25,12 +25,12 @@ question.
 `toBeDisabled()` and then the presence of the `disabled` attribute. That is
 enough to reject an `aria-disabled`/CSS-only fake (the intended attempt-4 fix),
 but it still never attempts a save while the gate is active. The test's own
-comment (`:266-268`) claims "while it is disabled NOTHING can be saved", which
+comment (`:263-268`) claims "while it is disabled NOTHING can be saved", which
 is stronger than what is exercised: an implementation that disables the visible
 button but still submits the form on Enter (or accepts a direct POST at
 accuracy 80) passes. The packet's test 2 only requires "`Add light here`
 disabled until chosen" (`harness/tasks/T-200.md:237-238`), and the draft does
-perform a real save **after** choosing save-anyway (`:275-282`), so this is a
+perform a real save **after** choosing save-anyway (`:274-281`), so this is a
 coverage gap rather than an unsatisfiable or weakened contract. A stronger
 draft would submit while gated (e.g. press Enter with the form filled) and
 assert no `Saved`/no row, then choose save-anyway and save.
@@ -115,7 +115,7 @@ T-207 still cannot edit the oracle.
 
 `acceptance/drafts/admin-walk.spec.ts.txt:344-351` polls `#pin-pos` until it
 differs from the post-drag value, then uses the captured `final` as the expected
-detail position (`:351`, `:612`). If the three `ArrowRight` presses update the
+detail position (`:351`, `:363`). If the three `ArrowRight` presses update the
 effective position through a debounce/animation frame, the poll can succeed on
 the first nudge while the submitted form uses the later third nudge; the detail
 will then legitimately differ from `final` and the test flakes. `keyboard.press`
