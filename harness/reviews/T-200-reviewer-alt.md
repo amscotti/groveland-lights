@@ -37,7 +37,9 @@ the handoff explicitly claims this closes the attempt-3 finding
 The same loop also never asserts `Max-Age`/`Expires`, so a session cookie with
 no 24 h lifetime passes the acceptance oracle even though T-203 requires it.
 This is a coverage-theatre/weaker-assertion issue, not an unsatisfiable test:
-the functional exchange and guard are still enforced. Fix by parsing the
+the functional exchange and guard are still enforced, and the cookie's path
+does not affect the tested `/admin` flows. It is worth a one-line
+strengthening while the author still owns the oracle; fix by parsing the
 `Set-Cookie` value (e.g. `http.ParseSetCookie` on Go 1.23+) and asserting
 `Path == "/"` and `MaxAge == 86400`, or at minimum matching the attribute
 terminator (`; path=/;` / end-of-string) and checking `max-age=86400`.
@@ -51,6 +53,17 @@ no-token branch checks the four markup regexes
 (`admin_auth_go_test.go.txt:92-96`). An implementation that answers an empty
 200 for a blank `token` passes this draft while violating the frozen form-page
 contract. Re-run the markup regexes on the blank-token body.
+
+### 2b. [Low] `#walk-pos` is frozen at 6 dp but asserted only as `\d+\.\d+`
+
+The README freezes `#walk-pos` as "rendered at 6 decimal places"
+(`acceptance/drafts/README.md:66`), but every `#walk-pos` assertion in the e2e
+draft uses the loose packet regex `\d+\.\d+, -?\d+\.\d+`
+(`admin-walk.spec.ts.txt:188-194, 223-224, 466-467, 607`; the `openWalkForm`
+wait is the first of these). A walk page that renders `42.76, -71.03` (2 dp)
+passes the wait and test 1; the `#pin-pos` and `#light-pos` checks separately
+use six decimals. Use `\d+\.\d{6}, -?\d+\.\d{6}` (or assert the exact rendered
+text) so the README's 6 dp clause is actually frozen.
 
 ### 3. [Low] `@A-206` preview can be a static landscape placeholder
 
