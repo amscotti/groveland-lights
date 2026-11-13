@@ -34,10 +34,12 @@ T-203/T-205, which the server will be built to) is:
    without HX-Request** (T-205). The drafts discover a new light's detail
    URL by reading the `/admin` list rows, never from the Location header.
 2. **Duplicate panel buttons**: the NUMBERED case (same asset_no) shows
-   `Merge` + a cancel link — `Save anyway` appears only in the UNNUMBERED
-   case, and `dup_choice=save` on a numbered duplicate answers 422 (T-205;
-   the Go draft asserts the 422). The packet's test-6 wording ("with Merge
-   and Save anyway") is satisfied by the unnumbered half of the e2e test.
+   `Merge` + a cancel link named **`Cancel`** — `Save anyway` appears only
+   in the UNNUMBERED case, and `dup_choice=save` on a numbered duplicate
+   answers 422 (T-205; the Go draft asserts the 422 and the e2e draft
+   asserts `Save anyway` is absent from the numbered panel). The packet's
+   test-6 wording ("with Merge and Save anyway") is satisfied by the
+   unnumbered half of the e2e test.
 3. **kind enum**: the create form offers `park|building` only (schema
    allows `street` too — reserved for the later street-light import; no M2
    test posts it).
@@ -49,24 +51,25 @@ T-203/T-205, which the server will be built to) is:
 | `/admin/login` | heading `Admin login`; label `Token`; button `Sign in` |
 | `/admin/walk` `#walk-pos` | text matching `\d+\.\d+, -?\d+\.\d+` (rendered at 6 decimal places) |
 | `#walk-accuracy` | text matching `/accuracy \d+ m/` |
-| `#pin` (draggable pin) | `aria-label="position pin"`, keyboard-movable |
+| `#pin` (draggable pin) | `aria-label="position pin"`, keyboard-movable (focusable; arrow keys nudge the effective position — asserted by the visible e2e suite) |
 | `#pin-pos` | current pin coords, same format — rendered at exactly 6 decimal places, so its text equals `#light-pos` for the same position |
 | buttons | `Add light here` (exact), `Save anyway (low accuracy)`, `Confirm pin`, `Merge`, `Save anyway` (duplicate panel: `Merge` always; `Save anyway` unnumbered-only, see reconciliation 2) |
 | form labels | `Asset number`, `Label`, `Kind` (select: `Park`, `Building`), `Photo` |
 | success | role=status containing `Saved` (HTMX fragment for create; edit/delete answer 303 redirects) |
 | bbox rejection | role=alert containing `outside Groveland town bounds` |
-| duplicate panel | `#dup-panel` with heading `Possible duplicate`; nothing is saved until a button is chosen |
-| list `/admin` | heading `Lights`; row per light with thumbnail `img[alt=<label>]`; link or button `Older` |
+| duplicate panel | `#dup-panel` with heading `Possible duplicate`; numbered case adds a link named `Cancel`; nothing is saved until a button is chosen |
+| list `/admin` | heading `Lights`; row per light with thumbnail `img[alt=<label>]`; link or button `Older`; a row may repeat its detail href (e.g. thumbnail + label link) — href consumers dedupe |
 
 Additional selectors frozen by the drafts (needed by specific tests):
 
 | Element | Contract |
 |---|---|
 | `#manual-lat`, `#manual-lon` | number inputs, visible when geolocation is denied |
-| `#photo-preview` | in-form preview `img`; renders EXIF orientation applied |
+| `#photo-preview` | in-form preview `img`; renders EXIF orientation applied — its INTRINSIC dimensions (`naturalWidth`/`naturalHeight`) must be wider than tall for the portrait fixtures; the CSS box is not the proof (a stretched portrait games it) |
 | `#light-pos` | admin detail coordinates as `lat, lon` at 6 decimal places |
 | login markup | `<h1>Admin login</h1>`, `<label ..>Token</label>` + `<input name="token">`, `<button>Sign in</button>` |
 | list row link | the label text links to `/admin/lights/{id}` (accessible name contains the label) |
+| numbered dup panel | `Merge` (button) + `Cancel` (link); NO `Save anyway` button |
 | thumbnail alt format | `alt="<asset_no> <label>"` for numbered lights, `alt="<label>"` for unnumbered (this reconciles the table's `img[alt=<label>]` with the packet test 7's `img[alt^="GP-017"]`; asset numbers may not appear anywhere else twice) |
 | walk form | `/admin/walk` server-renders the add-light form with a hidden `csrf_token` input (value attribute, order free); the form submits fine with a label alone (Kind defaults) |
 
@@ -83,7 +86,7 @@ Additional selectors frozen by the drafts (needed by specific tests):
 | `POST /admin/lights/{id}/delete` | soft delete (multipart `csrf_token`) → 303 `/admin` |
 | `GET /admin` | list: heading `Lights`, the 50 most recent lights, one `img alt` per row (alt format above; placeholder thumbnails for photo-less lights are fine) |
 | `GET /admin/rows?page=N` | HTMX rows fragment (root element id `rows`); without `HX-Request` → 303 → `/admin?page=N` |
-| `GET /photos/...` | served photo: `Content-Type: image/jpeg`, long edge ≤ 1600, NO APP1 segment (so no EXIF, no GPS), EXIF orientation applied (a 600×800 Orientation=6 upload serves wider-than-tall) |
+| `GET /photos/...` | served photo: `Content-Type: image/jpeg`, long edge ≤ 1600, NO APP1 segment at all — so no EXIF, no GPS (the Go draft byte-scans for APP1; the e2e draft asserts `hasAPP1 === false` as well as `hasExifGps === false`), EXIF orientation applied (a 600×800 Orientation=6 upload serves wider-than-tall) |
 
 Duplicate radii (T-204): same non-empty asset_no anywhere → numbered
 duplicate; unnumbered within 8 m → unnumbered duplicate.
@@ -106,17 +109,23 @@ test, every project AND across the e2e → a11y invocations of `make check`;
   pattern `test-run.db*` covers so it lives and dies with its DB). The
   A-201 contract itself (exchange, replay 403, cookie flags) is asserted by
   the Go drafts against fresh per-test servers;
-- give every created light an asset number unique per run and per project,
-  keeping the packet prefixes (`GP-017-<run>-<proj>` — still `^[A-Za-z0-9-]{1,32}$`,
-  still matched by `img[alt^="GP-017"]`);
+- give every created light an asset number unique per run, per project AND
+  per test (`GP-017-<run>-<proj>-<tag>` — still `^[A-Za-z0-9-]{1,32}$`,
+  still matched by `img[alt^="GP-017"]`), so a failing test cannot poison a
+  later test's asset number;
 - use per-run jittered coordinates (inside TOWN_BBOX) for every UNNUMBERED
-  create and pagination seed, so the 8 m duplicate radius can never fire
-  across tests/projects/runs;
+  create, so the 8 m duplicate radius can never fire across tests/projects/
+  runs; the pagination seeds additionally ride a FIXED per-project longitude
+  lane outside the jitter band (≈41 m apart, ≈41 m clear of the band), which
+  makes grid/point and grid/grid collisions deterministic impossibilities
+  rather than birthday-probability ones;
 - pre- and post-clean by soft-deleting same-labelled rows (soft delete frees
   the asset number for the partial unique index and the coordinates for the
   duplicate checks), so a passing suite leaves the list empty;
 - pin `maxRedirects: 0` on every `page.request.post` so the frozen 303s are
-  observable (the API request context follows redirects by default).
+  observable (the API request context follows redirects by default);
+- dedupe detail hrefs when discovering rows by label (a compliant row may
+  repeat its `/admin/lights/{id}` href), so each cleanup delete fires once.
 
 Operational note: if `test-run.db` outlives the 24 h session TTL with the
 token already consumed, the login helper fails with instructions — the fix
@@ -160,22 +169,27 @@ iphone-se-320 viewport (320×640) unless stated.
   canvas; **"Add light here" sits in the bottom third, full-width, thumb-
   reachable**. With accuracy 80 m the button is visibly disabled and "Save
   anyway (low accuracy)" appears beside/below it; choosing it re-enables the
-  button. Geolocation denied: `#manual-lat` / `#manual-lon` number inputs
-  appear (manual pin-drop fallback), still no horizontal scroll.
+  button AND unlocks a real save at 80 m (the e2e completes the whole save
+  after the choice — a painted-but-unwired gate fails). Geolocation denied:
+  `#manual-lat` / `#manual-lon` number inputs appear (manual pin-drop
+  fallback), still no horizontal scroll.
 - **A-203 pin**: a pin marker with `aria-label="position pin"` centred on the
   map; `#pin-pos` under the map shows the live coordinates at 6 dp; dragging
-  (or arrow keys, focus on the pin) moves it and updates `#pin-pos`; after
+  OR arrow keys on the focused pin move it and update `#pin-pos` (the e2e
+  exercises both and saves the keyboard-moved position); after
   "Confirm pin" the admin detail's `#light-pos` shows exactly those
   coordinates, same 6 dp string.
 - **A-204 rejection**: a red alert box reading "…outside Groveland town
   bounds…" (role=alert) near the position readout; the form does NOT advance.
 - **A-205 duplicate panel**: `#dup-panel` — an amber/bordered panel headed
   "Possible duplicate" showing the existing light (label, asset number,
-  distance); numbered case: "Merge" (primary) + a cancel link; unnumbered
-  case: "Merge" + "Save anyway". **Nothing is saved until one is chosen.**
+  distance); numbered case: "Merge" (primary) + a "Cancel" link and NO
+  "Save anyway"; unnumbered case: "Merge" + "Save anyway". **Nothing is
+  saved until one is chosen.**
 - **A-206 photo**: after picking the portrait fixture, `#photo-preview`
-  renders **wider than tall** (orientation already applied); the served photo
-  on the list is a clean re-encoded JPEG (no EXIF/GPS block, long edge
+  renders **wider than tall** (orientation already applied — the intrinsic
+  dimensions must be landscape, not just the CSS box); the served photo
+  on the list is a clean re-encoded JPEG (no APP1/EXIF/GPS block, long edge
   ≤ 1600).
 - **A-208 detail/edit**: the admin detail shows the photo, `#light-pos` and a
   labelled form ("Label" filled) with "Save changes"; "Delete light" is a

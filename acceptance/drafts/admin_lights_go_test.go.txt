@@ -41,7 +41,8 @@
 //	                              recent lights (ORDER BY created_at DESC,
 //	                              id DESC), one <img alt="<label>"> per row
 //	                              (placeholder thumbnails allowed)
-//	GET  /admin/rows?page=N       HTMX rows fragment; without HX-Request it
+//	GET  /admin/rows?page=N       HTMX rows fragment (root element
+//	                              id="rows"); without HX-Request it
 //	                              must 303 to /admin?page=N
 //	GET  /photos/...              served, re-encoded photos: image/jpeg,
 //	                              long edge <= 1600, no APP1 segment
@@ -79,6 +80,9 @@ var (
 	alReCSRF    = regexp.MustCompile(`<input[^>]*name="csrf_token"[^>]*>`)
 	alReValue   = regexp.MustCompile(`value="([^"]*)"`)
 	alRePhotoSw = regexp.MustCompile(`src="(/photos/[^"]+)"`)
+	// alReRowsRoot matches a rows fragment whose ROOT element carries
+	// id="rows" (the frozen selector the admin list swaps in).
+	alReRowsRoot = regexp.MustCompile(`\A\s*<[a-zA-Z][^>]*\bid="rows"`)
 )
 
 // alAltRe matches the per-row thumbnail alt attribute for one label.
@@ -97,19 +101,24 @@ func alAltAssetRe(assetNo string) *regexp.Regexp {
 var alReDetail = regexp.MustCompile(`(?s)<a\b[^>]*href="(/admin/lights/\d+)"[^>]*>(.*?)</a>`)
 
 // alDetailURL finds the detail href of the one light whose row link mentions
-// label, via the /admin list. Each test creates uniquely-labelled lights on a
-// fresh server, so exactly one match is expected.
+// label, via the /admin list. Duplicate hrefs collapse first: a compliant row
+// may link the same /admin/lights/{id} twice (a thumbnail link plus the label
+// link), and that must not read as two lights. Each test creates
+// uniquely-labelled lights on a fresh server, so exactly one distinct match
+// is expected.
 func alDetailURL(t *testing.T, c *http.Client, base, label string) string {
 	t.Helper()
 	list := alGet(t, c, base+"/admin")
+	seen := map[string]bool{}
 	var found []string
 	for _, m := range alReDetail.FindAllStringSubmatch(list, -1) {
-		if strings.Contains(m[2], label) {
+		if strings.Contains(m[2], label) && !seen[m[1]] {
+			seen[m[1]] = true
 			found = append(found, m[1])
 		}
 	}
 	if len(found) != 1 {
-		t.Fatalf("list rows linking %q: found %v, want exactly one;\n%s", label, found, list)
+		t.Fatalf("list rows linking %q: found %v, want exactly one distinct detail href;\n%s", label, found, list)
 	}
 	return found[0]
 }
@@ -492,6 +501,9 @@ func TestA209Pagination(t *testing.T) {
 	status, _, frag := alDo(t, c, http.MethodGet, s.baseURL+"/admin/rows?page=2", nil, true)
 	if status != http.StatusOK {
 		t.Fatalf("GET /admin/rows?page=2 (HX-Request): status %d, want 200", status)
+	}
+	if !alReRowsRoot.MatchString(frag) {
+		t.Errorf("fragment page 2: root element does not carry id=\"rows\"; fragment:\n%.200s", frag)
 	}
 	for i := 1; i <= 5; i++ {
 		if want := fmt.Sprintf("Pagination lamp %02d", i); !strings.Contains(frag, want) {

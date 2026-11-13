@@ -24,9 +24,11 @@
 //	                                             Set-Cookie for gl_session
 //	                                             carrying HttpOnly and
 //	                                             SameSite=Lax
-//	GET  /admin/login?token=<ADMIN_TOKEN>    -> 403 (the token is one-time;
-//	    (replay)                                replaying it must not mint a
-//	                                             second session)
+//	GET  /admin/login?token=<ADMIN_TOKEN>    -> 403 (the token is one-time
+//	    (replay, from a SECOND                  and GLOBAL: consumption is
+//	     cookie-less client)                    server-side, so replay from
+//	                                             any client must fail; a
+//	                                             fresh jar must not help)
 //	GET  /admin (gl_session cookie)          -> 200
 //	GET  /admin + HX-Request: true, no cookie -> 401 with header
 //	                                             HX-Redirect: /admin/login
@@ -67,7 +69,9 @@ func TestA201AdminLogin(t *testing.T) {
 	s := aaSpawnDir(t, "", "")
 	t.Cleanup(func() { aaKill(t, s) })
 	browser := aaClient(t) // "browser": cookie jar, never follows redirects
-	bare := aaClient(t)    // a second, cookie-less client for the HTMX probe
+	bare := aaClient(t)    // second, cookie-LESS client: proves the token
+	//                      // consumption is server-side state (the replay
+	//                      // probe below and the HTMX guard probe reuse it)
 
 	// Unauthenticated /admin is a full-page redirect to the login page.
 	status, header, body := aaDo(t, browser, http.MethodGet, s.baseURL+"/admin", nil, false)
@@ -119,10 +123,14 @@ func TestA201AdminLogin(t *testing.T) {
 		t.Errorf("gl_session cookie lacks SameSite=Lax: %q", sessionCookie)
 	}
 
-	// Replaying the same token is refused — it was consumed.
-	status, _, _ = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin/login?token="+aaAdminToken, nil, false)
+	// Replaying the same token is refused — it was consumed. The replay
+	// deliberately comes from `bare`, a SECOND client with a fresh cookie
+	// jar and no session: the one-time property must be server-side
+	// (login_tokens.used_at), not a burned cookie in the first client's
+	// jar, or any new browser could mint unlimited sessions.
+	status, _, _ = aaDo(t, bare, http.MethodGet, s.baseURL+"/admin/login?token="+aaAdminToken, nil, false)
 	if status != http.StatusForbidden {
-		t.Fatalf("GET /admin/login?token=<valid> (replay): status %d, want 403", status)
+		t.Fatalf("GET /admin/login?token=<valid> (replay from a second client): status %d, want 403", status)
 	}
 
 	// The minted session cookie unlocks /admin.

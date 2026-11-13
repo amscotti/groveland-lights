@@ -170,10 +170,21 @@ function readCache(): SessionCache | null {
 function writeCache(session: SessionCache): void {
   try {
     writeFileSync(CACHE_PATH, JSON.stringify(session), { mode: 0o600 });
-  } catch {
-    // The cache is an optimisation for sequential invocations sharing one
-    // DB (make check: e2e then a11y); an unwritable worktree simply forces
-    // the (one-time) exchange per invocation.
+  } catch (err) {
+    // NOT a harmless degradation: ADMIN_TOKEN is one-time GLOBAL, so the
+    // next Playwright invocation sharing this DB (make check: e2e then
+    // a11y) cannot re-exchange and will fail its login. The invocation at
+    // hand still succeeds via the in-process memo; make check therefore
+    // REQUIRES a writable cache path (the repo root, next to test-run.db).
+    // Surface the reason on stderr instead of failing the passing run.
+    process.stderr.write(
+      `loginAsAdmin: cannot write ${CACHE_PATH} ` +
+        `(${err instanceof Error ? err.message : String(err)}). The current run ` +
+        'succeeds via its in-process session, but the next invocation against ' +
+        'this DB (make check: a11y after e2e) will find no cached session and ' +
+        'the one-time token is already consumed. Fix the write or remove ' +
+        'test-run.db* for a clean cycle.\n',
+    );
   }
 }
 

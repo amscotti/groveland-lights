@@ -2,9 +2,9 @@
  * JPEG byte-inspection helpers for the M2 photo contract (A-206/A-207).
  *
  * ACTIVE helper (no tests of its own): the frozen drafts import these to
- * prove, black-box, that a served photo was re-encoded — no EXIF GPS block
- * survives and the long edge is within the 1600 px cap. Byte-level parsing
- * only; no image decoding needed.
+ * prove, black-box, that a served photo was re-encoded — no APP1 segment
+ * survives (so no EXIF and no GPS) and the long edge is within the 1600 px
+ * cap. Byte-level parsing only; no image decoding needed.
  */
 
 /** Dimensions parsed from a JPEG SOF marker. */
@@ -20,13 +20,30 @@ export interface JpegSize {
  * served photo.
  */
 export function hasExifGps(bytes: Uint8Array): boolean {
+  const seg = app1Segment(bytes);
+  return seg !== null && startsWith(seg, exifHeader) && tiffHasGpsIfd(seg.subarray(6));
+}
+
+/**
+ * hasAPP1 reports whether the JPEG bytes carry ANY APP1 segment (EXIF or
+ * otherwise). The frozen photo contract strips the whole segment — no EXIF,
+ * no GPS, no maker notes — so this must be false for any served photo. It is
+ * strictly stronger than hasExifGps: orientation or vendor metadata without
+ * a GPS block would slip past that one alone.
+ */
+export function hasAPP1(bytes: Uint8Array): boolean {
+  return app1Segment(bytes) !== null;
+}
+
+/** The first APP1 segment payload, or null when there is none. */
+function app1Segment(bytes: Uint8Array): Uint8Array | null {
   if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
-    return false; // not a JPEG
+    return null; // not a JPEG
   }
   let i = 2;
   while (i + 4 <= bytes.length) {
     if (bytes[i] !== 0xff) {
-      return false; // desynchronised; no metadata worth trusting
+      return null; // desynchronised; no metadata worth trusting
     }
     const marker = bytes[i + 1];
     if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
@@ -34,21 +51,18 @@ export function hasExifGps(bytes: Uint8Array): boolean {
       continue;
     }
     if (marker === 0xd9 || marker === 0xda) {
-      return false; // EOI / start of scan: metadata only precedes these
+      return null; // EOI / start of scan: metadata only precedes these
     }
     const len = (bytes[i + 2] << 8) | bytes[i + 3];
     if (len < 2 || i + 2 + len > bytes.length) {
-      return false; // malformed segment length
+      return null; // malformed segment length
     }
     if (marker === 0xe1) {
-      const seg = bytes.subarray(i + 4, i + 2 + len);
-      if (startsWith(seg, exifHeader) && tiffHasGpsIfd(seg.subarray(6))) {
-        return true;
-      }
+      return bytes.subarray(i + 4, i + 2 + len);
     }
     i += 2 + len;
   }
-  return false;
+  return null;
 }
 
 /**

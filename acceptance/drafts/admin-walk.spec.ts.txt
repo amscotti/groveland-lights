@@ -15,17 +15,19 @@
 // (loginAsAdmin — exchanges the ONE-TIME admin token at most once per
 // test-run.db lifetime and reuses the 24 h session cookie; see the util's
 // header for why a per-test token visit can never work) and
-// ./util/images.js (hasExifGps, jpegSize).
+// ./util/images.js (hasAPP1, hasExifGps, jpegSize).
 //
 // RERUN SAFETY (frozen; T-207 must not need to touch this): one webServer
 // with a persistent ./test-run.db serves ALL tests on ALL four projects, and
 // `make check` runs a second Playwright invocation (a11y) against the same
 // DB. The drafts therefore never rely on a fixed database state:
 //
-//   - every created light carries an asset number unique per run AND per
-//     project (`GP-017-<run>-<proj>`; the packet's GP-017/GP-018 prefixes
-//     are kept so `img[alt^="GP-017"]` still matches, and the value still
-//     satisfies the frozen `^[A-Za-z0-9-]{1,32}$` asset_no rule);
+//   - every created light carries an asset number unique per run, per
+//     project AND per test (`GP-017-<run>-<proj>-<tag>`; the packet's
+//     GP-017/GP-018 prefixes are kept so `img[alt^="GP-017"]` still
+//     matches, and the value still satisfies the frozen
+//     `^[A-Za-z0-9-]{1,32}$` asset_no rule) — a failing test can never
+//     poison a later test's asset number;
 //   - every UNNUMBERED create (the 8 m duplicate radius makes coordinates a
 //     de-facto key) uses coordinates jittered deterministically per run and
 //     per test, always inside TOWN_BBOX;
@@ -35,7 +37,11 @@
 //     end, so a passing suite leaves an empty list behind;
 //   - POSTs via page.request pin `maxRedirects: 0` so the frozen 303s stay
 //     observable (Playwright's API request context follows redirects by
-//     default).
+//     default);
+//   - detail-link discovery collapses duplicate hrefs per row (a compliant
+//     row may link the same /admin/lights/{id} twice — e.g. a thumbnail
+//     link plus the label link), so cleanup deletes each light exactly
+//     once.
 //
 // Visual notes (what a correct screenshot shows) are inline per test and in
 // full in the README; the mobile projects (pixel-9, iphone-16, iphone-se-320
@@ -46,7 +52,7 @@
 import { test, expect, type Page, type TestInfo } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { loginAsAdmin } from './util/admin.js';
-import { hasExifGps, jpegSize } from './util/images.js';
+import { hasAPP1, hasExifGps, jpegSize } from './util/images.js';
 
 test.use({
   geolocation: { latitude: 42.7617, longitude: -71.0303, accuracy: 12 },
@@ -69,14 +75,30 @@ function projectCode(testInfo: TestInfo): string {
     case 'iphone-16':
       return 'i16';
     default:
-      return testInfo.project.name.replace(/[^a-z0-9]/gi, '').slice(0, 4).toLowerCase() || 'x';
+      return testInfo.project.name.replace(/[^a-z0-9]/g, '').slice(0, 4).toLowerCase() || 'x';
   }
 }
 
-/** `GP-017-<run>-<proj>`: packet prefix preserved, value globally unique,
- * within the frozen 32-char [A-Za-z0-9-] asset_no budget. */
-function uniqAsset(prefix: string, testInfo: TestInfo): string {
-  return `${prefix}-${RUN}-${projectCode(testInfo)}`;
+/** Dense per-project index (0..3): separates the pagination seed lanes. */
+function projectIndex(testInfo: TestInfo): number {
+  switch (testInfo.project.name) {
+    case 'desktop-chromium':
+      return 0;
+    case 'pixel-9':
+      return 1;
+    case 'iphone-16':
+      return 2;
+    default:
+      return 3;
+  }
+}
+
+/** `GP-017-<run>-<proj>-<tag>`: packet prefix preserved, value globally
+ * unique PER TEST (the tag distinguishes @A-202/@A-205/@A-206/@A-208 even
+ * when they share the GP-017 prefix), within the frozen 32-char
+ * [A-Za-z0-9-] asset_no budget. */
+function uniqAsset(prefix: string, testInfo: TestInfo, tag: string): string {
+  return `${prefix}-${RUN}-${projectCode(testInfo)}-${tag}`;
 }
 
 /** Deterministic per-(run, key) coordinates inside TOWN_BBOX with a wide
@@ -108,9 +130,11 @@ async function csrfToken(page: Page): Promise<string> {
 }
 
 /** Detail hrefs of every listed light whose row link mentions `label`
- * (frozen: the row link's accessible name contains the label). */
+ * (frozen: the row link's accessible name contains the label), deduped —
+ * a compliant row may carry the same href twice (thumbnail link + label
+ * link), and cleanup must POST each delete exactly once. */
 async function lightHrefsByLabel(page: Page, label: string): Promise<string[]> {
-  const hrefs: string[] = [];
+  const hrefs = new Set<string>();
   for (const target of ['/admin', '/admin?page=2']) {
     const res = await page.request.get(target);
     expect(res.status(), `GET ${target}`).toBe(200);
@@ -118,11 +142,11 @@ async function lightHrefsByLabel(page: Page, label: string): Promise<string[]> {
       /<a\b[^>]*href="(\/admin\/lights\/\d+)"[^>]*>([\s\S]*?)<\/a>/g,
     )) {
       if (m[2].includes(label)) {
-        hrefs.push(m[1]);
+        hrefs.add(m[1]);
       }
     }
   }
-  return hrefs;
+  return [...hrefs];
 }
 
 /** Soft-delete one light by detail href (frozen: 303). */
@@ -191,7 +215,7 @@ test('@A-202 @A-203 add a light from current position', async (
   await context.setGeolocation({ latitude: 42.76175, longitude: -71.03035, accuracy: 8 });
   await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy 8 m/);
 
-  await page.getByLabel('Asset number').fill(uniqAsset('GP-017', testInfo));
+  await page.getByLabel('Asset number').fill(uniqAsset('GP-017', testInfo, 'save'));
   await page.getByLabel('Label').fill(label);
   await page.getByLabel('Photo').setInputFiles('testdata/photos/portrait-orient6-gps.jpg');
   await page.getByRole('button', { name: 'Confirm pin' }).click();
@@ -201,22 +225,41 @@ test('@A-202 @A-203 add a light from current position', async (
   await deleteAllByLabel(page, label);
 });
 
-test('@A-202 low accuracy gates saving behind an explicit save-anyway choice', async ({
-  page,
-  context,
-}) => {
-  await context.setGeolocation({ latitude: 42.7617, longitude: -71.0303, accuracy: 80 });
+test('@A-202 low accuracy gates saving behind an explicit save-anyway choice', async (
+  { page, context },
+  testInfo,
+) => {
+  const label = 'Low accuracy lamp';
+  // This test SAVES an unnumbered light at 80 m accuracy, so its base
+  // coordinates must be clear of every other test's/run's unnumbered
+  // lights (jitter, not the shared default position).
+  const base = jittered(`lowacc-${projectCode(testInfo)}`);
+  await context.setGeolocation({ latitude: base.lat, longitude: base.lon, accuracy: 80 });
   await loginAsAdmin(page);
+  await deleteAllByLabel(page, label); // rerun safety
+
   await page.goto('/admin/walk');
 
   await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy 80 m/);
   const add = page.getByRole('button', { name: 'Add light here', exact: true });
   await expect(add).toBeVisible();
   // Over the 30 m threshold the primary action is disabled until the admin
-  // explicitly accepts the low-accuracy risk.
+  // explicitly accepts the low-accuracy risk. `Add light here` is the only
+  // in-UI submit path, so while it is disabled NOTHING can be saved.
   await expect(add).toBeDisabled();
+
+  // Choosing save-anyway re-enables the button AND unlocks a REAL save at
+  // 80 m — proving the gate is wired to the form, not a painted attribute.
   await page.getByRole('button', { name: 'Save anyway (low accuracy)' }).click();
   await expect(add).toBeEnabled();
+  await add.click();
+  await page.getByLabel('Label').fill(label);
+  await page.getByRole('button', { name: 'Confirm pin' }).click();
+  await expect(page.getByRole('status')).toContainText('Saved');
+  await page.goto('/admin');
+  await expect(page.locator(`img[alt="${label}"]`)).toBeVisible();
+
+  await deleteAllByLabel(page, label);
 });
 
 test.describe('walk mode without geolocation permission', () => {
@@ -245,10 +288,12 @@ test('@A-203 dragged pin position is what gets saved', async ({ page, context },
   await page.goto('/admin/walk');
 
   const pin = page.locator('#pin');
+  const pinPos = page.locator('#pin-pos');
   await expect(pin).toBeVisible();
   await expect(pin).toHaveAttribute('aria-label', 'position pin');
-  await expect(page.locator('#pin-pos')).toHaveText(/^\d+\.\d{6}, -?\d+\.\d{6}$/);
-  const before = (await page.locator('#pin-pos').innerText()).trim();
+  await expect(pinPos).toHaveText(/^\d+\.\d{6}, -?\d+\.\d{6}$/);
+  const readPos = async () => (await pinPos.innerText()).trim();
+  const before = await readPos();
 
   // Drag the pin ~80 px; #pin-pos follows (possibly on the next frame, so
   // the read waits for the change instead of racing it).
@@ -259,14 +304,30 @@ test('@A-203 dragged pin position is what gets saved', async ({ page, context },
     steps: 8,
   });
   await page.mouse.up();
-  let after = '';
+  let afterDrag = '';
   await expect
     .poll(async () => {
-      after = (await page.locator('#pin-pos').innerText()).trim();
-      return after;
+      afterDrag = await readPos();
+      return afterDrag;
     }, { message: '#pin-pos updates after the drag' })
     .not.toBe(before);
-  await expect(page.locator('#pin-pos')).toHaveText(/^\d+\.\d{6}, -?\d+\.\d{6}$/);
+
+  // The frozen contract also makes #pin KEYBOARD-movable (arrow keys nudge
+  // the effective position, the accessible alternative to dragging): nudge
+  // east a few times and save THAT position, so the detail check below
+  // covers the final keyboard-moved coordinates.
+  await pin.focus();
+  for (let i = 0; i < 3; i++) {
+    await page.keyboard.press('ArrowRight');
+  }
+  let final = '';
+  await expect
+    .poll(async () => {
+      final = await readPos();
+      return final;
+    }, { message: '#pin-pos updates after the arrow-key nudges' })
+    .not.toBe(afterDrag);
+  await expect(pinPos).toHaveText(/^\d+\.\d{6}, -?\d+\.\d{6}$/);
 
   await page.getByRole('button', { name: 'Add light here', exact: true }).click();
   await page.getByLabel('Label').fill(label);
@@ -278,7 +339,7 @@ test('@A-203 dragged pin position is what gets saved', async ({ page, context },
   await page.goto('/admin');
   await page.getByRole('link', { name: new RegExp(label) }).first().click();
   await expect(page).toHaveURL(/\/admin\/lights\/\d+$/);
-  await expect(page.locator('#light-pos')).toHaveText(after);
+  await expect(page.locator('#light-pos')).toHaveText(final);
 
   await deleteAllByLabel(page, label);
 });
@@ -297,7 +358,7 @@ test('@A-205 duplicate panels: numbered Merge, unnumbered Save anyway', async (
   { page, context },
   testInfo,
 ) => {
-  const asset = uniqAsset('GP-017', testInfo);
+  const asset = uniqAsset('GP-017', testInfo, 'dup');
   const labels = ['Dup panel lamp', 'Dup panel lamp twin', 'Path light one', 'Path light two'];
   await loginAsAdmin(page);
   for (const label of labels) {
@@ -305,10 +366,11 @@ test('@A-205 duplicate panels: numbered Merge, unnumbered Save anyway', async (
   }
 
   // Numbered duplicate: the same asset_no posted again raises the panel.
-  // Frozen (T-205): the numbered panel offers `Merge` (+ a cancel link);
-  // `Save anyway` exists only for the unnumbered case (numbered+save is a
-  // 422, asserted by the Go draft).
+  // Frozen (T-205): the numbered panel offers `Merge` + a cancel link
+  // named `Cancel`; `Save anyway` exists only for the unnumbered case
+  // (numbered+save is a 422, asserted by the Go draft).
   await addLightFromForm(page, { assetNo: asset, label: 'Dup panel lamp' });
+  await page.getByRole('button', { name: 'Confirm pin' }).click();
   await expect(page.getByRole('status')).toContainText('Saved');
 
   await page.goto('/admin/walk');
@@ -321,6 +383,11 @@ test('@A-205 duplicate panels: numbered Merge, unnumbered Save anyway', async (
   await expect(panel).toBeVisible();
   await expect(panel.getByRole('heading', { name: 'Possible duplicate' })).toBeVisible();
   await expect(panel.getByRole('button', { name: 'Merge' })).toBeVisible();
+  // Negative half of the frozen button contract: the numbered panel has no
+  // `Save anyway` (that choice would be a 422 server-side) and does offer
+  // the cancel escape.
+  await expect(panel.getByRole('button', { name: 'Save anyway', exact: true })).toHaveCount(0);
+  await expect(panel.getByRole('link', { name: 'Cancel' })).toBeVisible();
 
   // Nothing is saved while the panel is up (frozen clause).
   await page.goto('/admin');
@@ -385,7 +452,7 @@ test('@A-206 served photo is re-encoded, oriented and metadata-free', async (
   { page },
   testInfo,
 ) => {
-  const asset = uniqAsset('GP-017', testInfo); // `img[alt^="GP-017"]` still matches
+  const asset = uniqAsset('GP-017', testInfo, 'photo'); // `img[alt^="GP-017"]` still matches
   const label = 'Photo purity lamp';
   await loginAsAdmin(page);
   await deleteAllByLabel(page, label);
@@ -408,26 +475,35 @@ test('@A-206 served photo is re-encoded, oriented and metadata-free', async (
   const res = await page.request.get(src!);
   expect(res.status()).toBe(200);
   const bytes = new Uint8Array(await res.body());
+  // Purity is stronger than "no GPS": the served JPEG must carry NO APP1
+  // segment at all (the Go draft asserts the same byte-level contract).
+  expect(hasAPP1(bytes)).toBe(false);
   expect(hasExifGps(bytes)).toBe(false);
   const { w, h } = jpegSize(bytes);
   expect(Math.max(w, h)).toBeLessThanOrEqual(1600);
   expect(w).toBeGreaterThan(h); // 600x800 + Orientation=6 => wider than tall
 
-  // The in-form preview renders the orientation already applied.
+  // The in-form preview renders the orientation already applied — assert
+  // the INTRINSIC dimensions (naturalWidth/naturalHeight honour EXIF
+  // orientation), not the CSS box, which a plain portrait stretched by a
+  // wide container could game.
   await page.goto('/admin/walk');
   await page.getByRole('button', { name: 'Add light here', exact: true }).click();
   await page.getByLabel('Label').fill(label);
   await page.getByLabel('Photo').setInputFiles('testdata/photos/portrait-orient6-gps.jpg');
   const preview = page.locator('#photo-preview');
   await expect(preview).toBeVisible();
-  const box = (await preview.boundingBox())!;
-  expect(box.width).toBeGreaterThan(box.height);
+  const [naturalW, naturalH] = await preview.evaluate((img: HTMLImageElement) => [
+    img.naturalWidth,
+    img.naturalHeight,
+  ]);
+  expect(naturalW, 'preview intrinsic dims (EXIF orientation applied)').toBeGreaterThan(naturalH);
 
   await deleteAllByLabel(page, label);
 });
 
 test('@A-208 edit relabels and delete removes the light', async ({ page }, testInfo) => {
-  const asset = uniqAsset('GP-018', testInfo);
+  const asset = uniqAsset('GP-018', testInfo, 'edit');
   await loginAsAdmin(page);
   await deleteAllByLabel(page, 'Edit me lamp');
   await deleteAllByLabel(page, 'Edited lamp');
@@ -468,8 +544,13 @@ test('@A-209 admin list paginates with HTMX', async ({ page }, testInfo) => {
   // the 55 newest lights in the DB when the assertions run, so page 1 holds
   // exactly seeds 06..55 and page 2 holds 01..05 — regardless of any
   // leftovers from other tests. Unnumbered lights need coordinates clear of
-  // the 8 m duplicate radius: a per-run jittered column spaced ~55 m apart.
+  // the 8 m duplicate radius: lats ride a per-run jittered column spaced
+  // ~55 m apart, while the lon is a FIXED per-project lane at
+  // -71.0480..-71.0495 — outside the jitter band [-71.08,-71.05) and ~41 m
+  // between lanes — so grid rows can never collide with each other across
+  // projects or with any other test's jittered point, deterministically.
   const grid = jittered(`page-${code}`);
+  const gridLon = -71.048 - projectIndex(testInfo) * 0.0005;
   const csrf = await csrfToken(page);
   for (let i = 1; i <= 55; i++) {
     const label = `${baseLabel} ${String(i).padStart(2, '0')}`;
@@ -479,7 +560,7 @@ test('@A-209 admin list paginates with HTMX', async ({ page }, testInfo) => {
         label,
         kind: 'park',
         lat: (grid.lat + i * 0.0005).toFixed(7),
-        lon: grid.lon.toFixed(7),
+        lon: gridLon.toFixed(7),
       },
       maxRedirects: 0, // observe the frozen 303 instead of following it
     });
