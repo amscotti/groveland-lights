@@ -1,64 +1,99 @@
-# T-106 — independent review (reviewer-alt)
+# T-106 — independent review (reviewer-alt), attempt 2
 
-Scope reviewed: `harness/reviews/T-106.diff` (a single new file,
-`harness/handoffs/T-106.md`), plus the worker transcript
-`harness/runs/20261113T134522/T-106/worker.jsonl`, the task packet
-`harness/tasks/T-106.md`, `harness/findings/judge-M1.md` and `harness/state.md`.
+Scope reviewed: `harness/reviews/T-106.diff` (two files: the attempt‑2 handoff
+`harness/handoffs/T-106.md` and a one‑line `harness/tasks/graph.json` status
+change), the operative packet `harness/tasks/T-106.md`, the worker transcript
+`harness/runs/20261113T135642/T-106/worker.jsonl`, the attempt‑1 transcript/reviews,
+`harness/progress.log`, `harness/state.md`, `.gitignore`, and the on‑disk tree.
 
-## Integrity checks
+Verification limits: shell execution is denied in this review session (same
+allowlist restriction the worker reports), so I re‑verified the git claims from
+the worker transcript and the checked‑out tree rather than re‑executing them.
+The worktree path itself (`.../wt/T-106`) is outside this sandbox and unreadable
+here; the diff is the authoritative artifact.
 
-- **No code or test changes at all.** The diff is handoff-only
-  (`harness/reviews/T-106.diff:1-6`); the transcript contains exactly one write,
-  to `harness/handoffs/T-106.md` (`worker.jsonl:91`). No acceptance spec,
-  playwright spec, unit test, golden file, `.gitignore`, Makefile or source file
-  was touched. Nothing was skipped, narrowed, mocked or special-cased, and there
-  is no coverage theatre to assess because no executable code changed. The
-  packet's `"claims": []` (`harness/tasks/T-106.md:12`) makes the absent e2e run
-  correct, and `make e2e-task TASK=T-106` → `no claims for T-106`, exit 0 is
-  verified in the transcript (`worker.jsonl:87`) against `Makefile:113-115`.
-- **The BLOCKED decision is honest and independently corroborated.** The packet's
-  Never clause (`harness/tasks/T-106.md:48-50`) requires a BLOCKED handoff when
-  the blobs are already untracked, and the evidence proves that is true:
-  - worktree HEAD `4d6f347` has `30be90d` as an ancestor (`worker.jsonl:4`);
-  - `git log --oneline -- <each of the three paths>` ends at `30be90d` with no
-    re-add afterwards (`worker.jsonl:30`, `:36`, `:37`);
-  - `git -C . rm --cached test-run.db …` exits 128 with
-    `fatal: pathspec 'test-run.db' did not match any files` (`worker.jsonl:67`),
-    which is the correct probe for "not in the index" (a tracked-but-deleted
-    path would still be removable with `--cached`);
-  - `git diff --cached --name-only` is empty (`worker.jsonl:72`), so the failed
-    probe did not stage anything.
-  The worker did not use BLOCKED to dodge the deliverable; the deliverable was
-  already applied by an ancestor commit.
-- **Verification commands were actually run.** `make check-fast` exit 0 with
-  lint `0 issues` and all packages `ok` is in the transcript
-  (`worker.jsonl:55`), matching handoff line 54. The only worktree dirt is the
-  pre-existing `?? node_modules` symlink, which the guard accepted
-  (`harness/progress.log:237-242`, guard_ok/check_fast_ok).
+## Test-integrity / reward-hacking checks
 
-## Non-blocking accuracy notes (documentation only)
+- **No test, spec, fixture, golden or production file is touched.** The diff
+  consists of `harness/handoffs/T-106.md` (new file in the reviewed range) and
+  `harness/tasks/graph.json` (`harness/reviews/T-106.diff:1-6,135-147`).
+  There is no `t.Skip`, `test.skip`, `test.only`, `.fixme`, deleted test,
+  narrowed assertion, mock bypass, or fixture literal in app code. The packet is
+  `type: chore`, `claims: []` (`harness/tasks/T-106.md:3-17`), so the absent e2e
+  run is correct, not dodged: `make e2e-task TASK=T-106` → `no claims for T-106`,
+  exit 0 (`worker.jsonl:136`), matching Makefile:112-116.
+- **The BLOCKED disposition is honest and independently corroborated, not used
+  to dodge a deliverable.** The packet's Never clause (`harness/tasks/T-106.md:46-50`)
+  prescribes exactly this handoff first line when the paths are untracked. The
+  claim holds:
+  - `30be90d` deleted all three blobs (`worker.jsonl:50`), and
+    `git log main -- test-run.db` / `task/T-106 -- test-run.db` show the untrack
+    after the original add (`worker.jsonl:31,55,63,128-129`);
+  - the packet's step‑1 command genuinely refuses at HEAD:
+    `fatal: pathspec 'test-run.db' did not match any files`, exit 128
+    (`worker.jsonl:122`), and nothing was staged (`worker.jsonl:125`);
+  - the three files exist on disk but are ignored: `git status --porcelain
+    --ignored` lists all three as `!!` (`worker.jsonl:30,141`), matching
+    `.gitignore:20` (`test-run.db*`);
+  - `make check-fast` is green, exit 0 (`worker.jsonl:133`).
+- **No fabricated success.** The handoff does not claim the gate merge succeeded.
+  It explicitly reports that the branch diverges and that the ff‑only gate will
+  refuse again (`harness/reviews/T-106.diff:107-110`), and it recommends closing
+  the task as already‑done rather than manufacturing an empty deliverable
+  commit. That is the correct disposition for a stale packet.
+- **The divergence is not self‑inflicted evasion.** The branch‑only commits are
+  the harness's own `194e9f2` scheduler‑state commit and the attempt‑1 handoff
+  (`worker.jsonl:36`); main‑only commits are harness graph/progress updates
+  (`worker.jsonl:40`). The only overlap is the T‑106 graph line. The worker
+  attempted `git rebase main`, `GIT_EDITOR=true git rebase main`, `git merge
+  main`, `git reset --hard main` and `git cherry-pick 194e9f2`; every one was
+  `permission.rejected` (`worker.jsonl:94,97,101,108,111`), and `scripts/` has no
+  divergence helper (`worker.jsonl:115-118`). This is an allowlist/retry‑loop
+  defect, not test tampering.
 
-1. `harness/handoffs/T-106.md:36-38` says the `.gitignore` `test-run.db*`
-   pattern "was itself part of the `30be90d` fix". The packet and the judge
-   finding attribute the ignore pattern to `f901627`
-   (`harness/tasks/T-106.md:23-24`, `harness/findings/judge-M1.md:93-95`), and
-   T-105's handoff calls the ignore fix an operator pre-step
-   (`harness/handoffs/T-105.md:292-299`). The provenance sentence is muddled,
-   but `.gitignore` was untouched and is correct (`harness/handoffs/T-106.md:36`,
-   verified at `.gitignore:20-21`), so this does not affect the conclusion.
-2. `harness/handoffs/T-106.md:39-41` claims no `test-run.db*` file exists on
-   disk, but the cited basis was a glob that the worker itself notes is
-   gitignore-aware and cannot see ignored paths (`worker.jsonl:53`). The claim
-   is nevertheless true: the handoff's own `git status --porcelain --ignored`
-   output (`?? node_modules` + `!! .env.test`, handoff line 52) lists no ignored
-   `test-run.db*` entries. Cite that command, not the glob, as the proof.
-3. `harness/handoffs/T-106.md:48` records HEAD as `4d6f347`, but the handoff
-   itself was committed as `bfc2c48` on top of it (`worker.jsonl:102`). It is
-   clear the line describes the pre-handoff state, but the committed artifact
-   reads as a stale HEAD. Not material to the BLOCKED verdict.
+## Findings (all non-blocking, documentation/process)
 
-None of the above weakens a test, hides a failure, or changes a behavioural
-contract; the task has no behavioural contract. The handoff's core assertion
-(three blobs untracked and ignored) is correct and backed by git-native evidence.
+1. **Low — the handoff overstates scope branch‑wide.** The reviewed branch
+   contains a `harness/tasks/graph.json` edit (`harness/reviews/T-106.diff:135-147`:
+   T‑106 `status: review` → `merging`, leaving `attempts: 0`), yet the handoff's
+   compliance section says "no harness file edited beyond this handoff"
+   (`harness/reviews/T-106.diff:132-133`). The statement is true of the worker's
+   own writes (`worker.jsonl:145` is the only file write; `worker.jsonl:149`
+   commits only the handoff), and the same handoff correctly identifies
+   `194e9f2` as the harness commit that made the graph change
+   (`harness/reviews/T-106.diff:31-33`). It should read "no harness file edited
+   by me". Not a test‑integrity issue; the graph change is harness automation,
+   not the worker.
+2. **Low — the graph hunk would regress scheduler state if it landed.** Main
+   currently has `"status": "review", "attempts": 1`
+   (`harness/tasks/graph.json:240-241`); the branch's `194e9f2` has
+   `"status": "merging", "attempts": 0`. The handoff flags the status/attempts
+   conflict and prescribes keeping `merging` with main's `attempts: 1`
+   (`harness/reviews/T-106.diff:38-43`). No merge occurs because ff‑only is
+   refused, but an operator following only "merge the branch" would reset the
+   attempt counter. The handoff's operator options should be read literally.
+3. **Low — wrong provenance for `30be90d`.** The handoff says the untrack commit
+   is "merged via T-200" (`harness/reviews/T-106.diff:117-118`), but
+   `harness/progress.log:236` records `merged T-105 30be90d…` (T‑105's merge tip;
+   `30be90d`'s own stat includes the T‑105 handoff edit, `worker.jsonl:50`).
+   Cosmetic; the "untracked on main" conclusion is unaffected.
+4. **Info — stale HEAD labels.** "State at HEAD `194e9f2`" and the command table's
+   "branch tip `194e9f2`" (`harness/reviews/T-106.diff:35,98`) describe the
+   pre‑handoff state; the handoff itself was committed as `4f971ee`
+   (`worker.jsonl:149,153`). The wording makes the committed artifact read as a
+   stale HEAD. Not material.
+5. **Info — `?? node_modules` tolerance is correctly described.** The guard's
+   `DirtyLines` exempts `node_modules` (`cmd/harness/ratchet.go:127-128`), and
+   the only worktree dirt is that pre‑existing symlink (`worker.jsonl:4,154`).
+   Open issue 3 in the handoff is accurate.
+
+## Conclusion
+
+The worker found the task already completed on main, stopped at the
+packet‑prescribed `BLOCKED: already untracked on main`, proved it with git
+plumbing snapshots, ran the required checks, and did not fabricate a commit,
+edit a spec, skip a test, or special‑case a fixture. The only diff content
+beyond the handoff is a harness scheduler commit that the handoff transparently
+documents. No test-integrity or reward-hacking failure exists in this diff.
 
 VERDICT: PASS
