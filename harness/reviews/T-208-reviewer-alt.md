@@ -95,7 +95,7 @@ this is a follow-up decision, not a reason to hide the work.
 `internal/web/probe_test.go:184-193` asserts only that `GET /probe` with a nil
 store returns 500. The guard it is meant to pin is
 `if s.Store == nil { return 0, errProbeStoreNotWired }`
-(`internal/web/probe.go:57-59`). If that guard were deleted,
+(`internal/web/probe.go:60-62`). If that guard were deleted,
 `s.Store.ProbeCount` would dereference a nil `*store.DB`; `withRecover`
 (`internal/web/web.go:102-111` on main, unchanged by this diff) would catch
 the panic and still write 500, so the test would pass either way. The packet
@@ -109,9 +109,9 @@ rather than relying on the recovered panic.
 
 ### 3. [Low-Medium — test robustness] The wire-level POST row follows redirects and can pass on the home page
 
-`internal/web/probe_test.go:402` constructs
+`internal/web/probe_test.go:403` constructs
 `client := &http.Client{Jar: jar}` with no `CheckRedirect`, and the status/type
-assertions are at `:414-416`. If `probePost` regressed to a 303 for an
+assertions are at `:412-415`. If `probePost` regressed to a 303 for an
 `HX-Request` POST, the client would follow to `/`; the home page starts
 `<!DOCTYPE html>` (`web/templates/base.html:1`), sniffs as
 `text/html; charset=utf-8`, and both the 200 and exact-header assertions would
