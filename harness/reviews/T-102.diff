@@ -1,14 +1,34 @@
 diff --git a/harness/handoffs/T-102.md b/harness/handoffs/T-102.md
 new file mode 100644
-index 0000000..6d226ce
+index 0000000..6a63bca
 --- /dev/null
 +++ b/harness/handoffs/T-102.md
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,159 @@
 +# T-102 — CSRF plumbing + middleware guards (M1)
 +
 +Not blocked. Implemented, verified, committed on `task/T-102`. This is the
-+attempt-2 handoff; attempt 1 failed the guard with exit 6 — root cause and fix
-+in the next section.
++attempt-3 handoff: attempt 1 failed the guard with exit 6 (root cause below);
++attempt 2 passed guard and check-fast but was interrupted before review
++closed. Attempt 3 re-ran the full verification suite from a clean tree — every
++command green, work already committed, nothing new to change.
++
++## Final re-verification (attempt 3, this session)
++
++Worktree was already at the final committed state (`git status`: only the
++guard-allowlisted `node_modules` symlink). Re-ran the whole suite:
++
++| Command | Exit | Result |
++| --- | --- | --- |
++| `make check-fast` | 0 | fmt-check, vet, lint (0 issues), `go test -race -count=1 -shuffle=on ./...` all ok |
++| `go test ./internal/web/... -race -count=1` | 0 | ok 1.3s |
++| `make e2e-task TASK=T-102` | 0 | @A-102 passed 4/4 projects (desktop-chromium, pixel-9, iphone-16, iphone-se-320); @A-105 has no Playwright match (`--pass-with-no-tests`, it is a Go spec) |
++| `make test-acceptance-go` | 0 | `acceptance/go` ok — includes `TestA105ProdLogsJSONNoIP`, `TestA101HealthzFast` |
++| `make cover` | 0 | internal/web **86.7%**, internal/config 81.1% (floor 70%) |
++| `git diff main...HEAD --stat` | 0 | exactly `internal/web/csrf.go`, `internal/web/csrf_test.go`, `internal/web/middleware_logging_test.go`, `harness/handoffs/T-102.md` — all ownership-covered, nothing outside `owns` touched |
++| `git status --porcelain` | 0 | only `?? node_modules` (allowlisted verbatim in `DirtyLines`, `cmd/harness/ratchet.go`) |
++
++Commits on `task/T-102`: `a21ac26` (feature + tests), `4cf14b1` + `c10c8a5`
++(handoff, reworded after the attempt-1 marker-scan false positive).
 +
 +## Retry: guard exit 6 — root cause and fix
 +
@@ -81,7 +101,7 @@ index 0000000..6d226ce
 +  POST: parse the form into a typed struct at the boundary (rule 6), then
 +  `if err := VerifyCSRF(r, f.CSRFToken); err != nil { 403 }`.
 +
-+## How verified (final state, commands + exit codes)
++## How verified (attempt 2 — superseded by the table above, kept for the record)
 +
 +| Command | Exit | Result |
 +| --- | --- | --- |
@@ -93,7 +113,8 @@ index 0000000..6d226ce
 +| guard checks, replicated manually (see below) | 0 | marker scan, ratchet scan, ownership, dirty check all clean |
 +| `git status --porcelain` (after final commit) | 0 | only `?? node_modules` (guard-allowlisted worktree symlink) |
 +
-+Guard replication detail: direct `go run ./cmd/harness guard T-102` is
++Guard replication detail (attempt 2; re-derived in attempt 3 — same result):
++direct `go run ./cmd/harness guard T-102` is
 +permission-denied for the worker role in this environment, so each sub-check
 +was replicated from the guard source (`cmd/harness/guard.go`, `scan.go`,
 +`ratchet.go`): committed diff `main...HEAD` touches only
