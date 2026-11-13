@@ -1,9 +1,9 @@
 diff --git a/acceptance/drafts/README.md b/acceptance/drafts/README.md
 new file mode 100644
-index 0000000..010f51f
+index 0000000..343e946
 --- /dev/null
 +++ b/acceptance/drafts/README.md
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,237 @@
 +# M2 acceptance drafts (frozen contract)
 +
 +Inert drafts for milestone M2 (admin inventory, "walk the town"), written by
@@ -63,15 +63,15 @@ index 0000000..010f51f
 +| Element | Contract |
 +|---|---|
 +| `/admin/login` | heading `Admin login`; label `Token`; button `Sign in` |
-+| `/admin/walk` `#walk-pos` | text matching `\d+\.\d+, -?\d+\.\d+` (rendered at 6 decimal places) |
++| `/admin/walk` `#walk-pos` | text matching `\d+\.\d+, -?\d+\.\d+` (rendered at 6 decimal places; the e2e asserts the 6 dp form `\d+\.\d{6}, -?\d+\.\d{6}`) |
 +| `#walk-accuracy` | text matching `/accuracy \d+ m/` |
 +| `#pin` (draggable pin) | `aria-label="position pin"`, keyboard-movable (focusable; arrow keys nudge the effective position — asserted by the visible e2e suite) |
 +| `#pin-pos` | current pin coords, same format — rendered at exactly 6 decimal places, so its text equals `#light-pos` for the same position |
-+| buttons | `Add light here` (exact), `Save anyway (low accuracy)`, `Confirm pin`, `Merge`, `Save anyway` (duplicate panel: `Merge` always; `Save anyway` unnumbered-only, see reconciliation 2) |
++| buttons | `Add light here` (exact; when gated by low accuracy it carries the platform `disabled` ATTRIBUTE — asserted, so an aria-disabled look or CSS class alone fails), `Save anyway (low accuracy)`, `Confirm pin`, `Merge`, `Save anyway` (duplicate panel: `Merge` always; `Save anyway` unnumbered-only, see reconciliation 2) |
 +| form labels | `Asset number`, `Label`, `Kind` (select: `Park`, `Building`), `Photo` |
 +| success | role=status containing `Saved` (HTMX fragment for create; edit/delete answer 303 redirects) |
 +| bbox rejection | role=alert containing `outside Groveland town bounds` |
-+| duplicate panel | `#dup-panel` with heading `Possible duplicate`; numbered case adds a link named `Cancel`; nothing is saved until a button is chosen |
++| duplicate panel | `#dup-panel` with heading `Possible duplicate`; numbered case adds a link named `Cancel`; nothing is saved until a button is chosen; `Merge` APPLIES the new submission's label/photo onto the existing row (the survivor carries the merged-in label — asserted in both suites via the frozen alt format) |
 +| list `/admin` | heading `Lights`; row per light with thumbnail `img[alt=<label>]`; link or button `Older`; a row may repeat its detail href (e.g. thumbnail + label link) — href consumers dedupe |
 +
 +Additional selectors frozen by the drafts (needed by specific tests):
@@ -79,7 +79,7 @@ index 0000000..010f51f
 +| Element | Contract |
 +|---|---|
 +| `#manual-lat`, `#manual-lon` | number inputs, visible when geolocation is denied |
-+| `#photo-preview` | in-form preview `img`; renders EXIF orientation applied — its INTRINSIC dimensions (`naturalWidth`/`naturalHeight`) must be wider than tall for the portrait fixtures (a processed preview or the browser's EXIF-aware intrinsic sizing both qualify; the e2e waits for a decoded frame first — naturalWidth > 0); the CSS box is not the proof (a stretched portrait games it) |
++| `#photo-preview` | in-form preview `img`; renders EXIF orientation applied — its INTRINSIC dimensions (`naturalWidth`/`naturalHeight`) must be wider than tall for the portrait fixtures (a processed preview or the browser's EXIF-aware intrinsic sizing both qualify; the e2e waits for a decoded frame first — naturalWidth > 0); the CSS box is not the proof (a stretched portrait games it), and neither is a static placeholder: the preview's rendered source must appear/change when a file is picked (asserted) |
 +| `#light-pos` | admin detail coordinates as `lat, lon` at 6 decimal places |
 +| login markup | `<h1>Admin login</h1>`, `<label ..>Token</label>` + `<input name="token">`, `<button>Sign in</button>` |
 +| list row link | the label text links to `/admin/lights/{id}` (accessible name contains the label) |
@@ -93,12 +93,13 @@ index 0000000..010f51f
 +|---|---|
 +| `GET /admin` (no session) | 302 → `/admin/login`; with `HX-Request: true` and no session: 401 + `HX-Redirect: /admin/login` |
 +| `GET /admin/login` | 200 form page (see markup above) |
-+| `GET /admin/login?token=X` | valid `ADMIN_TOKEN` → 302 → `/admin` + `Set-Cookie: gl_session=...` with `HttpOnly`, `SameSite=Lax`, `Path=/` (one-time, GLOBAL: replay from any client → 403); wrong token → 403; missing/blank token → 200 (the form page — only a wrong value is refused) |
++| `GET /admin/login?token=X` | valid `ADMIN_TOKEN` → 302 → `/admin` + `Set-Cookie: gl_session=...` with `HttpOnly`, `SameSite=Lax`, `Path=/`, `Max-Age=86400` (24 h; the attributes are parsed and compared exactly — `Path=/admin` does not satisfy `Path=/`; `Secure` is prod-only and unasserted under APP_ENV=test) (one-time, GLOBAL: replay from any client → 403); wrong token → 403; missing/blank token → 200 (the form page, full frozen markup — only a wrong value is refused) |
 +| `POST /admin/lights` | multipart `csrf_token, label, kind(park\|building), lat, lon, asset_no? (^[A-Za-z0-9-]{1,32}$), photo?, accuracy_m?, dup_choice?("" \| merge \| save)`; success → role=status `Saved` for HX-Request, else 303 `Location: /admin`; duplicate → 409 body contains `Possible duplicate` (numbered+save → 422); outside `TOWN_BBOX` → 422 body contains `outside Groveland town bounds`; >15 MB → 413; wrong type / HEIC / >40 MP → 415 (HEIC body contains `please choose JPEG`) |
 +| `GET /admin/lights/{id}` | 200 detail; photo referenced as `src="/photos/..."`; 404 after soft delete |
 +| `POST /admin/lights/{id}` | edit (multipart `csrf_token` + changed fields; **unspecified fields keep values**) → 303 back to the detail |
 +| `POST /admin/lights/{id}/delete` | soft delete (multipart `csrf_token`) → 303 `/admin` |
 +| `GET /admin` | list: heading `Lights`, the 50 most recent lights, one `img alt` per row (alt format above; placeholder thumbnails for photo-less lights are fine) |
++| `GET /admin?page=N` | the same list page for page N (full page; the cleanup sweeps rely on it) |
 +| `GET /admin/rows?page=N` | HTMX rows fragment (root element id `rows`); without `HX-Request` → 303 → `/admin?page=N` |
 +| `GET /photos/...` | served photo: `Content-Type: image/jpeg`, long edge ≤ 1600, NO APP1 segment at all — so no EXIF, no GPS (the Go draft byte-scans for APP1; the e2e draft asserts `hasAPP1 === false` as well as `hasExifGps === false`), EXIF orientation applied (the 600×800 Orientation=6/8 fixtures serve as EXACTLY 800×600 — asserted by the Go drafts, matching the fixture table and T-202's no-upscale rule) |
 +
@@ -191,10 +192,11 @@ index 0000000..010f51f
 +- **A-202 walk page** (320×640): top strip shows `#walk-pos` and
 +  `#walk-accuracy` ("accuracy 12 m") in readable type; the middle is the map
 +  canvas; **"Add light here" sits in the bottom third, full-width, thumb-
-+  reachable**. With accuracy 80 m the button is visibly disabled and "Save
-+  anyway (low accuracy)" appears beside/below it; choosing it re-enables the
-+  button AND unlocks a real save at 80 m (the e2e completes the whole save
-+  after the choice — a painted-but-unwired gate fails). Geolocation denied:
++  reachable**. With accuracy 80 m the button is genuinely disabled (the
++  platform `disabled` attribute — asserted) and "Save anyway (low
++  accuracy)" appears beside/below it; choosing it re-enables the button
++  AND unlocks a real save at 80 m (the e2e completes the whole save after
++  the choice — a painted-but-unwired gate fails). Geolocation denied:
 +  `#manual-lat` / `#manual-lon` number inputs appear (manual pin-drop
 +  fallback), still no horizontal scroll.
 +- **A-203 pin**: a pin marker with `aria-label="position pin"` centred on the
@@ -209,7 +211,9 @@ index 0000000..010f51f
 +  "Possible duplicate" showing the existing light (label, asset number,
 +  distance); numbered case: "Merge" (primary) + a "Cancel" link and NO
 +  "Save anyway"; unnumbered case: "Merge" + "Save anyway". **Nothing is
-+  saved until one is chosen.**
++  saved until one is chosen**, and choosing "Merge" leaves ONE row whose
++  text/thumbnail carry the newly submitted label (the merge is applied,
++  not a discarded submission).
 +- **A-206 photo**: after picking the portrait fixture, `#photo-preview`
 +  renders **wider than tall** (orientation already applied — the intrinsic
 +  dimensions must be landscape, not just the CSS box); the served photo
@@ -217,7 +221,9 @@ index 0000000..010f51f
 +  ≤ 1600).
 +- **A-208 detail/edit**: the admin detail shows the photo, `#light-pos` and a
 +  labelled form ("Label" filled) with "Save changes"; "Delete light" is a
-+  visually destructive (red) action separated from the save button.
++  visually destructive (red) action separated from the save button. A
++  label-only edit keeps the asset number, position AND stored photo (the
++  Go draft proves the photo by URL before/after the edit).
 +- **A-209 list**: heading "Lights"; one row per light with a small square
 +  thumbnail (`img alt=<label>`), asset number + label text, status chip;
 +  "Older" at the bottom swaps in the next 50 via HTMX (no full reload);
@@ -237,10 +243,10 @@ index 0000000..010f51f
 +equally frozen.
 diff --git a/acceptance/drafts/admin-walk.spec.ts.txt b/acceptance/drafts/admin-walk.spec.ts.txt
 new file mode 100644
-index 0000000..35bd731
+index 0000000..d44483b
 --- /dev/null
 +++ b/acceptance/drafts/admin-walk.spec.ts.txt
-@@ -0,0 +1,640 @@
+@@ -0,0 +1,664 @@
 +// M2 acceptance drafts (T-200): A-201..A-209 for the admin "walk the town"
 +// flow, written as a frozen UI contract BEFORE any feature exists.
 +//
@@ -430,7 +436,9 @@ index 0000000..35bd731
 + * before the form opens — a submit racing an empty position 422s. */
 +async function openWalkForm(page: Page): Promise<void> {
 +  await page.goto('/admin/walk');
-+  await expect(page.locator('#walk-pos')).toHaveText(/\d+\.\d+, -?\d+\.\d+/);
++  // #walk-pos is frozen at 6 decimal places (T-205) — assert that exact
++  // form, not just "some decimals".
++  await expect(page.locator('#walk-pos')).toHaveText(/\d+\.\d{6}, -?\d+\.\d{6}/);
 +  await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy \d+ m/);
 +  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
 +}
@@ -462,8 +470,9 @@ index 0000000..35bd731
 +
 +  await page.goto('/admin/walk');
 +
-+  // Live position and accuracy are shown (accuracy 12 m from the context).
-+  await expect(page.locator('#walk-pos')).toHaveText(/\d+\.\d+, -?\d+\.\d+/);
++  // Live position and accuracy are shown (accuracy 12 m from the context),
++  // at the frozen 6 decimal places.
++  await expect(page.locator('#walk-pos')).toHaveText(/\d+\.\d{6}, -?\d+\.\d{6}/);
 +  await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy 12 m/);
 +
 +  // Open the add-light form, then "walk a few metres": the watchPosition
@@ -502,8 +511,12 @@ index 0000000..35bd731
 +  await expect(add).toBeVisible();
 +  // Over the 30 m threshold the primary action is disabled until the admin
 +  // explicitly accepts the low-accuracy risk. `Add light here` is the only
-+  // in-UI submit path, so while it is disabled NOTHING can be saved.
++  // in-UI submit path, so while it is disabled NOTHING can be saved — and
++  // the gate must be the platform's disabled ATTRIBUTE (asserted below),
++  // which suppresses activation entirely; an aria-disabled look or a CSS
++  // class alone would leave the click path live.
 +  await expect(add).toBeDisabled();
++  await expect(add).toHaveAttribute('disabled');
 +
 +  // Choosing save-anyway re-enables the button AND unlocks a REAL save at
 +  // 80 m — proving the gate is wired to the form, not a painted attribute.
@@ -649,7 +662,10 @@ index 0000000..35bd731
 +  await page.goto('/admin');
 +  await expect(page.locator('img[alt*="Dup panel lamp twin"]')).toHaveCount(0);
 +
-+  // Choosing Merge collapses the pair into exactly one row.
++  // Choosing Merge collapses the pair into exactly one row — and APPLIES
++  // the twin's label onto the survivor (frozen alt format
++  // "<asset_no> <label>"): a no-op "merge" that kept the original row
++  // would fail the second selector.
 +  await openWalkForm(page);
 +  await page.getByLabel('Asset number').fill(asset);
 +  await page.getByLabel('Label').fill('Dup panel lamp twin');
@@ -659,6 +675,7 @@ index 0000000..35bd731
 +  await expect(page.getByRole('status')).toContainText('Saved');
 +  await page.goto('/admin');
 +  await expect(page.locator(`img[alt^="${asset}"]`)).toHaveCount(1);
++  await expect(page.locator(`img[alt="${asset} Dup panel lamp twin"]`)).toHaveCount(1);
 +
 +  // Unnumbered duplicate: a second unnumbered light ~4.4 m away raises the
 +  // panel WITH both buttons; Save anyway keeps both lights.
@@ -741,8 +758,14 @@ index 0000000..35bd731
 +  // wide container could game.
 +  await openWalkForm(page);
 +  await page.getByLabel('Label').fill(label);
-+  await page.getByLabel('Photo').setInputFiles('testdata/photos/portrait-orient6-gps.jpg');
 +  const preview = page.locator('#photo-preview');
++  // A STATIC landscape placeholder must not pass: capture what #photo-preview
++  // shows before the pick; whatever mechanism the page uses (object URL,
++  // data URL, processed thumbnail), picking a file must change (or first
++  // produce) the rendered source.
++  const hadPreview = (await preview.count()) === 1;
++  const srcBefore = hadPreview ? await preview.getAttribute('src') : null;
++  await page.getByLabel('Photo').setInputFiles('testdata/photos/portrait-orient6-gps.jpg');
 +  await expect(preview).toBeVisible();
 +  // naturalWidth/naturalHeight are 0 until the preview image has LOADED —
 +  // CSS visibility alone does not imply decode — so poll for a decoded frame
@@ -762,6 +785,10 @@ index 0000000..35bd731
 +    )
 +    .toBeGreaterThan(0);
 +  expect(naturalW, 'preview intrinsic dims (EXIF orientation applied)').toBeGreaterThan(naturalH);
++  if (hadPreview) {
++    const srcAfter = await preview.getAttribute('src');
++    expect(srcAfter, 'the preview must track the picked file (a static placeholder cannot)').not.toBe(srcBefore);
++  }
 +
 +  await deleteAllByLabel(page, label);
 +});
@@ -792,6 +819,9 @@ index 0000000..35bd731
 +  expect(await page.content()).toContain(asset);
 +
 +  await page.getByRole('button', { name: 'Delete light' }).click();
++  // The delete answers 303 → /admin (frozen); wait for that navigation
++  // before leaving the page, so the goto cannot cancel the in-flight POST.
++  await page.waitForURL(/\/admin$/);
 +  await page.goto('/admin');
 +  await expect(page.getByRole('link', { name: /Edited lamp/ })).toHaveCount(0);
 +  await expect(page.locator('img[alt*="Edited lamp"]')).toHaveCount(0);
@@ -883,10 +913,10 @@ index 0000000..35bd731
 +});
 diff --git a/acceptance/drafts/admin_auth_go_test.go.txt b/acceptance/drafts/admin_auth_go_test.go.txt
 new file mode 100644
-index 0000000..f00b251
+index 0000000..df7b867
 --- /dev/null
 +++ b/acceptance/drafts/admin_auth_go_test.go.txt
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,378 @@
 +//go:build acceptance
 +
 +// @A-201 — admin login: one-time ADMIN_TOKEN exchange and guarded /admin/*
@@ -914,7 +944,8 @@ index 0000000..f00b251
 +//	GET  /admin/login?token=<ADMIN_TOKEN>    -> 302 Location: /admin AND a
 +//	                                             Set-Cookie for gl_session
 +//	                                             carrying HttpOnly,
-+//	                                             SameSite=Lax and Path=/
++//	                                             SameSite=Lax, Path=/ and
++//	                                             Max-Age=86400 (24 h)
 +//	GET  /admin/login?token=<ADMIN_TOKEN>    -> 403 (the token is one-time
 +//	    (replay, from a SECOND                  and GLOBAL: consumption is
 +//	     cookie-less client)                    server-side, so replay from
@@ -985,7 +1016,8 @@ index 0000000..f00b251
 +	}
 +
 +	// A wrong token is rejected; a BLANK token just renders the form page
-+	// again (T-203 freezes no/blank -> 200; only a wrong value is 403).
++	// again (T-203 freezes no/blank -> 200; only a wrong value is 403) —
++	// the full frozen form, not merely a 200 status.
 +	status, _, _ = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin/login?token=definitely-not-the-token", nil, false)
 +	if status != http.StatusForbidden {
 +		t.Fatalf("GET /admin/login?token=<wrong>: status %d, want 403", status)
@@ -993,6 +1025,11 @@ index 0000000..f00b251
 +	status, _, body = aaDo(t, browser, http.MethodGet, s.baseURL+"/admin/login?token=", nil, false)
 +	if status != http.StatusOK {
 +		t.Fatalf("GET /admin/login?token= (blank): status %d, want 200 (the form page); body:\n%s", status, body)
++	}
++	for _, re := range []*regexp.Regexp{aaReHeading, aaReLabel, aaReInput, aaReButton} {
++		if !re.MatchString(body) {
++			t.Errorf("GET /admin/login?token= (blank): markup missing the frozen %q element; body:\n%s", re.String(), body)
++		}
 +	}
 +
 +	// The valid token exchanges for an admin session exactly once.
@@ -1012,10 +1049,30 @@ index 0000000..f00b251
 +	if sessionCookie == "" {
 +		t.Fatalf("GET /admin/login?token=<valid>: no Set-Cookie for gl_session; got %q", header.Values("Set-Cookie"))
 +	}
-+	for _, want := range []string{"httponly", "samesite=lax", "path=/"} {
-+		if !strings.Contains(strings.ToLower(sessionCookie), want) {
-+			t.Errorf("gl_session cookie lacks %s: %q", want, sessionCookie)
++	// The cookie attributes are parsed EXACTLY (not substring-matched:
++	// "path=/" as a substring would also accept Path=/admin). T-203 freezes
++	// Path=/, HttpOnly, SameSite=Lax and MaxAge 24 h. (Secure is frozen as
++	// prod-only and this server runs APP_ENV=test, so it is deliberately
++	// NOT asserted either way.)
++	attrs := map[string]string{}
++	for _, part := range strings.Split(sessionCookie, ";")[1:] {
++		kv := strings.SplitN(strings.ToLower(strings.TrimSpace(part)), "=", 2)
++		attrs[kv[0]] = ""
++		if len(kv) == 2 {
++			attrs[kv[0]] = kv[1]
 +		}
++	}
++	if attrs["path"] != "/" {
++		t.Errorf("gl_session cookie Path = %q, want exactly \"/\"; cookie: %q", attrs["path"], sessionCookie)
++	}
++	if attrs["max-age"] != "86400" {
++		t.Errorf("gl_session cookie Max-Age = %q, want 86400 (24 h); cookie: %q", attrs["max-age"], sessionCookie)
++	}
++	if attrs["samesite"] != "lax" {
++		t.Errorf("gl_session cookie SameSite = %q, want lax; cookie: %q", attrs["samesite"], sessionCookie)
++	}
++	if _, ok := attrs["httponly"]; !ok {
++		t.Errorf("gl_session cookie lacks the HttpOnly flag; cookie: %q", sessionCookie)
 +	}
 +
 +	// Replaying the same token is refused — it was consumed. The replay
@@ -1240,10 +1297,10 @@ index 0000000..f00b251
 +}
 diff --git a/acceptance/drafts/admin_lights_go_test.go.txt b/acceptance/drafts/admin_lights_go_test.go.txt
 new file mode 100644
-index 0000000..53ea174
+index 0000000..2e08875
 --- /dev/null
 +++ b/acceptance/drafts/admin_lights_go_test.go.txt
-@@ -0,0 +1,1027 @@
+@@ -0,0 +1,1049 @@
 +//go:build acceptance
 +
 +// @A-204..@A-209 — admin inventory CRUD over HTTP: bbox rejection, photo
@@ -1451,6 +1508,17 @@ index 0000000..53ea174
 +	if got := len(alAltAssetRe("GP-017").FindAllString(list, -1)); got != 1 {
 +		t.Errorf("after merge the list shows %d rows for asset GP-017, want exactly 1;\n%s", got, list)
 +	}
++	// The merge must APPLY the twin onto the surviving row (T-205 freezes
++	// dup_choice=merge as "apply photo/label onto ExistingID"), not merely
++	// keep the original row: the survivor's alt carries the twin's label
++	// and no longer the original's. (The alt strings are closing-quote
++	// anchored, so "…lamp twin" cannot satisfy the "…lamp" check.)
++	if !strings.Contains(list, `alt="GP-017 Ball field lamp twin"`) {
++		t.Errorf("after merge the surviving row does not carry the twin's label (frozen alt \"<asset_no> <label>\"); body:\n%s", list)
++	}
++	if strings.Contains(list, `alt="GP-017 Ball field lamp"`) {
++		t.Errorf("after merge the surviving row still carries the original label; the twin's label must be applied; body:\n%s", list)
++	}
 +
 +	// Unnumbered fixture, then a second unnumbered one ~4.5 m away.
 +	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
@@ -1649,8 +1717,9 @@ index 0000000..53ea174
 +	}
 +}
 +
-+// TestA208EditSoftDelete: a label edit shows on the detail page; a delete
-+// makes the detail 404 and removes the light from the list.
++// TestA208EditSoftDelete: a label edit shows on the detail page while the
++// unposted fields (asset number, position, stored photo) keep their values;
++// a delete makes the detail 404 and removes the light from the list.
 +func TestA208EditSoftDelete(t *testing.T) {
 +	s := alSpawnDir(t, "", "")
 +	t.Cleanup(func() { alKill(t, s) })
@@ -1659,15 +1728,22 @@ index 0000000..53ea174
 +	status, header, body := alCreate(t, c, s.baseURL, map[string]string{
 +		"csrf_token": csrf, "asset_no": "GP-018", "label": "Old label",
 +		"kind": "park", "lat": "42.7620", "lon": "-71.0290",
-+	}, "", nil)
++	}, "landscape.jpg", alFixture(t, "landscape.jpg"))
 +	if status != http.StatusSeeOther {
 +		t.Fatalf("create GP-018: status %d, want 303; body:\n%s", status, body)
 +	}
 +	detailURL := alDetailURL(t, c, s.baseURL, "Old label")
 +
++	// The photo the create stored (its /photos/ URL on the detail page).
++	detailBefore := alGet(t, c, s.baseURL+detailURL)
++	photoSrc := alRePhotoSw.FindStringSubmatch(detailBefore)
++	if photoSrc == nil {
++		t.Fatalf("detail page has no photo src=\"/photos/...\"; body:\n%s", detailBefore)
++	}
++
 +	// Edit: relabel; the detail page shows the new label, redirects back to
-+	// itself, and fields NOT sent keep their values (asset number and
-+	// position survive a label-only edit).
++	// itself, and fields NOT sent keep their values (asset number, position
++	// AND the stored photo survive a label-only edit).
 +	status, header, body = alPostMultipart(t, c, s.baseURL+detailURL, map[string]string{
 +		"csrf_token": csrf, "label": "New label",
 +	}, "", "", nil, false)
@@ -1686,6 +1762,9 @@ index 0000000..53ea174
 +	}
 +	if !strings.Contains(detail, "42.7620") || !strings.Contains(detail, "-71.0290") {
 +		t.Errorf("detail page after label-only edit lost the position; body:\n%s", detail)
++	}
++	if !strings.Contains(detail, photoSrc[1]) {
++		t.Errorf("detail page after label-only edit lost the stored photo %q; body:\n%s", photoSrc[1], detail)
 +	}
 +
 +	// Soft delete: detail 404s, list no longer mentions the light.
@@ -2645,63 +2724,83 @@ index 0000000..1c9a7f1
 +}
 diff --git a/harness/handoffs/T-200.md b/harness/handoffs/T-200.md
 new file mode 100644
-index 0000000..f3b5954
+index 0000000..203a4ad
 --- /dev/null
 +++ b/harness/handoffs/T-200.md
-@@ -0,0 +1,165 @@
-+# T-200 — M2 acceptance tests as inert drafts (attempt 4, final hardening)
+@@ -0,0 +1,182 @@
++# T-200 — M2 acceptance tests as inert drafts (attempt 5, residual hardening)
 +
-+Not blocked. Attempt 3 (`838b221` + `c5b82d7`) closed all twelve attempt-2
-+findings and both attempt-3 reviews returned **PASS**
-+(`harness/reviews/T-200-reviewer.md`, `T-200-reviewer-alt.md`). This attempt
-+uses the still-author-owned oracle window (T-207 activates by pure rename and
-+may not edit) to close every residual robustness/contract-clarity finding
-+those PASS reviews listed, then re-proves red, re-runs every suite green and
-+re-protects the manifest.
++Not blocked. History: attempt 1 BLOCK (two reviews: unsatisfiable e2e
++oracle — shared-DB collisions, one-time-token economy, redirect
++observability, packet contradictions), attempt 2 BLOCK (reviewer-alt:
++@A-205 never submitted its create; detail-href dedupe; global replay;
++per-test assets; low-acc save gate; preview intrinsic dims; numbered-panel
++negatives; APP1 purity; keyboard pin; handoff accuracy). Attempt 3 closed
++all twelve attempt-2 findings; attempts 3 and 4 were reviewed **PASS**
++(`harness/reviews/T-200-reviewer.md`, `T-200-reviewer-alt.md`). This
++attempt uses the last author-owned window (T-207 activates by pure rename
++and may not edit) to close every residual Low the two PASS reviews
++recommended fixing "while the author still owns the oracle", then re-proves
++red, re-runs every suite green and re-protects the manifest.
 +
-+Commits this attempt: main `c577684` (branch `task/T-200`), holdout repo
-+`f523f06`. History: attempt 1 `ea3a395`, attempt 2 `a440169`+`08a46ee`,
-+attempt 3 `838b221`+`c5b82d7` (the previous handoff's `ad323e4`/`c3817a7`
-+references were stale — corrected here).
++Commits this attempt: main repo `41e81a3` (branch `task/T-200`, this
++worktree) plus this handoff's docs commit, holdout repo `2dd3354`. Prior
++attempt commits: attempt 3 `838b221`+`c5b82d7`, attempt 4 `1d0f4f0`+
++`4593974` (the attempt-4 handoff named `c577684`; history was rewritten by
++the harness merge chore `4497916`, which also re-wrote those hashes).
 +
-+## Finding → fix map (attempt-3 PASS-review residuals; all mirrored in the holdout)
++## Attempt-2 BLOCK findings — independently re-verified closed in the bytes
 +
-+| Source | Finding | Fix |
++| Finding (reviewer-alt attempt 2) | Where closed (verified this attempt) |
++|---|---|
++| #1 BLOCKER @A-205 first create never submits | `admin-walk.spec.ts.txt` @A-205: `addLightFromForm` → explicit `Confirm pin` click → `Saved`, before the twin raises the panel |
++| #2 HIGH detail-href multi-match | `lightHrefsByLabel` (Set) + Go `alDetailURL`/`hlDetailURL` (`seen` map) dedupe; README row states href dedupe |
++| #3 replay same-client only | auth drafts replay from the cookie-less `bare`/`clientB` client |
++| #4 assets unique per run+project only | `uniqAsset(prefix, testInfo, tag)` — per-test tag (`save`/`dup`/`photo`/`edit`/`walk`/`merge`/`pure`) |
++| #5 low-acc proves button state only | real save at 80 m after choosing save-anyway (plus the new disabled-ATTRIBUTE proof below) |
++| #6 preview CSS-stretch games it | intrinsic `naturalWidth/naturalHeight` with a decoded-frame poll |
++| #7 numbered-panel negative half unasserted | `Save anyway` `toHaveCount(0)` + `Cancel` link visible |
++| #8 e2e purity checks GPS only | `hasAPP1(bytes) === false` asserted (Go byte-scans APP1 too) |
++| #9 keyboard pin unexercised | @A-203 arrow-key nudge, polled, saved; holdout pin is keyboard-moved end-to-end |
++| #10 handoff overclaims | handoffs since attempt 3 document executed evidence per suite |
++| #11 admin.ts cache-write silent | write failure surfaced on stderr with the e2e→a11y consequence spelled out |
++| #12 #rows fragment root unasserted | `alReRowsRoot`/`hlReRowsRoot` (`\A\s*<[a-zA-Z][^>]*\bid="rows"`) asserted |
++
++Attempt-1 blockers (shared-DB rerun safety, one-time-token economy via
++`loginAsAdmin` memo + gitignored `test-run.db.session.json`, `maxRedirects:
++0`, self-contained @A-206, HIGH 1–3 reconciliations 303 `/admin` /
++panel buttons / kind enum) were re-verified in place — all still closed.
++
++## Residual PASS-review findings closed this attempt (mirrored in the holdout)
++
++| Source (attempt-4 PASS reviews) | Finding | Fix (both repos) |
 +|---|---|---|
-+| alt 1 (Med, flaky) | `addLightFromForm` never waited for the geolocation fix; `Confirm pin` could race empty lat/lon (422) and @A-205's unnumbered half could read a stale position | New `openWalkForm(page)` helper: `goto /admin/walk` → wait `#walk-pos` numeric text → wait `#walk-accuracy` `accuracy \d+ m` → click `Add light here`. `addLightFromForm` delegates to it, and ALL six inline walk-form sites in @A-205 (numbered re-submit ×2, unnumbered ×3) and the @A-206 preview flow now call it. Every remaining `goto('/admin/walk')` site already waits (test 1, low-acc, A-203 pin-pos, A-204, a11y). Deterministic because every submit navigates to a FRESH page loaded after `setGeolocation`, so the first `watchPosition` callback — whose arrival the wait proves — can only carry the new mocked coordinates. Holdout: same helper (`openWalkForm`), same conversions. |
-+| alt 2 (Med, flaky) | `naturalWidth` read before the preview image loaded (visible ≠ decoded → 0/0 fails a correct build) | `expect.poll` until `naturalWidth > 0` (assignment-inside-poll, same style as the pin-pos polls), then `naturalW > naturalH`. README preview row now states "a processed preview or the browser's EXIF-aware intrinsic sizing both qualify" and documents the decoded-frame wait. |
-+| alt 3 (Med-High, gap) | @A-204 expects a client-side bbox alert on `setGeolocation`, T-205's walk.js list freezes only the server-side 422 | Recorded as **reconciliation 4** in the README (drafts are the oracle: walk.js mirrors the frozen server message as a client-side pre-flight on each position update; the server-side 422 is independently asserted by the Go drafts) and added to the planner-ratify list below. Reviewer explicitly did not block on this. |
-+| alt 4 (Low-Med, contradiction) | README froze "wrong/empty token → 403" but T-203 freezes no/blank → 200; the HOLDOUT draft asserted blank → 403 — unsatisfiable at activation | README wording corrected ("wrong token → 403; missing/blank token → 200"); the visible Go draft now asserts `?token=` (blank) → 200 and the holdout draft's empty-token 403 expectation was replaced with the 200 form-page assertion (header comments updated in both). |
-+| alt 5 (Low) | Photo test did not assert the exact processed dims; an upscale to 1600×1200 would pass | `TestA206PhotoPipeline` (and holdout Orientation=8 twin) now assert exactly `800×600` for the 600×800 fixtures — matches T-202's table ("portrait-orient6-gps.jpg → output 800×600") and the README fixture table. |
-+| alt 6 (Low) | `images.ts` `jpegSize` lacked the Go twin's truncated-SOF length guard | Guard added (`next < i + 9` after the segment-length check) — now an exact mirror of `alJpegDims`; holdout inline copy likewise. |
-+| alt 7 / reviewer 1 (Low) | `Path=/` frozen but unasserted | Visible Go draft now checks `httponly`, `samesite=lax` AND `path=/` on the `gl_session` Set-Cookie (holdout already did). |
-+| alt 8 (Low, rerun) | @A-209's pre-clean matched only the current RUN's label; a failed previous invocation's seeds could collide (~1/300) | Pre- AND post-clean now sweep the stable `Scroll lamp` prefix (holdout: `Edge lamp`), removing every invocation's seeds; README's "can never fire across runs" claim qualified to match (within-run collisions remain deterministic impossibilities; cross-run leftovers are swept). |
-+| alt 9 (Low) | `>Lights<` byte check would fail `<h1>\n  Lights\n</h1>` | `alReHeading`/`hlReHeading` = `<h1[^>]*>\s*Lights\s*</h1>` (whitespace-tolerant, matching the e2e's exact-name role lookup). |
-+| reviewer 3 (Low) | token-exchange robustness leans on `workers: 1` | Already true by design; noted for T-207 in the README's rerun-safety section context and here: the protected `playwright.config.ts` pins `workers: 1`/`fullyParallel: false`, and `admin.ts` serialises the exchange via `inFlight` within the single worker process. |
-+| reviewer 2 (Low) | strict-mode single-match on `role=status`/`alert` | Left as frozen: the contract designates exactly one of each; adding `.first()` would WEAKEN the oracle. |
++| alt 1 (Low) | `path=/` substring also accepts `Path=/admin`; Max-Age never asserted | auth drafts parse the Set-Cookie attributes into a map and compare EXACTLY: `path == "/"`, `max-age == "86400"` (T-203.md:62-64 freezes Path=/ + MaxAge 24 h), `samesite == lax`, `httponly` flag present. `Secure` is deliberately NOT asserted (frozen prod-only; server runs APP_ENV=test) — stated in code and README |
++| alt 2 (Low) | blank-token 200 is status-only | the four frozen markup regexes re-run on the blank-token body (heading/label+input/button) |
++| alt 2b (Low) | `#walk-pos` frozen at 6 dp, asserted loose | both `#walk-pos` assertions (openWalkForm + test 1) now `\d+\.\d{6}, -?\d+\.\d{6}` (T-205.md:89 freezes "lat, lon" 6 dp) |
++| alt 3 (Low) | preview could be a static landscape placeholder | the preview's rendered source must APPEAR/CHANGE when the file is picked (before/after `src` capture; skips cleanly when `#photo-preview` does not exist pre-pick). Chosen over freezing `naturalWidth === 800` because the README explicitly allows a processed preview of any size — exact dims stay asserted on the SERVED bytes (Go, exactly 800×600) where T-202 freezes them |
++| alt 4 (Low, flake) | @A-208 clicks Delete then immediately `goto`s | `waitForURL(/\/admin$/)` (the frozen 303 target) before leaving the page |
++| alt 5 (Low) | "unspecified fields keep values" proved only asset+position | Go edit fixtures now create WITH a photo (`landscape.jpg`) and assert the SAME `src="/photos/..."` survives the field-omitting edit (holdout: survives the kind-only edit) |
++| alt 6 (Low) | merge proved one row, not the merge | after `dup_choice=merge` the survivor's thumbnail alt must carry the TWIN's label and no longer the original's (closing-quote-anchored strings, so `…lamp twin` cannot satisfy `…lamp"`); e2e adds `img[alt="<asset> <twin label>"]` count 1. T-205.md:67-68 freezes "apply photo/label onto ExistingID" |
++| alt 7 (Low) | low-acc never attempts a save while gated | `Add light here` must carry the platform `disabled` ATTRIBUTE (`toHaveAttribute('disabled')`), which suppresses activation entirely — an aria-disabled look or CSS class (click path still live) now fails. Not a force-click probe: the README freezes the walk form as server-rendered, so "form absent" cannot be asserted; the attribute IS the frozen gate ("disabled", T-205.md:91-92) |
++| reviewer 1 #9 (Info) | HTTP table lacks `GET /admin?page=N` | table row added (the cleanup sweeps rely on it) |
 +
 +## Files changed this attempt
 +
-+Main repo (commit `c577684`): `acceptance/drafts/admin-walk.spec.ts.txt`,
++Main repo: `acceptance/drafts/README.md`,
++`acceptance/drafts/admin-walk.spec.ts.txt`,
 +`acceptance/drafts/admin_auth_go_test.go.txt`,
 +`acceptance/drafts/admin_lights_go_test.go.txt`,
-+`acceptance/drafts/README.md`, `acceptance/e2e/util/images.ts`,
-+`harness/protected.sha256` (exactly the 5 changed protected files re-hashed
-+by `make protect`; all other entries byte-identical; ratchet `go=51 pw=32`
-+unchanged — drafts still inert).
-+
-+Holdout repo (commit `f523f06`): `drafts/admin-walk-holdout.spec.ts.txt`,
-+`drafts/admin_auth_holdout_go_test.go.txt`,
-+`drafts/admin_lights_holdout_go_test.go.txt`, `drafts/README.md`.
-+
-+Unchanged from attempt 3 (verified again this attempt):
-+`testdata/photos/*` + generator, `testdata/schema.expected.sql`,
-+`acceptance/e2e/util/admin.ts`, holdout photo fixtures.
++`harness/protected.sha256` (exactly those 4 re-hashed; all other entries
++byte-identical; ratchet `go=51 pw=32` unchanged — drafts still inert).
++Holdout repo (`2dd3354`): the four `drafts/` files mirrored.
++Unchanged: `testdata/photos/*` + generator, `testdata/schema.expected.sql`,
++`acceptance/e2e/util/{admin,images}.ts` (utils untouched this attempt).
 +
 +## Would-fail reasoning — EXECUTED against current main (final bytes)
 +
 +Staged copies under gitignored `testdata/rendered/t200-verify/` (renamed
-+exactly as T-207 will; refreshed from the final drafts BEFORE each run):
++exactly as T-207 will; refreshed from the edited drafts before each run):
 +
 +- **Go drafts (visible)**: `go test -tags acceptance -count=1 -run TestA20
 +  ./testdata/rendered/t200-verify/ -v` → exit 1, **7/7 FAIL** —
@@ -2710,132 +2809,129 @@ index 0000000..f3b5954
 +  routes exist on main.
 +- **Go drafts (holdout)**: `go test -tags acceptance -count=1 -run
 +  TestHoldoutA20 ./testdata/rendered/t200-verify/holdout/ -v` → exit 1,
-+  **7/7 FAIL** at the same frozen first assertions (auth at
-+  `GET /admin/login: status 404, want 200`).
++  **7/7 FAIL** at the same frozen first assertions.
 +- **e2e draft (visible)**: `npx playwright test --config
 +  testdata/rendered/t200-verify/playwright.config.ts --project
-+  desktop-chromium` → exit 1, **11/11 FAIL**: ten admin tests at
++  desktop-chromium` (fresh scratch DB) → exit 1, **11/11 FAIL**: ten at
 +  `loginAsAdmin: token exchange failed (status 404)`; `@A-201
 +  unauthenticated` at `toHaveURL(/\/admin\/login$/)` (URL stays `/admin`).
-+  Run twice — before and after the `openWalkForm` refactor — same 11/11.
-+- **e2e draft (holdout)**: strict-tsc verified (below); same structure and
-+  first assertions as the visible draft whose red run is above; its Go
-+  siblings proved red. `make holdout` loads only the ACTIVE holdout suites
-+  (8/8 green, `holdout: PASS`) — the drafts stay inert by extension there
-+  too (the runner reads `go/*_test.go` and `e2e/*.spec.ts`, never `drafts/`).
++- **e2e draft (holdout)**: strict-tsc verified; same structure and first
++  assertions as the visible draft; its Go siblings proved red above.
 +
-+## Would-fail reasoning — SATISFIABILITY against a compliant M2 build
++## Would-fail reasoning — SATISFIABILITY of the new assertions (compliant build)
 +
-+Deltas introduced this attempt, walked against the frozen contracts:
++- **Exact cookie attrs**: T-203.md:62-64 freezes `Path=/`, `HttpOnly`,
++  `SameSite=Lax`, MaxAge 24 h — a Go `http.Cookie` renders
++  `Max-Age=86400`. Attribute order is irrelevant (parsed map). `Secure`
++  unasserted because it is frozen conditional on `IsProd()` and the drafts
++  spawn `APP_ENV=test`.
++- **Blank-token markup**: T-203.md:53-56 freezes the same form for
++  no/blank token.
++- **6 dp `#walk-pos`**: T-205.md:89 freezes exactly that rendering.
++- **`disabled` attribute**: T-205.md:91-92 freezes "Add light here
++  disabled"; for a native button that is the attribute. Alpine `:disabled`
++  and `setAttribute` both produce it; an aria-disabled-only implementation
++  is non-compliant (first rule of ARIA: prefer the native attribute).
++- **Merge-label proof**: grounded in T-205.md:67-68 ("apply photo/label
++  onto ExistingID") + the frozen alt format `<asset_no> <label>`; the
++  closing-quote anchoring makes the two checks independent.
++- **Photo-preserving edit**: README freezes "unspecified fields keep
++  values"; the detail's `src="/photos/..."` is frozen, so same-URL before
++  vs after is observable without new markup.
++- **Preview src change**: no size or URL-scheme is demanded — any compliant
++  mechanism (object URL, data URL, processed thumbnail) changes or first
++  produces the rendered source on pick; only a static placeholder fails.
++- **Delete wait**: the frozen delete flow 303s to `/admin`; waiting for
++  that URL is exactly the contract.
++- **`GET /admin?page=N` row**: documents what T-205 already implements
++  (`GET /admin` → query `page`); no new behaviour.
 +
-+- **openWalkForm waits**: pure test-side sequencing; they consume already-
-+  frozen UI state (`#walk-pos`/`#walk-accuracy` text). A compliant walk page
-+  satisfies them by definition of A-202. The fresh-page-after-setGeolocation
-+  pattern makes the waited-for fix the newest mocked position, so the ~4.4 m
-+  unnumbered-duplicate geometry in @A-205 is deterministic.
-+- **Blank token → 200**: T-203.md:53 freezes `GET /admin/login`
-+  (no/blank token) → 200 form page — now asserted consistently everywhere.
-+- **Exact 800×600**: T-202.md:83's own table freeze
-+  ("portrait-orient6-gps.jpg → output 800×600"); no compliant pipeline may
-+  upscale (long-edge cap only downsizes).
-+- **`Path=/`**: T-203.md:62-64 specifies it on the Set-Cookie.
-+- **Stable-prefix pagination sweep**: soft delete (frozen 303 route) frees
-+  rows regardless of which invocation created them; sweeping by prefix only
-+  widens the already-frozen label-based cleanup.
-+- **Heading regex / SOF guard**: strictly more tolerant parsing of frozen
-+  output; no new producer requirement.
-+
-+The attempt-3 satisfiability walk (shared-DB rerun safety, one-time token
-+economy via `loginAsAdmin` memo + gitignored `test-run.db.session.json`
-+bridging `make check`'s e2e→a11y invocations, per-test asset numbers,
-+jittered coordinates + fixed pagination lanes, `maxRedirects: 0`, href
-+dedupe, merge/save-anyway flows, keyboard pin, intrinsic preview dims)
-+carries over unchanged — see `git show c5b82d7:harness/handoffs/T-200.md`.
++The attempt-3/4 satisfiability walk (shared-DB rerun safety, token
++economy, per-test assets, jittered coordinates + fixed pagination lanes,
++`maxRedirects: 0`, href dedupe, merge/save-anyway flows, keyboard pin,
++intrinsic preview dims) carries over unchanged — see
++`git show 4593974:harness/handoffs/T-200.md`.
 +
 +## How verified (commands run this attempt, exit codes)
 +
 +| Command | Exit | Result |
 +|---|---|---|
 +| `go build -o bin/server ./cmd/server` | 0 | — |
-+| `go run testdata/rendered/t200-verify/copy.go go\|holdout\|ts\|hts` | 0 | staged copies refreshed from the FINAL drafts (re-run after the openWalkForm refactor) |
++| `go run ./testdata/photos/gen` | 0 | 7 fixtures rewritten + self-verified; every sha256 identical to the README table (byte-identical regeneration, no drift) |
++| `go run testdata/rendered/t200-verify/copy.go go\|holdout\|ts\|hts` | 0 | staged copies refreshed from the EDITED drafts |
 +| `gofmt -l testdata/rendered/t200-verify/` | 0 | empty — all four Go drafts gofmt-clean |
 +| `go vet -tags acceptance ./testdata/rendered/t200-verify/ ./…/holdout/` | 0 | all four Go drafts compile |
-+| `npx tsc --noEmit -p …/tsconfig.json` (visible; re-run after refactor) | 0 | strict-tsc clean |
++| `npx tsc --noEmit -p …/tsconfig.json` (visible) | 0 | strict-tsc clean |
 +| `npx tsc --noEmit -p …/tsconfig.holdout.json` (holdout) | 0 | strict-tsc clean |
 +| `go test -tags acceptance -count=1 -run TestA20 ./testdata/rendered/t200-verify/ -v` | 1 | 7/7 FAIL (red at the frozen first assertions) |
 +| `go test -tags acceptance -count=1 -run TestHoldoutA20 ./…/holdout/ -v` | 1 | 7/7 FAIL (red) |
-+| `npx playwright test --config …/t200-verify/playwright.config.ts --project desktop-chromium` (×2: pre- and post-refactor) | 1 | 11/11 FAIL (red at login/toHaveURL) |
++| `npx playwright test --config …/t200-verify/playwright.config.ts --project desktop-chromium` | 1 | 11/11 FAIL (red at login/toHaveURL; fresh scratch DB) |
 +| `make check-fast` | 0 | fmt/vet/lint `0 issues`; unit `-race -shuffle=on` ok |
-+| `make test-acceptance-go` | 0 | `ok acceptance/go 0.997s` |
++| `make test-acceptance-go` | 0 | `ok acceptance/go 0.980s` |
 +| `npx playwright test` | 0 | 32/32 passed, all four projects (ratchet pw=32 holds) |
 +| `make a11y` | 0 | 8/8 passed (second Playwright invocation of `make check`) |
 +| `make js-check` | 0 | repo tsc accepts the ACTIVE utils |
-+| `make holdout` | 0 | active holdout go ok + e2e 8/8 → `holdout: PASS` |
-+| `go run ./testdata/photos/gen` | 0 | 7 fixtures rewritten + self-verified; all sha256 identical to the README table (byte-identical regeneration, no drift) |
-+| `make protect` (final, after the last draft edit) | 0 | manifest regenerated: exactly the 5 changed protected files re-hashed; ratchet `go=51 pw=32` unchanged |
-+| `git commit` (main; lefthook gitleaks + conventional) | 0 | `c577684` |
-+| `git commit` (holdout repo) | 0 | `f523f06` |
++| `make holdout` | 0 | active holdout go ok + e2e 8/8 → `holdout: PASS` (drafts inert by extension: the runner reads `go/*_test.go` and `e2e/*.spec.ts`, never `drafts/`) |
++| `make protect` | 0 | manifest regenerated: exactly the 4 changed protected files re-hashed; ratchet `go=51 pw=32` unchanged |
++| `git commit` (holdout repo) | 0 | `2dd3354` |
 +
 +## Notes / open issues
 +
 +1. **For the planner to ratify** (frozen in `acceptance/drafts/README.md`,
-+   no action needed to merge; all reconcile T-200's packet wording with the
-+   worker packets without contradicting them): the three attempt-1
-+   reconciliations (create-success 303 `/admin` + list-based detail
-+   discovery; numbered panel = `Merge` + cancel with `Save anyway`
-+   unnumbered-only and numbered+save → 422; kind park|building), the two
-+   attempt-3 amendments (cancel link named **`Cancel`**; thumbnail alt
-+   format `<asset_no> <label>`), and this attempt's **reconciliation 4**
-+   (client-side bbox alert on the walk page mirroring the frozen server
-+   message). Six items total.
-+2. **Operational note for T-207**: `make check`'s e2e→a11y sequence requires
-+   a writable repo root next to `test-run.db` (the gitignored session cache
-+   bridges the two invocations; a failed write is surfaced on stderr by
-+   `admin.ts`). If `test-run.db` outlives the 24 h session TTL with the
-+   token consumed: `rm -f test-run.db*`. The token exchange also relies on
-+   the protected config's `workers: 1` / `fullyParallel: false`.
-+3. **Environment artifact (predates this task)**: `git status` shows
++   no action needed to merge): the three attempt-1 reconciliations
++   (create-success 303 `/admin` + list-based detail discovery; numbered
++   panel = `Merge` + `Cancel` with `Save anyway` unnumbered-only and
++   numbered+save → 422; kind park|building), the attempt-3 amendments
++   (cancel link named `Cancel`; thumbnail alt `<asset_no> <label>`), and
++   reconciliation 4 (client-side bbox alert on the walk page mirroring
++   the frozen server message). Six items total.
++2. **Operational note for T-207**: `make check`'s e2e→a11y sequence needs a
++   writable repo root next to `test-run.db` (the gitignored session cache
++   bridges the two invocations; a failed write is surfaced on stderr). If
++   `test-run.db` outlives the 24 h session TTL with the token consumed:
++   `rm -f test-run.db*`. The token exchange relies on the protected
++   config's `workers: 1` / `fullyParallel: false`.
++3. **Known residual (accepted by the PASS reviews, unchanged)**: ~1e-4
++   cross-run jitter-collision window for offset unnumbered creates in
++   @A-203 (rerun-safe by construction); `harness/tasks/graph.json`'s
++   T-200 `merging` flip is the scheduler's; A-207 has no e2e coverage
++   (packet-conformant — the Deliverable-4 test list has no @A-207 entry).
++4. **Environment artifact (predates this task)**: `git status` shows
 +   `?? node_modules` — the worktree's `node_modules` is a symlink and
 +   `.gitignore`'s `node_modules/` pattern only matches real directories
 +   (`.gitignore` is protected; outside my ownership). Flagged for the
 +   operator; never committed.
-+4. Scratch staging `testdata/rendered/t200-verify/` (gitignored, never
-+   committed) holds the renamed draft copies, the copy tool, tsconfigs and
-+   the scratch Playwright config + scratch-run DBs. Deletable at any time.
-+5. `scripts/holdout-run.sh` passes no fixture env and is outside my owns —
-+   the holdout repo carries byte-identical fixture copies (verified again:
-+   this attempt's `go run ./testdata/photos/gen` hashes equal the committed
-+   bytes in both repos).
++5. Scratch staging `testdata/rendered/t200-verify/` (gitignored, never
++   committed) holds the renamed draft copies, the copy tool, tsconfigs,
++   the scratch Playwright config (now on `scratch-run2.db`, also
++   gitignored) and scratch-run artifacts. Deletable at any time.
 +6. Ratchet nuance (pre-existing, unchanged): `countGoTests` runs without
 +   `-tags acceptance`, so activated Go drafts won't raise the Go count at
 +   T-207; the manifest remains their protection.
 +7. The human field test (five real fixtures in one park) stays pending
 +   human evidence for the judge — listed by T-207, not this task.
-+8. Task-graph status: T-200 sits at `merging` (scheduler moved it after the
-+   attempt-3 PASS reviews); branch `task/T-200` HEAD is `c577684`, worktree
-+   clean apart from note 3's symlink artifact.
 diff --git a/harness/protected.sha256 b/harness/protected.sha256
-index 7fea561..b31b6c1 100644
+index 7fea561..e5cabad 100644
 --- a/harness/protected.sha256
 +++ b/harness/protected.sha256
 @@ -1,9 +1,15 @@
  10bddb6ac8239aca9f94db1b93670311883d138a918995af32da839f60007a2c  acceptance/e2e/home_m1.spec.ts
-+11de75746cc3071aa8db5829aa7a5165c22ecd36570d8a38bbf80b1d24e18ad3  acceptance/drafts/README.md
-+1252f8c34031de275b7c330e7768102e28695418efa2167e04ca1e8bc63e2837  acceptance/drafts/admin_lights_go_test.go.txt
-+12fa861f2d339b66c5796227a079c70a6b1096fabff9754e6f1a33e12c38c39c  acceptance/drafts/admin_auth_go_test.go.txt
++1c7bd11fbca6daa15b19e1208cd56bd95d2de7ab4118dbfc5265ccccbed30da0  acceptance/drafts/admin_lights_go_test.go.txt
  23f54a380630ccb77dbe3f7dbcb2a50b292a36fc333ce8827f1dbcd7e42ffa0a  acceptance/go/healthz_test.go
  263c15db570708ff5484b6ebcdc57aea3d3c73c779798559d3c61804dd201619  acceptance/contract.json
  2f4dc12c823479c5e7cb949c332b19339150b57119e11eb02a343bfd1f30ef3a  acceptance/go/migrations_test.go
++33375de65a154e9684a1b495807867d605807874fda4e6e0fcdaabeef3acc28b  acceptance/drafts/admin-walk.spec.ts.txt
  34df7d4412223e3b84d714b6e5c19de06b4d700974943f04040246d20152e3c9  acceptance/go/probe_test.go
++4417cbbf433452cf3b4da03bb0c4c96d58ce32f91c17bff227975d421f88a34b  acceptance/drafts/README.md
 +44b714f767d8abdf2b62b6c923d302730a021d3061dba3c2dc6735e1e41fcdfa  acceptance/e2e/util/images.ts
  4ec1052d3e59879ff303cc039cd617d4942f69662da73dbb3f2257db09062917  acceptance/e2e/probe.spec.ts
  55526dd9e0f4c1ae60585befc5a714c263a219a98bd9a620a6eafac398d956f3  acceptance/e2e/util/console.ts
  64f39347ee34ac5e6dc284df6c5fe6881f9f7b8ed6b0139ea3d2b7e29ba22f59  acceptance/e2e/home.spec.ts
-+c616f927db64bb21104580c019058f33ee7ce16bacea9e62dfce07d6ad6b0797  acceptance/drafts/admin-walk.spec.ts.txt
++6a4817841d796532c863530cbcce080b4a5d0002dbb818e13bc38c324ade1f13  acceptance/drafts/admin_auth_go_test.go.txt
 +c6a63fbb3eeb86d860262647256c5a97e18566029f2741dca34cb6b5e6149bf4  acceptance/e2e/util/admin.ts
  dadce9e29376ebe41e7422bc509f08b96736749259a67a186606a307a356dd91  acceptance/go/m1_guards_test.go
 diff --git a/harness/tasks/graph.json b/harness/tasks/graph.json
-index c7f80c9..a0ed3f4 100644
+index 7a450ec..c918130 100644
 --- a/harness/tasks/graph.json
 +++ b/harness/tasks/graph.json
 @@ -272,7 +272,7 @@
@@ -2844,9 +2940,9 @@ index c7f80c9..a0ed3f4 100644
        "allow_deps": [],
 -      "status": "review",
 +      "status": "merging",
-       "attempts": 2,
+       "attempts": 3,
+       "model": "glm",
        "budget": {
-         "steps": 200,
 diff --git a/testdata/photos/gen/main.go b/testdata/photos/gen/main.go
 new file mode 100644
 index 0000000..257040e
