@@ -139,7 +139,7 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "rework",
+      "status": "running",
       "attempts": 3,
       "model": "glm",
       "budget": {
