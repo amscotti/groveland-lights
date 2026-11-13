@@ -17,11 +17,14 @@
 // EXACTLY; full table in acceptance/drafts/README.md):
 //
 //	POST /admin/lights            multipart: csrf_token, label, kind
-//	                              (park|building|street), lat, lon,
-//	                              asset_no?, photo?, dup_choice?
-//	                              -> 303 Location: /admin/lights/{id} (no-JS)
+//	                              (park|building), lat, lon, asset_no?,
+//	                              photo?, dup_choice? (""|merge|save)
+//	                              -> 303 Location: /admin (no HX-Request);
+//	                                 HX-Request answers a fragment with
+//	                                 role=status "Saved"
 //	                              -> 409 body contains "Possible duplicate"
 //	                                 (dup panel) when dup_choice is absent
+//	                                 (numbered + dup_choice=save -> 422)
 //	                              -> 422 body contains
 //	                                 "outside Groveland town bounds"
 //	                              -> 413 over the 15 MB upload cap
@@ -29,8 +32,9 @@
 //	                                 "please choose JPEG") / >40 MP bomb
 //	GET  /admin/lights/{id}       detail page; 404 once soft-deleted; the
 //	                              photo appears as src="/photos/..."
-//	POST /admin/lights/{id}       edit (multipart: csrf_token + label...),
-//	                              303 back to the detail page
+//	POST /admin/lights/{id}       edit (multipart: csrf_token + label...;
+//	                              unspecified fields keep values), 303 back
+//	                              to the detail page
 //	POST /admin/lights/{id}/delete  soft delete (multipart: csrf_token), 303
 //	                              to /admin
 //	GET  /admin                   list page: heading "Lights", the 50 most
@@ -41,6 +45,9 @@
 //	                              must 303 to /admin?page=N
 //	GET  /photos/...              served, re-encoded photos: image/jpeg,
 //	                              long edge <= 1600, no APP1 segment
+//
+// A new light's detail URL is discovered from the /admin list rows (the
+// label links to /admin/lights/{id}) — never from a Location header.
 package acceptance
 
 import (
@@ -83,6 +90,28 @@ func alAltRe(label string) *regexp.Regexp {
 // the frozen alt format is "<asset_no> <label>".
 func alAltAssetRe(assetNo string) *regexp.Regexp {
 	return regexp.MustCompile(`alt="` + regexp.QuoteMeta(assetNo) + ` `)
+}
+
+// alReDetail matches the list rows' detail links together with their inner
+// markup (frozen: the label links to /admin/lights/{id}).
+var alReDetail = regexp.MustCompile(`(?s)<a\b[^>]*href="(/admin/lights/\d+)"[^>]*>(.*?)</a>`)
+
+// alDetailURL finds the detail href of the one light whose row link mentions
+// label, via the /admin list. Each test creates uniquely-labelled lights on a
+// fresh server, so exactly one match is expected.
+func alDetailURL(t *testing.T, c *http.Client, base, label string) string {
+	t.Helper()
+	list := alGet(t, c, base+"/admin")
+	var found []string
+	for _, m := range alReDetail.FindAllStringSubmatch(list, -1) {
+		if strings.Contains(m[2], label) {
+			found = append(found, m[1])
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("list rows linking %q: found %v, want exactly one;\n%s", label, found, list)
+	}
+	return found[0]
 }
 
 // TestA204OutsideBBox: a create whose coordinates fall outside TOWN_BBOX is
@@ -136,6 +165,19 @@ func TestA205Duplicates(t *testing.T) {
 	if !strings.Contains(body, "Possible duplicate") {
 		t.Errorf("duplicate asset_no: body lacks the frozen panel heading; body:\n%s", body)
 	}
+	// Nothing is saved while the panel is up.
+	if list := alGet(t, c, s.baseURL+"/admin"); strings.Contains(list, "Ball field lamp twin") {
+		t.Errorf("list shows the twin label before any dup_choice; body:\n%s", list)
+	}
+
+	// dup_choice=save is unnumbered-only: on a numbered duplicate it is 422.
+	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
+		"csrf_token": csrf, "asset_no": "GP-017", "label": "Ball field lamp twin",
+		"kind": "park", "lat": "42.76175", "lon": "-71.03035", "dup_choice": "save",
+	}, "", nil)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("numbered duplicate + dup_choice=save: status %d, want 422; body:\n%s", status, body)
+	}
 
 	// Explicit merge -> success and still exactly one GP-017 row.
 	status, _, body = alCreate(t, c, s.baseURL, map[string]string{
@@ -169,6 +211,10 @@ func TestA205Duplicates(t *testing.T) {
 	}
 	if !strings.Contains(body, "Possible duplicate") {
 		t.Errorf("unnumbered within 8 m: body lacks the frozen panel heading; body:\n%s", body)
+	}
+	// Again nothing is saved before the explicit choice.
+	if list := alGet(t, c, s.baseURL+"/admin"); strings.Contains(list, "Path light two") {
+		t.Errorf("list shows the second unnumbered light before any dup_choice; body:\n%s", list)
 	}
 
 	// Explicit save-anyway -> success, two distinct lights exist.
@@ -206,10 +252,10 @@ func TestA206PhotoPipeline(t *testing.T) {
 	if status != http.StatusSeeOther {
 		t.Fatalf("create with photo: status %d, want 303; body:\n%s", status, body)
 	}
-	detailURL := header.Get("Location")
-	if !strings.HasPrefix(detailURL, "/admin/lights/") {
-		t.Fatalf("create with photo: Location = %q, want /admin/lights/{id}", detailURL)
+	if loc := header.Get("Location"); loc != "/admin" {
+		t.Fatalf("create with photo: Location = %q, want /admin (detail discovered via the list)", loc)
 	}
+	detailURL := alDetailURL(t, c, s.baseURL, "Photo pipeline lamp")
 
 	// The detail page points at the stored photo via /photos/...
 	detail := alGet(t, c, s.baseURL+detailURL)
@@ -353,25 +399,40 @@ func TestA208EditSoftDelete(t *testing.T) {
 	if status != http.StatusSeeOther {
 		t.Fatalf("create GP-018: status %d, want 303; body:\n%s", status, body)
 	}
-	detailURL := header.Get("Location")
+	detailURL := alDetailURL(t, c, s.baseURL, "Old label")
 
-	// Edit: relabel; the detail page shows the new label.
-	status, _, body = alPostMultipart(t, c, s.baseURL+detailURL, map[string]string{
+	// Edit: relabel; the detail page shows the new label, redirects back to
+	// itself, and fields NOT sent keep their values (asset number and
+	// position survive a label-only edit).
+	status, header, body = alPostMultipart(t, c, s.baseURL+detailURL, map[string]string{
 		"csrf_token": csrf, "label": "New label",
 	}, "", "", nil, false)
 	if status != http.StatusSeeOther {
 		t.Fatalf("edit label: status %d, want 303; body:\n%s", status, body)
 	}
-	if detail := alGet(t, c, s.baseURL+detailURL); !strings.Contains(detail, "New label") {
+	if loc := header.Get("Location"); loc != detailURL {
+		t.Fatalf("edit label: Location = %q, want the detail page %q", loc, detailURL)
+	}
+	detail := alGet(t, c, s.baseURL+detailURL)
+	if !strings.Contains(detail, "New label") {
 		t.Errorf("detail page after edit lacks \"New label\"; body:\n%s", detail)
+	}
+	if !strings.Contains(detail, "GP-018") {
+		t.Errorf("detail page after label-only edit lost the asset number; body:\n%s", detail)
+	}
+	if !strings.Contains(detail, "42.7620") || !strings.Contains(detail, "-71.0290") {
+		t.Errorf("detail page after label-only edit lost the position; body:\n%s", detail)
 	}
 
 	// Soft delete: detail 404s, list no longer mentions the light.
-	status, _, body = alPostMultipart(t, c, s.baseURL+detailURL+"/delete", map[string]string{
+	status, header, body = alPostMultipart(t, c, s.baseURL+detailURL+"/delete", map[string]string{
 		"csrf_token": csrf,
 	}, "", "", nil, false)
 	if status != http.StatusSeeOther {
 		t.Fatalf("delete: status %d, want 303; body:\n%s", status, body)
+	}
+	if loc := header.Get("Location"); loc != "/admin" {
+		t.Fatalf("delete: Location = %q, want /admin", loc)
 	}
 	if status, _, _ := alDo(t, c, http.MethodGet, s.baseURL+detailURL, nil, false); status != http.StatusNotFound {
 		t.Errorf("detail after delete: status %d, want 404", status)

@@ -105,12 +105,12 @@ func gradientImage(w, h int) *image.RGBA {
 }
 
 // encodeJPEG encodes img at a fixed quality; the encoder is deterministic.
-func encodeJPEG(img image.Image) []byte {
+func encodeJPEG(img image.Image) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
-		panic("fixture build: jpeg encode: " + err.Error())
+		return nil, fmt.Errorf("jpeg encode: %w", err)
 	}
-	return buf.Bytes()
+	return buf.Bytes(), nil
 }
 
 // withExifAPP1 returns jpegBytes with one EXIF APP1 segment inserted directly
@@ -211,14 +211,14 @@ func writeChunk(buf *bytes.Buffer, typ string, data []byte) {
 }
 
 // tinyPNG is an ordinary 1x1 RGBA PNG.
-func tinyPNG() []byte {
+func tinyPNG() ([]byte, error) {
 	var buf bytes.Buffer
 	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
 	img.SetRGBA(0, 0, color.RGBA{R: 0x7F, G: 0xB2, B: 0x33, A: 0xFF})
 	if err := png.Encode(&buf, img); err != nil {
-		panic("fixture build: png encode: " + err.Error())
+		return nil, fmt.Errorf("png encode: %w", err)
 	}
-	return buf.Bytes()
+	return buf.Bytes(), nil
 }
 
 // heicSniff carries an ISO-BMFF ftyp box with the brand "heic" at offset 8
@@ -236,14 +236,24 @@ func heicSniff() []byte {
 // --- writers ---
 
 func writeFixtures(outDir string) (int, error) {
-	portrait := encodeJPEG(gradientImage(portraitW, portraitH))
-	landscape := encodeJPEG(gradientImage(landscapeW, landscapeH))
+	portrait, err := encodeJPEG(gradientImage(portraitW, portraitH))
+	if err != nil {
+		return 0, err
+	}
+	landscape, err := encodeJPEG(gradientImage(landscapeW, landscapeH))
+	if err != nil {
+		return 0, err
+	}
+	tiny, err := tinyPNG()
+	if err != nil {
+		return 0, err
+	}
 	textAs := []byte("This is not a JPEG. It is plain text wearing a .jpg name, so the\nserver must reject it on sniffing (A-207).\n")
 	files := map[string][]byte{
 		"portrait-orient6-gps.jpg": withExifAPP1(portrait, 6),
 		"portrait-orient8-gps.jpg": withExifAPP1(portrait, 8),
 		"landscape.jpg":            landscape,
-		"tiny.png":                 tinyPNG(),
+		"tiny.png":                 tiny,
 		"pixelbomb.png":            buildPixelBombPNG(),
 		"text-as.jpg":              textAs,
 		"heic.bin":                 heicSniff(),

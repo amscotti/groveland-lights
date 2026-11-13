@@ -12,7 +12,30 @@
 // The frozen UI contract (element names, exact button/label strings, routes,
 // response codes) lives in acceptance/drafts/README.md — workers build to
 // that table EXACTLY. Two ACTIVE utils are imported: ./util/admin.js
-// (loginAsAdmin) and ./util/images.js (hasExifGps, jpegSize).
+// (loginAsAdmin — exchanges the ONE-TIME admin token at most once per
+// test-run.db lifetime and reuses the 24 h session cookie; see the util's
+// header for why a per-test token visit can never work) and
+// ./util/images.js (hasExifGps, jpegSize).
+//
+// RERUN SAFETY (frozen; T-207 must not need to touch this): one webServer
+// with a persistent ./test-run.db serves ALL tests on ALL four projects, and
+// `make check` runs a second Playwright invocation (a11y) against the same
+// DB. The drafts therefore never rely on a fixed database state:
+//
+//   - every created light carries an asset number unique per run AND per
+//     project (`GP-017-<run>-<proj>`; the packet's GP-017/GP-018 prefixes
+//     are kept so `img[alt^="GP-017"]` still matches, and the value still
+//     satisfies the frozen `^[A-Za-z0-9-]{1,32}$` asset_no rule);
+//   - every UNNUMBERED create (the 8 m duplicate radius makes coordinates a
+//     de-facto key) uses coordinates jittered deterministically per run and
+//     per test, always inside TOWN_BBOX;
+//   - each test first deletes any same-labelled leftovers (soft delete
+//     frees both the asset number and the coordinates for the partial
+//     unique index / duplicate checks) and deletes what it created at the
+//     end, so a passing suite leaves an empty list behind;
+//   - POSTs via page.request pin `maxRedirects: 0` so the frozen 303s stay
+//     observable (Playwright's API request context follows redirects by
+//     default).
 //
 // Visual notes (what a correct screenshot shows) are inline per test and in
 // full in the README; the mobile projects (pixel-9, iphone-16, iphone-se-320
@@ -20,7 +43,7 @@
 // third, the accuracy text is readable, the photo preview is correctly
 // oriented, and every tap target is at least 44 px tall.
 
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page, type TestInfo } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { loginAsAdmin } from './util/admin.js';
 import { hasExifGps, jpegSize } from './util/images.js';
@@ -30,7 +53,108 @@ test.use({
   permissions: ['geolocation'],
 });
 
-/** Walk the plan's §7 Phase-2 add-light flow with the given fields. */
+// --- rerun-safety primitives (see the header comment) ---
+
+/** Fresh per Playwright invocation; combined with the project code it makes
+ * asset numbers unique across projects and across repeated runs against the
+ * same persistent test-run.db. */
+const RUN = Date.now().toString(36);
+
+function projectCode(testInfo: TestInfo): string {
+  switch (testInfo.project.name) {
+    case 'desktop-chromium':
+      return 'dc';
+    case 'pixel-9':
+      return 'p9';
+    case 'iphone-16':
+      return 'i16';
+    default:
+      return testInfo.project.name.replace(/[^a-z0-9]/gi, '').slice(0, 4).toLowerCase() || 'x';
+  }
+}
+
+/** `GP-017-<run>-<proj>`: packet prefix preserved, value globally unique,
+ * within the frozen 32-char [A-Za-z0-9-] asset_no budget. */
+function uniqAsset(prefix: string, testInfo: TestInfo): string {
+  return `${prefix}-${RUN}-${projectCode(testInfo)}`;
+}
+
+/** Deterministic per-(run, key) coordinates inside TOWN_BBOX with a wide
+ * margin: lat 42.7200..42.7500, lon -71.0800..-71.0500. Distinct keys land
+ * (for practical purposes) never within the 8 m unnumbered-duplicate radius
+ * of each other, so unnumbered creates cannot collide across tests, projects
+ * or runs. */
+function jittered(key: string): { lat: number; lon: number } {
+  let h = 2166136261;
+  for (const ch of `${RUN}|${key}`) {
+    h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+  }
+  return {
+    lat: 42.72 + (h % 300) * 0.0001,
+    lon: -71.08 + ((h >>> 9) % 300) * 0.0001,
+  };
+}
+
+/** The add-light form's CSRF token (double-submit: the matching cookie lands
+ * in the shared context jar with this request). */
+async function csrfToken(page: Page): Promise<string> {
+  const res = await page.request.get('/admin/walk');
+  expect(res.status(), 'GET /admin/walk while fetching csrf_token').toBe(200);
+  const html = await res.text();
+  const input = html.match(/<input[^>]*name="csrf_token"[^>]*>/)?.[0];
+  const value = input?.match(/value="([^"]*)"/)?.[1];
+  expect(value, 'csrf_token parsed from the walk page form').toBeTruthy();
+  return value!;
+}
+
+/** Detail hrefs of every listed light whose row link mentions `label`
+ * (frozen: the row link's accessible name contains the label). */
+async function lightHrefsByLabel(page: Page, label: string): Promise<string[]> {
+  const hrefs: string[] = [];
+  for (const target of ['/admin', '/admin?page=2']) {
+    const res = await page.request.get(target);
+    expect(res.status(), `GET ${target}`).toBe(200);
+    for (const m of (await res.text()).matchAll(
+      /<a\b[^>]*href="(\/admin\/lights\/\d+)"[^>]*>([\s\S]*?)<\/a>/g,
+    )) {
+      if (m[2].includes(label)) {
+        hrefs.push(m[1]);
+      }
+    }
+  }
+  return hrefs;
+}
+
+/** Soft-delete one light by detail href (frozen: 303). */
+async function deleteLight(page: Page, href: string, csrf: string): Promise<void> {
+  const res = await page.request.post(`${href}/delete`, {
+    multipart: { csrf_token: csrf },
+    maxRedirects: 0,
+  });
+  expect(res.status(), `POST ${href}/delete`).toBe(303);
+}
+
+/** Delete every light whose row mentions `label`, sweeping until none
+ * remain (deleting shifts later pages forward, so page-1 sweeps converge).
+ * Used as pre-clean (stale rows from failed earlier runs / retries) and as
+ * post-clean, keeping the shared DB tidy for the next test and the next
+ * run. */
+async function deleteAllByLabel(page: Page, label: string): Promise<void> {
+  for (let sweep = 0; sweep < 6; sweep++) {
+    const hrefs = await lightHrefsByLabel(page, label);
+    if (hrefs.length === 0) {
+      return;
+    }
+    const csrf = await csrfToken(page);
+    for (const href of hrefs) {
+      await deleteLight(page, href, csrf);
+    }
+  }
+  throw new Error(`cleanup: lights labelled "${label}" survived 6 delete sweeps`);
+}
+
+/** Walk the plan's §7 walk flow: open the add-light form and fill it (the
+ * caller clicks `Confirm pin`, optionally after inspecting the panel). */
 async function addLightFromForm(
   page: Page,
   opts: { assetNo?: string; label: string; photo?: string },
@@ -41,14 +165,20 @@ async function addLightFromForm(
     await page.getByLabel('Asset number').fill(opts.assetNo);
   }
   await page.getByLabel('Label').fill(opts.label);
+  await page.getByLabel('Kind').selectOption({ label: 'Park' });
   if (opts.photo) {
     await page.getByLabel('Photo').setInputFiles(opts.photo);
   }
-  await page.getByRole('button', { name: 'Confirm pin' }).click();
 }
 
-test('@A-202 @A-203 add a light from current position', async ({ page, context }) => {
+test('@A-202 @A-203 add a light from current position', async (
+  { page, context },
+  testInfo,
+) => {
+  const label = 'Ball field lamp';
   await loginAsAdmin(page);
+  await deleteAllByLabel(page, label); // rerun safety: free the label rows
+
   await page.goto('/admin/walk');
 
   // Live position and accuracy are shown (accuracy 12 m from the context).
@@ -61,13 +191,14 @@ test('@A-202 @A-203 add a light from current position', async ({ page, context }
   await context.setGeolocation({ latitude: 42.76175, longitude: -71.03035, accuracy: 8 });
   await expect(page.locator('#walk-accuracy')).toHaveText(/accuracy 8 m/);
 
-  await page.getByLabel('Asset number').fill('GP-017');
-  await page.getByLabel('Label').fill('Ball field lamp');
-  await page.getByLabel('Kind').selectOption({ label: 'Park' });
+  await page.getByLabel('Asset number').fill(uniqAsset('GP-017', testInfo));
+  await page.getByLabel('Label').fill(label);
   await page.getByLabel('Photo').setInputFiles('testdata/photos/portrait-orient6-gps.jpg');
   await page.getByRole('button', { name: 'Confirm pin' }).click();
 
   await expect(page.getByRole('status')).toContainText('Saved');
+
+  await deleteAllByLabel(page, label);
 });
 
 test('@A-202 low accuracy gates saving behind an explicit save-anyway choice', async ({
@@ -102,17 +233,25 @@ test.describe('walk mode without geolocation permission', () => {
   });
 });
 
-test('@A-203 dragged pin position is what gets saved', async ({ page }) => {
+test('@A-203 dragged pin position is what gets saved', async ({ page, context }, testInfo) => {
+  const label = 'Dragged pin lamp';
   await loginAsAdmin(page);
+  await deleteAllByLabel(page, label); // rerun safety (unnumbered light)
+
+  // Jittered base coordinates: an unnumbered light 8 m from a previous
+  // run's leftover would raise the duplicate panel instead of saving.
+  const base = jittered(`drag-${projectCode(testInfo)}`);
+  await context.setGeolocation({ latitude: base.lat, longitude: base.lon, accuracy: 10 });
   await page.goto('/admin/walk');
 
   const pin = page.locator('#pin');
   await expect(pin).toBeVisible();
   await expect(pin).toHaveAttribute('aria-label', 'position pin');
-  await expect(page.locator('#pin-pos')).toHaveText(/\d+\.\d+, -?\d+\.\d+/);
+  await expect(page.locator('#pin-pos')).toHaveText(/^\d+\.\d{6}, -?\d+\.\d{6}$/);
   const before = (await page.locator('#pin-pos').innerText()).trim();
 
-  // Drag the pin ~80 px and read the new coordinates.
+  // Drag the pin ~80 px; #pin-pos follows (possibly on the next frame, so
+  // the read waits for the change instead of racing it).
   const box = (await pin.boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
@@ -120,23 +259,28 @@ test('@A-203 dragged pin position is what gets saved', async ({ page }) => {
     steps: 8,
   });
   await page.mouse.up();
-
-  const after = (await page.locator('#pin-pos').innerText()).trim();
-  expect(after).not.toBe(before);
-  expect(after).toMatch(/^\d+\.\d+, -?\d+\.\d+$/);
-  const coords = after.match(/^(\d+\.\d+), (-?\d+\.\d+)$/)!;
-  const expected = `${Number(coords[1]).toFixed(6)}, ${Number(coords[2]).toFixed(6)}`;
+  let after = '';
+  await expect
+    .poll(async () => {
+      after = (await page.locator('#pin-pos').innerText()).trim();
+      return after;
+    }, { message: '#pin-pos updates after the drag' })
+    .not.toBe(before);
+  await expect(page.locator('#pin-pos')).toHaveText(/^\d+\.\d{6}, -?\d+\.\d{6}$/);
 
   await page.getByRole('button', { name: 'Add light here', exact: true }).click();
-  await page.getByLabel('Label').fill('Dragged pin lamp');
+  await page.getByLabel('Label').fill(label);
   await page.getByRole('button', { name: 'Confirm pin' }).click();
   await expect(page.getByRole('status')).toContainText('Saved');
 
-  // The admin detail shows exactly the confirmed coordinates, 6 dp.
+  // The admin detail shows exactly the confirmed coordinates — the same
+  // 6 dp string #pin-pos rendered (both are frozen at 6 decimal places).
   await page.goto('/admin');
-  await page.getByRole('link', { name: /Dragged pin lamp/ }).click();
+  await page.getByRole('link', { name: new RegExp(label) }).first().click();
   await expect(page).toHaveURL(/\/admin\/lights\/\d+$/);
-  await expect(page.locator('#light-pos')).toHaveText(expected);
+  await expect(page.locator('#light-pos')).toHaveText(after);
+
+  await deleteAllByLabel(page, label);
 });
 
 test('@A-204 position outside TOWN_BBOX is rejected', async ({ page, context }) => {
@@ -149,15 +293,27 @@ test('@A-204 position outside TOWN_BBOX is rejected', async ({ page, context }) 
   await expect(page.getByRole('alert')).toContainText('outside Groveland town bounds');
 });
 
-test('@A-205 duplicate asset numbers raise the merge panel', async ({ page }) => {
+test('@A-205 duplicate panels: numbered Merge, unnumbered Save anyway', async (
+  { page, context },
+  testInfo,
+) => {
+  const asset = uniqAsset('GP-017', testInfo);
+  const labels = ['Dup panel lamp', 'Dup panel lamp twin', 'Path light one', 'Path light two'];
   await loginAsAdmin(page);
-  await addLightFromForm(page, { assetNo: 'GP-017', label: 'Dup panel lamp' });
+  for (const label of labels) {
+    await deleteAllByLabel(page, label);
+  }
+
+  // Numbered duplicate: the same asset_no posted again raises the panel.
+  // Frozen (T-205): the numbered panel offers `Merge` (+ a cancel link);
+  // `Save anyway` exists only for the unnumbered case (numbered+save is a
+  // 422, asserted by the Go draft).
+  await addLightFromForm(page, { assetNo: asset, label: 'Dup panel lamp' });
   await expect(page.getByRole('status')).toContainText('Saved');
 
-  // A second light with the same asset number nearby hits the panel.
   await page.goto('/admin/walk');
   await page.getByRole('button', { name: 'Add light here', exact: true }).click();
-  await page.getByLabel('Asset number').fill('GP-017');
+  await page.getByLabel('Asset number').fill(asset);
   await page.getByLabel('Label').fill('Dup panel lamp twin');
   await page.getByRole('button', { name: 'Confirm pin' }).click();
 
@@ -165,16 +321,87 @@ test('@A-205 duplicate asset numbers raise the merge panel', async ({ page }) =>
   await expect(panel).toBeVisible();
   await expect(panel.getByRole('heading', { name: 'Possible duplicate' })).toBeVisible();
   await expect(panel.getByRole('button', { name: 'Merge' })).toBeVisible();
-  await expect(panel.getByRole('button', { name: 'Save anyway' })).toBeVisible();
+
+  // Nothing is saved while the panel is up (frozen clause).
+  await page.goto('/admin');
+  await expect(page.locator('img[alt*="Dup panel lamp twin"]')).toHaveCount(0);
+
+  // Choosing Merge collapses the pair into exactly one row.
+  await page.goto('/admin/walk');
+  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await page.getByLabel('Asset number').fill(asset);
+  await page.getByLabel('Label').fill('Dup panel lamp twin');
+  await page.getByRole('button', { name: 'Confirm pin' }).click();
+  await expect(panel).toBeVisible();
+  await panel.getByRole('button', { name: 'Merge' }).click();
+  await expect(page.getByRole('status')).toContainText('Saved');
+  await page.goto('/admin');
+  await expect(page.locator(`img[alt^="${asset}"]`)).toHaveCount(1);
+
+  // Unnumbered duplicate: a second unnumbered light ~4.4 m away raises the
+  // panel WITH both buttons; Save anyway keeps both lights.
+  const near = jittered(`dup-${projectCode(testInfo)}`);
+  await context.setGeolocation({ latitude: near.lat, longitude: near.lon, accuracy: 9 });
+  await page.goto('/admin/walk');
+  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await page.getByLabel('Label').fill('Path light one');
+  await page.getByRole('button', { name: 'Confirm pin' }).click();
+  await expect(page.getByRole('status')).toContainText('Saved');
+
+  await context.setGeolocation({
+    latitude: near.lat + 0.00004, // ~4.4 m north: inside the 8 m radius
+    longitude: near.lon,
+    accuracy: 9,
+  });
+  await page.goto('/admin/walk');
+  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await page.getByLabel('Label').fill('Path light two');
+  await page.getByRole('button', { name: 'Confirm pin' }).click();
+
+  await expect(panel).toBeVisible();
+  await expect(panel.getByRole('heading', { name: 'Possible duplicate' })).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Merge' })).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Save anyway', exact: true })).toBeVisible();
+  await page.goto('/admin');
+  await expect(page.locator('img[alt="Path light two"]')).toHaveCount(0);
+
+  await page.goto('/admin/walk');
+  await page.getByRole('button', { name: 'Add light here', exact: true }).click();
+  await page.getByLabel('Label').fill('Path light two');
+  await page.getByRole('button', { name: 'Confirm pin' }).click();
+  await expect(panel).toBeVisible();
+  await panel.getByRole('button', { name: 'Save anyway', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Saved');
+  await page.goto('/admin');
+  await expect(page.locator('img[alt="Path light one"]')).toHaveCount(1);
+  await expect(page.locator('img[alt="Path light two"]')).toHaveCount(1);
+
+  for (const label of labels) {
+    await deleteAllByLabel(page, label);
+  }
 });
 
-test('@A-206 served photo is re-encoded, oriented and metadata-free', async ({ page }) => {
+test('@A-206 served photo is re-encoded, oriented and metadata-free', async (
+  { page },
+  testInfo,
+) => {
+  const asset = uniqAsset('GP-017', testInfo); // `img[alt^="GP-017"]` still matches
+  const label = 'Photo purity lamp';
   await loginAsAdmin(page);
-  await page.goto('/admin');
+  await deleteAllByLabel(page, label);
 
-  // The light created by the @A-202 @A-203 test above carries the portrait
-  // Orientation=6 fixture photo.
-  const img = page.locator('img[alt^="GP-017"]').first();
+  // Self-contained: this test creates its own photo-bearing light through
+  // the same UI flow (make e2e-task must be able to run @A-206 alone).
+  await addLightFromForm(page, {
+    assetNo: asset,
+    label,
+    photo: 'testdata/photos/portrait-orient6-gps.jpg',
+  });
+  await page.getByRole('button', { name: 'Confirm pin' }).click();
+  await expect(page.getByRole('status')).toContainText('Saved');
+
+  await page.goto('/admin');
+  const img = page.locator(`img[alt^="${asset}"]`);
   await expect(img).toBeVisible();
   const src = await img.getAttribute('src');
   expect(src).toBeTruthy();
@@ -189,27 +416,40 @@ test('@A-206 served photo is re-encoded, oriented and metadata-free', async ({ p
   // The in-form preview renders the orientation already applied.
   await page.goto('/admin/walk');
   await page.getByRole('button', { name: 'Add light here', exact: true }).click();
-  await page.getByLabel('Label').fill('Orientation preview lamp');
+  await page.getByLabel('Label').fill(label);
   await page.getByLabel('Photo').setInputFiles('testdata/photos/portrait-orient6-gps.jpg');
   const preview = page.locator('#photo-preview');
   await expect(preview).toBeVisible();
   const box = (await preview.boundingBox())!;
   expect(box.width).toBeGreaterThan(box.height);
+
+  await deleteAllByLabel(page, label);
 });
 
-test('@A-208 edit relabels and delete removes the light', async ({ page }) => {
+test('@A-208 edit relabels and delete removes the light', async ({ page }, testInfo) => {
+  const asset = uniqAsset('GP-018', testInfo);
   await loginAsAdmin(page);
-  await addLightFromForm(page, { assetNo: 'GP-018', label: 'Edit me lamp' });
+  await deleteAllByLabel(page, 'Edit me lamp');
+  await deleteAllByLabel(page, 'Edited lamp');
+
+  await addLightFromForm(page, { assetNo: asset, label: 'Edit me lamp' });
+  await page.getByRole('button', { name: 'Confirm pin' }).click();
   await expect(page.getByRole('status')).toContainText('Saved');
 
   await page.goto('/admin');
-  await page.getByRole('link', { name: /Edit me lamp/ }).click();
+  await page.getByRole('link', { name: /Edit me lamp/ }).first().click();
   await expect(page).toHaveURL(/\/admin\/lights\/\d+$/);
 
   await page.getByLabel('Label').fill('Edited lamp');
   await page.getByRole('button', { name: 'Save changes' }).click();
-  await expect(page.getByRole('status')).toContainText('Saved');
+  await expect(page).toHaveURL(/\/admin\/lights\/\d+$/);
+  // The edit is a redirect back to the detail (frozen: 303 detail), so the
+  // reloaded form shows the new label — and fields NOT sent keep their
+  // values: the asset number and position survive a label-only edit.
   await expect(page.getByLabel('Label')).toHaveValue('Edited lamp');
+  await expect(page.locator('#light-pos')).toContainText('42.7617');
+  await expect(page.locator('#light-pos')).toContainText('-71.0303');
+  expect(await page.content()).toContain(asset);
 
   await page.getByRole('button', { name: 'Delete light' }).click();
   await page.goto('/admin');
@@ -217,35 +457,39 @@ test('@A-208 edit relabels and delete removes the light', async ({ page }) => {
   await expect(page.locator('img[alt*="Edited lamp"]')).toHaveCount(0);
 });
 
-test('@A-209 admin list paginates with HTMX', async ({ page }) => {
+test('@A-209 admin list paginates with HTMX', async ({ page }, testInfo) => {
+  const code = projectCode(testInfo);
+  const baseLabel = `Scroll lamp ${RUN}-${code}`;
   await loginAsAdmin(page);
-  await page.goto('/admin/walk');
+  await deleteAllByLabel(page, baseLabel); // rerun safety
 
-  // Seed 60 lights through the same HTTP contract the form uses (the UI flow
-  // is covered above; 60 UI dialogs would take minutes). 60 guarantees the
-  // 50-per-page boundary regardless of the few lights earlier tests left in
-  // this server's database.
-  const html = await page.content();
-  const csrf =
-    html.match(/<input[^>]*name="csrf_token"[^>]*>/)?.[0].match(/value="([^"]*)"/)?.[1] ?? '';
-  expect(csrf, 'csrf_token parsed from the walk page form').not.toBe('');
-  for (let i = 1; i <= 60; i++) {
+  // Seed 55 lights through the same HTTP contract the form uses (the UI
+  // flow is covered above; 55 UI dialogs would take minutes). The seeds are
+  // the 55 newest lights in the DB when the assertions run, so page 1 holds
+  // exactly seeds 06..55 and page 2 holds 01..05 — regardless of any
+  // leftovers from other tests. Unnumbered lights need coordinates clear of
+  // the 8 m duplicate radius: a per-run jittered column spaced ~55 m apart.
+  const grid = jittered(`page-${code}`);
+  const csrf = await csrfToken(page);
+  for (let i = 1; i <= 55; i++) {
+    const label = `${baseLabel} ${String(i).padStart(2, '0')}`;
     const res = await page.request.post('/admin/lights', {
       multipart: {
         csrf_token: csrf,
-        label: `Scroll lamp ${String(i).padStart(2, '0')}`,
+        label,
         kind: 'park',
-        lat: String(42.76 + i * 0.0004),
-        lon: String(-71.045 + i * 0.0004),
+        lat: (grid.lat + i * 0.0005).toFixed(7),
+        lon: grid.lon.toFixed(7),
       },
+      maxRedirects: 0, // observe the frozen 303 instead of following it
     });
-    expect(res.status(), `create Scroll lamp ${i}`).toBe(303);
+    expect(res.status(), `create ${label}`).toBe(303);
   }
 
   await page.goto('/admin');
   await expect(page.getByRole('heading', { name: 'Lights', exact: true })).toBeVisible();
-  await expect(page.locator('img[alt="Scroll lamp 60"]')).toBeVisible();
-  await expect(page.locator('img[alt="Scroll lamp 05"]')).toHaveCount(0);
+  await expect(page.locator(`img[alt="${baseLabel} 55"]`)).toBeVisible();
+  await expect(page.locator(`img[alt="${baseLabel} 01"]`)).toHaveCount(0);
 
   // "Older" swaps in page 2 as an HTMX fragment — no full navigation.
   let navigated = false;
@@ -254,10 +498,15 @@ test('@A-209 admin list paginates with HTMX', async ({ page }) => {
       navigated = true;
     }
   });
-  await page.getByRole('link', { name: 'Older' }).click();
-  await expect(page.locator('img[alt="Scroll lamp 05"]')).toBeVisible();
-  await expect(page.locator('img[alt="Scroll lamp 60"]')).toHaveCount(0);
+  const older = page
+    .getByRole('link', { name: 'Older' })
+    .or(page.getByRole('button', { name: 'Older' }));
+  await older.click();
+  await expect(page.locator(`img[alt="${baseLabel} 01"]`)).toBeVisible();
+  await expect(page.locator(`img[alt="${baseLabel} 55"]`)).toHaveCount(0);
   expect(navigated).toBe(false);
+
+  await deleteAllByLabel(page, baseLabel);
 });
 
 test('@A-201 unauthenticated /admin lands on the login page', async ({ page }) => {

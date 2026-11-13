@@ -79,6 +79,9 @@ export function jpegSize(bytes: Uint8Array): JpegSize {
     }
     // SOF0..SOF15 except DHT (0xc4), JPG (0xc8) and DAC (0xcc).
     if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      if (i + 9 > bytes.length) {
+        throw new Error('jpegSize: truncated SOF segment');
+      }
       const h = (bytes[i + 5] << 8) | bytes[i + 6];
       const w = (bytes[i + 7] << 8) | bytes[i + 8];
       return { w, h };
