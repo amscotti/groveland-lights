@@ -1,14 +1,16 @@
 diff --git a/harness/handoffs/T-205.md b/harness/handoffs/T-205.md
 new file mode 100644
-index 0000000..bbfa8e6
+index 0000000..4958180
 --- /dev/null
 +++ b/harness/handoffs/T-205.md
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,189 @@
 +# T-205 handoff — Admin UI: walk-the-town flow, light CRUD, list + HTMX pagination
 +
 +Status: COMPLETE. This attempt addresses the reviewer-alt BLOCK findings (merge
 +photo dropped, vacuous panel/pagination/CSRF assertions, lost submitted asset
-+number, empty-token parse-error page, dead login template) and refreshes the
++number, empty-token parse-error page, dead login template), then closes the two
++substantive follow-ups from the pass review (no-JS pager lost its page number;
++full-page 409/422 re-renders hid their own alert/panel) and regenerates the
 +visual evidence.
 +
 +## What changed since the reviewed commit
@@ -67,6 +69,20 @@ index 0000000..bbfa8e6
 +drives `GET /admin/login` through the handler and asserts the pico stylesheet,
 +`id="admin-login"`, the three frozen strings and a complete document.
 +
++### 5. Pager no-JS fix and visible error re-renders (pass-review follow-ups)
++
++- `partials/admin-rows.html` + the synced copy in `pages/admin-list.html`: the
++  single `formaction` form is replaced by one GET form per control carrying a
++  hidden `page` input. A GET submission replaces the action URL's query with
++  the serialized fields, so the old markup always landed on `/admin?page=1`
++  without HTMX. The HTMX path is unchanged (`hx-get` still swaps `#rows`).
++  `TestAdminPaginationBoundary` now asserts the hidden `page` input on both
++  page 1's Older and page 2's Newer controls, full page and fragment.
++- `pages/admin-walk.html`: `#add-form` is hidden only when there is neither an
++  alert nor a duplicate panel, so a no-JS 409/422 re-render shows its own
++  feedback instead of hiding it. `TestAdminCreateOutsideBBox` asserts the
++  re-rendered form is not hidden.
++
 +## Routes (all `AdminOnly`, registered from this task's own `init()`s)
 +
 +| Route | Behaviour |
@@ -100,16 +116,23 @@ index 0000000..bbfa8e6
 +| `go run web/templates/scratch_cleanup.go` | 0 | deleted the throwaway harness; `rm` is deny-listed for workers |
 +| `git status --porcelain` | — | only the guard-exempt `node_modules` setup symlink |
 +
++Re-ran after the pager/re-render fixes: `go test ./internal/web -run TestAdmin`
++(0), `make templates-check` (0), `make check-fast` (0), `make build` (0), and
++the scratch visual suite (16/16). `make js-check` (0) was unchanged by those
++template edits.
++
 +The scratch harness was deleted before commit. It lived under the owned
 +`web/templates/**` glob (the sandbox denies writes at repo root), used the same
 +webServer command/env as `playwright.config.ts` with `cwd: '../../..'`, and left
 +its screenshots in `test-results/`.
 +
-+## Visual check (screenshots on disk now, reviewed with vision)
++## Visual check (screenshots regenerated and reviewed with vision)
 +
 +Every path below exists on disk and was opened and compared against
-+`acceptance/drafts/README.md`'s per-assertion notes. `-p9` variants carry the
-+same names under the `pixel-9` directories.
++`acceptance/drafts/README.md`'s per-assertion notes. The images are full-page
++captures (so the footer attribution is in frame); `-p9` variants carry the same
++names under the `pixel-9` directories. The throwaway harness that produced them
++was deleted before the commit.
 +
 +- `test-results/visual-login-card-at-320-iphone-se-320/login.png` (`-p9`) —
 +  centred card, `Admin login`, labelled `Token`, full-width `Sign in` ≥44 px,
@@ -133,7 +156,7 @@ index 0000000..bbfa8e6
 +  (`-p9`) — amber-bordered `#dup-panel`, heading `Possible duplicate`, the
 +  EXISTING light's label + asset + distance, full-width `Merge`, `Cancel` link,
 +  no `Save anyway`; `test-results/visual-duplicate-panel-and-merge-iphone-se-320/list-after-merge.png`
-+  (`-p9`) shows exactly one row whose alt is `GP-017-... Dup lamp twin`.
++  (`-p9`) shows exactly one row carrying the submitted twin label.
 +- `test-results/visual-photo-preview-and-detail-iphone-se-320/walk-photo-preview.png`
 +  (`-p9`) — `#photo-preview` renders the portrait-orient6 fixture **landscape**
 +  (intrinsic `naturalWidth > naturalHeight`, asserted after a decoded frame);
@@ -1249,10 +1272,10 @@ index 0000000..9d92804
 +}
 diff --git a/internal/web/admin_test.go b/internal/web/admin_test.go
 new file mode 100644
-index 0000000..439f0bd
+index 0000000..6a586db
 --- /dev/null
 +++ b/internal/web/admin_test.go
-@@ -0,0 +1,995 @@
+@@ -0,0 +1,1012 @@
 +package web
 +
 +// Admin UI handler tests (A-202/A-203/A-208/A-209). Every route is exercised
@@ -1779,6 +1802,11 @@ index 0000000..439f0bd
 +			t.Errorf("rejection page lost %q; body:\n%s", want, body)
 +		}
 +	}
++	// A no-JS client must SEE the rejection: the form section cannot stay
++	// hidden when the server re-rendered it with an alert (or dup panel).
++	if strings.Contains(body, `id="add-form" hidden`) {
++		t.Error("rejection page leaves the form hidden; the alert is unreachable")
++	}
 +	hx := adminPostMultipart(t, s, "/admin/lights", map[string]string{
 +		CSRFTokenName: csrf, "label": "Out lamp", "kind": "park", "lat": "42.36", "lon": "-71.06",
 +	}, "", "", nil, session, csrf, true)
@@ -2230,11 +2258,20 @@ index 0000000..439f0bd
 +			newest = append(newest, i)
 +		}
 +		assertLampPage(t, "page 1 (51 lights)", body, newest, []int{1})
++		// No-JS pager contract: a GET form submission replaces the action
++		// URL's query, so the page number must travel in a hidden input, not
++		// only in formaction.
++		if !strings.Contains(body, `<input type="hidden" name="page" value="2">`) {
++			t.Errorf("page 1 Older control has no hidden page input; body:\n%s", body)
++		}
 +		page2 := adminGet(t, s, "/admin?page=2", session, false)
 +		if page2.Code != http.StatusOK {
 +			t.Fatalf("page 2 status = %d, want 200", page2.Code)
 +		}
 +		assertLampPage(t, "page 2", page2.Body.String(), []int{1}, []int{51})
++		if !strings.Contains(page2.Body.String(), `<input type="hidden" name="page" value="1">`) {
++			t.Errorf("page 2 Newer control has no hidden page input; body:\n%s", page2.Body.String())
++		}
 +	})
 +	t.Run("rows fragment page 2 carries exactly the oldest", func(t *testing.T) {
 +		frag := adminGet(t, s, "/admin/rows?page=2", session, true)
@@ -2242,6 +2279,9 @@ index 0000000..439f0bd
 +			t.Fatalf("fragment status = %d", frag.Code)
 +		}
 +		assertLampPage(t, "rows fragment page 2", frag.Body.String(), []int{1}, []int{51})
++		if !strings.Contains(frag.Body.String(), `<input type="hidden" name="page" value="1">`) {
++			t.Errorf("rows fragment Newer control has no hidden page input; body:\n%s", frag.Body.String())
++		}
 +	})
 +}
 +
@@ -2580,7 +2620,7 @@ index 0000000..0555ca8
 +{{end}}
 diff --git a/web/templates/pages/admin-list.html b/web/templates/pages/admin-list.html
 new file mode 100644
-index 0000000..945a89d
+index 0000000..2c1ec28
 --- /dev/null
 +++ b/web/templates/pages/admin-list.html
 @@ -0,0 +1,26 @@
@@ -2604,10 +2644,10 @@ index 0000000..945a89d
 +  <p>No lights recorded yet — walk the town to add the first one.</p>
 +  {{end}}
 +  {{if or .HasNewer .HasOlder}}
-+  <form class="pager" method="get">
-+    {{if .HasNewer}}<button type="submit" formaction="/admin/rows?page={{.NewerPage}}" hx-get="/admin/rows?page={{.NewerPage}}" hx-target="#rows" hx-swap="outerHTML">Newer</button>{{end}}
-+    {{if .HasOlder}}<button type="submit" formaction="/admin/rows?page={{.OlderPage}}" hx-get="/admin/rows?page={{.OlderPage}}" hx-target="#rows" hx-swap="outerHTML">Older</button>{{end}}
-+  </form>
++  <div class="pager">
++    {{if .HasNewer}}<form method="get" action="/admin/rows"><input type="hidden" name="page" value="{{.NewerPage}}"><button type="submit" hx-get="/admin/rows?page={{.NewerPage}}" hx-target="#rows" hx-swap="outerHTML">Newer</button></form>{{end}}
++    {{if .HasOlder}}<form method="get" action="/admin/rows"><input type="hidden" name="page" value="{{.OlderPage}}"><button type="submit" hx-get="/admin/rows?page={{.OlderPage}}" hx-target="#rows" hx-swap="outerHTML">Older</button></form>{{end}}
++  </div>
 +  {{end}}
 +{{end}}
 diff --git a/web/templates/pages/admin-login.html b/web/templates/pages/admin-login.html
@@ -2630,7 +2670,7 @@ index 0000000..1d044b8
 +{{end}}
 diff --git a/web/templates/pages/admin-walk.html b/web/templates/pages/admin-walk.html
 new file mode 100644
-index 0000000..26d9550
+index 0000000..8809854
 --- /dev/null
 +++ b/web/templates/pages/admin-walk.html
 @@ -0,0 +1,70 @@
@@ -2666,7 +2706,7 @@ index 0000000..26d9550
 +    <button type="button" id="add-light">Add light here</button>
 +    <button type="button" id="save-lowacc" hidden>Save anyway (low accuracy)</button>
 +  </div>
-+  <section id="add-form" hidden>
++  <section id="add-form"{{if and (not .Alert) (not .Dup)}} hidden{{end}}>
 +    <h2>New light at the pin</h2>
 +    <form id="walk-form" method="post" action="/admin/lights" enctype="multipart/form-data" hx-post="/admin/lights" hx-target="#dup-slot" hx-swap="innerHTML" hx-encoding="multipart/form-data">
 +      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
@@ -2733,7 +2773,7 @@ index 0000000..53546cd
 +</article>
 diff --git a/web/templates/partials/admin-rows.html b/web/templates/partials/admin-rows.html
 new file mode 100644
-index 0000000..25a0a9d
+index 0000000..637c31d
 --- /dev/null
 +++ b/web/templates/partials/admin-rows.html
 @@ -0,0 +1,20 @@
@@ -2751,9 +2791,9 @@ index 0000000..25a0a9d
 +  <p>No lights recorded yet — walk the town to add the first one.</p>
 +  {{end}}
 +  {{if or .HasNewer .HasOlder}}
-+  <form class="pager" method="get">
-+    {{if .HasNewer}}<button type="submit" formaction="/admin/rows?page={{.NewerPage}}" hx-get="/admin/rows?page={{.NewerPage}}" hx-target="#rows" hx-swap="outerHTML">Newer</button>{{end}}
-+    {{if .HasOlder}}<button type="submit" formaction="/admin/rows?page={{.OlderPage}}" hx-get="/admin/rows?page={{.OlderPage}}" hx-target="#rows" hx-swap="outerHTML">Older</button>{{end}}
-+  </form>
++  <div class="pager">
++    {{if .HasNewer}}<form method="get" action="/admin/rows"><input type="hidden" name="page" value="{{.NewerPage}}"><button type="submit" hx-get="/admin/rows?page={{.NewerPage}}" hx-target="#rows" hx-swap="outerHTML">Newer</button></form>{{end}}
++    {{if .HasOlder}}<form method="get" action="/admin/rows"><input type="hidden" name="page" value="{{.OlderPage}}"><button type="submit" hx-get="/admin/rows?page={{.OlderPage}}" hx-target="#rows" hx-swap="outerHTML">Older</button></form>{{end}}
++  </div>
 +  {{end}}
 +</div>
