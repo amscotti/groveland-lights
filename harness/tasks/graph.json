@@ -272,7 +272,7 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "review",
+      "status": "merging",
       "attempts": 3,
       "model": "glm",
       "budget": {
