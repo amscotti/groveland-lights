@@ -237,7 +237,7 @@
       "claims": [],
       "ui": false,
       "allow_deps": [],
-      "status": "blocked",
+      "status": "rework",
       "attempts": 4,
       "model": "glm",
       "budget": {
@@ -272,7 +272,7 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "blocked",
+      "status": "rework",
       "attempts": 4,
       "model": "glm",
       "budget": {
@@ -286,7 +286,7 @@
       "milestone": "M2",
       "type": "feature",
       "role": "worker",
-      "title": "Migration 0002 creates the product schema; sqlc-backed lights \u0026 photos store",
+      "title": "Migration 0002 creates the product schema; sqlc-backed lights & photos store",
       "deps": [
         "T-200"
       ],
@@ -514,7 +514,7 @@
       "claims": [],
       "ui": false,
       "allow_deps": [],
-      "status": "blocked",
+      "status": "rework",
       "attempts": 4,
       "model": "glm",
       "budget": {
