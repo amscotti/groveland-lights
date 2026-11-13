@@ -320,7 +320,7 @@ func appendRetryContext(root, id, reason string) {
 		return
 	}
 	defer func() { _ = fh.Close() }()
-	fmt.Fprintf(fh, "\n\n## Retry context (attempt failed — read this)\n\nThe previous attempt failed for this reason: %s\nFix it and finish. Your earlier work may already be in the worktree uncommitted — verify, complete the required steps (including `git add` + `git commit -m \"...\"`), and write the handoff.\n", reason)
+	_, _ = fmt.Fprintf(fh, "\n\n## Retry context (attempt failed — read this)\n\nThe previous attempt failed for this reason: %s\nFix it and finish. Your earlier work may already be in the worktree uncommitted — verify, complete the required steps (including `git add` + `git commit -m \"...\"`), and write the handoff.\n", reason)
 }
 
 func appendFindings(root, id string, roles []string, verdicts map[string]string) {
