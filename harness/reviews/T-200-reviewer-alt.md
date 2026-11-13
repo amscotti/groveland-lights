@@ -147,8 +147,8 @@ frozen oracle should not ship flaky).
   (`testdata/schema.expected.sql:1-86`).
 - The fixture generator’s APP1/TIFF construction, CRC-correct pixel bomb,
   HEIC sniff box and deterministic writes check out statically; the fixture
-  files are not in the manifest, but ownership (`testdata/**` is T-200’s) and
-  the frozen hashes in `acceptance/drafts/README.md:81-87` are the protection.
+  files are not in the manifest, but ownership (`testdata/photos/**` and
+  `testdata/schema.expected.sql` are T-200’s) and the frozen hashes in `acceptance/drafts/README.md:81-87` are the protection.
 - The alt-format rule (`acceptance/drafts/README.md:50`, `alt="<asset_no>
   <label>"` for numbered lights) is a necessary reconciliation of the table’s
   `img[alt=<label>]` with test 7’s `img[alt^="GP-017"]`. It is not a weakening
