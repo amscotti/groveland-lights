@@ -86,10 +86,10 @@ index cdaf239..3f3960f 100644
 +modernc.org/token v1.1.0/go.mod h1:UGzOrNV1mAFSEB63lOFHIpNRUVMvYTc6yu1SMY/XTDM=
 diff --git a/harness/handoffs/T-101.md b/harness/handoffs/T-101.md
 new file mode 100644
-index 0000000..fa72ea2
+index 0000000..4c7062b
 --- /dev/null
 +++ b/harness/handoffs/T-101.md
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,178 @@
 +# T-101 — SQLite store + migration runner (M1)
 +
 +Attempt 3 (retry after attempt 2's review returned **BLOCK** from both
@@ -227,6 +227,19 @@ index 0000000..fa72ea2
 +| `make generate-check` | 0 | regeneration byte-stable |
 +| `make phase-grep` | 0 | no "Phase N" under cmd/server, internal, web, migrations |
 +| `make e2e-task TASK=T-101` | 0 | greps `@A-103|@A-104`; specs are inert T-100 drafts → 0 Playwright tests, `--pass-with-no-tests` (expected) |
++
++Re-verified unchanged in attempt 3's completing session (fresh shell, worktree
++as committed): `make check-fast` → 0 (tidy no drift, vet, lint 0 issues,
++`go test -race -count=1 -shuffle=on ./...` ok), `go test
++./internal/store/... -race -count=1` → 0, `make generate` → 0 with no diff
++under `internal/store/gen`, `make generate-check` → 0, `make phase-grep` → 0,
++`make e2e-task TASK=T-101` → 0 (0 Playwright tests, drafts inert),
++`go list -m modernc.org/sqlite` → `v1.62.0`. The planner amendment was
++re-read from the shared object store: `git show main:harness/tasks/graph.json`
++lists T-101 `allow_deps` with all five transitives plus the modernc set
++(`status: running`, `attempts: 3`), and `git diff --name-only main...HEAD`
++touches only owned paths + this handoff (`node_modules` untracked is the
++scheduler's guard-exempt symlink).
 +
 +Spot-checks of the guard's nine checks done manually (the guard binary itself
 +runs under the scheduler): protected paths/ownership — branch changes touch
