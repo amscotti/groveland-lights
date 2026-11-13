@@ -26,7 +26,7 @@ func bufferedServer(t *testing.T, env config.Env, buf *bytes.Buffer) *Server {
 	} else {
 		h = slog.NewTextHandler(buf, nil)
 	}
-	s, err := New(testConfig(env), slog.New(h), nil) // nil store: logging tests never touch it
+	s, err := New(testConfig(env), slog.New(h))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

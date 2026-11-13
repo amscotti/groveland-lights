@@ -39,13 +39,20 @@ type Server struct {
 }
 
 // New assembles the server: templates, middleware and all registered routes.
-// db may be nil in unit tests that never touch the store.
-func New(cfg config.Config, log *slog.Logger, db *store.DB) (*Server, error) {
+// Production passes the boot-opened store exactly once: New(cfg, log, db).
+// The store parameter is variadic so store-less unit tests keep compiling
+// unchanged (New(cfg, log)); omitting it, or passing nil, leaves Server.Store
+// nil and every store-backed route answers 500.
+func New(cfg config.Config, log *slog.Logger, db ...*store.DB) (*Server, error) {
 	tpl, err := parseTemplates()
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{Cfg: cfg, Log: log, Store: db, tpl: tpl, routes: routes}
+	var st *store.DB
+	if len(db) > 0 {
+		st = db[0]
+	}
+	s := &Server{Cfg: cfg, Log: log, Store: st, tpl: tpl, routes: routes}
 	return s, nil
 }
 
