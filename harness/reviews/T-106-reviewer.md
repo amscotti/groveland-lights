@@ -1,101 +1,127 @@
-# T-106 review — BLOCKED disposition on "already untracked on main"
+# T-106 review (attempt 2) — BLOCKED disposition on "already untracked on main"
 
-Reviewed artifact: `harness/reviews/T-106.diff` (the only change is the new
-handoff `harness/handoffs/T-106.md`; no other file touched). Independently
-re-verified against the main checkout at HEAD `83778e2`, which shares history
-with the task worktree base `4d6f347` (worktree base is an ancestor; app code
-byte-identical, see F6).
+Reviewed artifact: `harness/reviews/T-106.diff` — the branch-introduced changes
+(merge-base `77945ff` → `task/T-106`): the attempt-2 handoff
+`harness/handoffs/T-106.md` (new) and a one-line `harness/tasks/graph.json`
+status hunk. Verified against the packet `harness/tasks/T-106.md`, the main
+checkout, `harness/progress.log`, `cmd/harness/gate.go`, and `cmd/harness/ratchet.go`.
 
-## Packet-conformance (harness/tasks/T-106.md)
+Method note: this review session's shell allowlist permits read-only git verbs
+only (`log/show/diff/status` — the same restriction the handoff reports); all
+git claims below were re-executed directly, not taken from the handoff or the
+worker transcript (which is not present in this checkout).
 
-- Never clause (T-106.md:48-50) prescribes exactly this route when the files
-  are not tracked: first line `BLOCKED: already untracked on main`, then stop.
-  Handoff line 1 is that exact string; the deliverable commit was correctly
-  NOT created — packet step 1 (`git rm --cached …`, T-106.md:28) is a no-op git
-  rejects with exit 128, and step 2's commit (T-106.md:31) would be empty.
-- Step 3 respected: `.gitignore` untouched (diff contains no `.gitignore`
-  hunk; on-disk `.gitignore:20-21` = `test-run.db*` / `test-run-photos/`,
-  matching the handoff's exact line citations).
-- Owns respected: no file outside the three owned paths (which were not edited
-  — they exist in neither index nor disk) plus the handoff. Nothing in
-  `acceptance/`, no deps added (`allow_deps: []`), no migrations, no goldens.
-  Hard rules 1, 2, 3, 8, 10 all compliant.
+## Packet conformance — the BLOCKED route is prescribed and was followed exactly
 
-## Independent re-verification of the BLOCKED condition (it holds)
+- Never clause (T-106.md:46-50): "If the files are NOT tracked in your
+  worktree (someone already fixed it), write `BLOCKED: already untracked on
+  main` in the handoff and stop." Handoff line 1 is that exact string.
+- The precondition genuinely holds. `git log --oneline -- test-run.db
+  test-run.db-shm test-run.db-wal` → exactly `30be90d` (untrack) then
+  `7f07df2` (accidental add), nothing after; `30be90d` is an ancestor of both
+  `main` and `task/T-106`. So packet step 1 (`git rm --cached …`, T-106.md:28)
+  cannot succeed and step 2's commit would be empty — correctly not fabricated.
+- Step 3 respected: no `.gitignore` hunk anywhere in the branch-introduced
+  diff; `.gitignore:20` = `test-run.db*` is already correct. All three files
+  exist on disk as ignored runtime artifacts.
+- Owns respected: the worker's only commit content is the handoff
+  (`b0a671a`, `4f971ee`). Nothing under `acceptance/`, no deps
+  (`allow_deps: []`), no migrations, no goldens. Hard rules 1, 2, 3, 8, 10
+  compliant.
 
-- All three owned paths are untracked: `git log --oneline -- test-run.db` (and
-  `-shm`/`-wal`) shows exactly `30be90d` ("chore: untrack e2e runtime
-  artifacts") then `7f07df2` (the original accidental add) — nothing after.
-  `30be90d` (2026-11-13 07:12:53) is an ancestor of both the worktree base
-  `4d6f347` and main HEAD `83778e2`. `git log --oneline -- '*test-run*'`
-  confirms no other tracked test-run path anywhere in history.
-- `git status --porcelain` on main is EMPTY — no `D` entries, consistent with
-  the handoff's third proof.
-- The remediated finding is real and matches: harness/findings/judge-M1.md:93-95
-  ("operator commit `7f07df2` committed `test-run.db{,-shm,-wal}` … `.gitignore`
-  fix landed later in `f901627` but the tracked blobs remain"), routed to T-106
-  in harness/state.md:7-8,20. `30be90d` closed it before this worktree was cut.
-- `?? node_modules` tolerance: correct — `cmd/harness/ratchet.go:127-129`
-  (DirtyLines) exempts `node_modules`, `.env.test`, `.merge.lock`,
-  `harness/handoffs/**`, `harness/runs/**`; and `scripts/worktree-new.sh:23-24`
-  creates the worktree's `node_modules` as a `ln -s` symlink, which
-  `.gitignore:2` (`node_modules/`, directory-only pattern) cannot cover. The
-  handoff's "pre-existing symlink" explanation (open issue 2) is precise.
-- `make e2e-task TASK=T-106` → exit 0 "no claims for T-106": consistent with
-  Makefile:112-116 (empty grep ids → echo + `exit 0` before any `npx`
-  invocation, so it cannot mint `test-run.db*` dirt) and graph.json T-106
-  `"claims": []` (harness/tasks/graph.json:237). AGENTS.md flag drift
-  (`T=<id>` vs Makefile:113's `TASK=`) — open issue 3 confirmed against the
-  Makefile's own usage string.
+## The graph.json hunk is gate-authored, not a worker edit of protected state
 
-## Security / architecture
+The diff's only non-handoff change (`status: review → merging`, T-106 diff
+hunk at graph.json:240) is commit `194e9f2`. Three independent proofs that
+this is the harness's own commit, not an AGENTS.md rule-1 violation:
 
-No code, templates, handlers, SQL or static assets changed — CSRF, XSS via
-template.HTML, SQLi, path traversal, upload limits, secrets-in-output are all
-N/A for this diff. The handoff emits no secret material (`.env.test` is named
-only, never shown). Architecture rules (HTMX/#map, parse-don't-validate, typed
-IDs, status.Derive) untouched. No "Phase N" strings introduced into app code
-(handoff lives in `harness/` anyway). Test rules: `type: chore`, `claims: []`,
-no UI — no new tests required; nothing was weakened.
+1. Its message exists verbatim only in the gate: `cmd/harness/gate.go:127`
+   (`finalizeMerge` restores main's authoritative graph.json onto the branch
+   precisely "so the merge cannot regress task status/attempts", gate.go:122-123).
+2. Timing: `194e9f2` was committed 2026-11-13T13:56:35Z — the exact second of
+   `gate_fail T-106` (harness/progress.log:245), five minutes after
+   `worker_done T-106` at 13:51:23Z (progress.log:239) and 7 seconds before the
+   next worker claim at 13:56:42Z (progress.log:256-257). No worker session
+   was active.
+3. Content: exactly main's graph.json blob (`ce4141e`, produced by scheduler
+   commit `cdaadab` at 13:55:30Z) restored onto the branch.
 
-## Findings
+The handoff openly identifies `194e9f2` as a harness commit — accurate.
 
-- **F1 (low, prose accuracy):** The handoff attributes the `.gitignore`
-  coverage to `30be90d` — "removed … from the index and landed the `.gitignore`
-  coverage" and "was itself part of the `30be90d` fix" (Confirmation section of
-  T-106.diff). Incorrect: `git log --oneline -- .gitignore` shows the coverage
-  landed in `f901627` (06:46:18, "build: ignore e2e runtime artifacts") and
-  `30be90d` never touched `.gitignore`. Judge-M1.md:94 and the packet itself
-  (T-106.md:23-24) both credit `f901627`. The error does not affect the BLOCKED
-  conclusion (the paths are independently proven untracked, and the
-  "ignored" evidence — `.gitignore:20` — is correct on its own).
-- **F2 (informational):** "pre-registered as operator pre-step #1 in
-  `harness/state.md` per the T-105 handoff" — current state.md (rewritten at
-  `4d6f347`) no longer carries that pre-step text; it survives only at
-  harness/handoffs/T-105.md:292-299. Accurate only as cited "per the T-105
-  handoff"; the direct state.md pointer is dead.
-- **F3 (informational):** `make check-fast` and `make e2e-task` exit-0 claims
-  could not be re-executed in this review session (`make` denied by the review
-  shell allowlist — mirroring the handoff's own note 4). Verified statically
-  instead: see F6; the e2e-task path is proven from Makefile:112-116 +
-  graph.json:237.
-- **F4 (no action):** Handoff open issue 2 (`node_modules` symlink cosmetics)
-  is real and correctly left outside the task's owns; durable fix is an
-  operator `.gitignore` tweak or dropping the symlink in worktree-new.sh.
-- **F5 (no action):** Handoff open issue 3 (AGENTS.md `T=` vs Makefile `TASK=`)
-  confirmed; doc-side fix belongs to an operator/docs task.
-- **F6 (evidence):** `git log --oneline 4d6f347..HEAD -- cmd internal web
-  migrations` is EMPTY — zero app-code delta between the worktree base and
-  main HEAD, so the packet's "make check-fast still passes (nothing changed in
-  code)" verify (T-106.md:39) holds by construction given the previously
-  recorded green runs at these commits (T-105 attempt-6 handoff,
-  harness/handoffs/T-105.md:205).
+## Divergence diagnosis and operator guidance are correct
+
+- Re-verified: branch-only = `b0a671a`, `194e9f2`, `4f971ee`; main-only =
+  `cdaadab`, `02f6cdc`, `1dfd88c`, `37a571f`, `f148c82` (all scheduler
+  "update task graph…" commits). Sole file overlap: `harness/tasks/graph.json`.
+  Main currently carries `status: "review", attempts: 1` (graph.json:240-241).
+- Option 2's rebase mechanics check out: replaying `194e9f2` (which only
+  touched the status line) onto main via git's 3-way merge is conflict-free
+  and keeps main's `attempts: 1` — the handoff's "rebase auto-keeps attempts"
+  claim is correct. `b0a671a`/`4f971ee` replay cleanly (main lacks the file).
+- Harness-side defect, correctly not fixable by the worker: there is NO
+  `gate_conflict T-106` event in progress.log, i.e. the gate's rebase step
+  (`gate.go:88`) returned success without integrating main, then
+  `finalizeMerge`'s ff-only merge (gate.go:130) refused. Re-running the gate
+  without an effective rebase will loop; harness is protected, and every
+  topology verb the worker could have used (`rebase`/`merge`/`reset`/
+  `cherry-pick`) is denied by the session allowlist — a restriction this
+  review session reproduces. The handoff's recommendation (option 1: close
+  T-106 as already-done, drop the branch) is the right call: the branch
+  carries zero code changes and the deliverable already exists on main as
+  `30be90d`.
+
+## Verification claims corroborated by the harness's own log
+
+- `make check-fast` exit 0 (attempt 2): `check_fast_ok T-106` at
+  2026-11-13T14:05:52Z (progress.log:261), preceded by `guard_ok T-106`
+  (progress.log:260).
+- `make e2e-task TASK=T-106` → "no claims for T-106", exit 0: statically
+  proven — Makefile `e2e-task` echoes and exits 0 on empty claim ids before
+  any `npx` invocation, and graph.json:237 has `"claims": []`.
+- `?? node_modules` tolerance: `cmd/harness/ratchet.go:127-128` (DirtyLines)
+  exempts `node_modules` et al. Real, guard-tolerated, outside owns.
+- Task premise: the judge finding is real (harness/findings/judge-M1.md:93-95)
+  but was already remediated by `30be90d` before any T-106 worker ran — the
+  packet was stale on arrival and its Never clause anticipated exactly this.
+
+## Findings (all minor; none load-bearing)
+
+- **F1 (low, prose):** Handoff open-issue 2 says `30be90d` was "merged via
+  T-200". Wrong: progress.log:236 records `merged T-105 30be90d…`, and
+  `30be90d`'s own stat includes the T-105 handoff edit. Cosmetic
+  mis-attribution; the untracked-on-main conclusion is unaffected.
+- **F2 (info):** "State at HEAD `194e9f2`" and the command table's branch-tip
+  row describe the pre-handoff snapshot; the handoff itself landed as
+  `4f971ee`. Clearly labelled as attempt-2 state; not misleading in context.
+- **F3 (info, confirmed):** AGENTS.md flag drift — AGENTS.md says
+  `make e2e-task T=<id>` but the Makefile variable is `TASK=` (usage line:
+  "usage: make e2e-task TASK=T-###"). Doc-side fix for an operator/docs task.
+- **F4 (info, confirmed):** Allowlist gap — topology-changing git verbs are
+  denied for task sessions (reproduced here); if retries are expected to
+  self-heal divergence, `git rebase` or a sanctioned `scripts/` helper must
+  be allowlisted. See also the gate-side rebase defect above.
+
+## Security / architecture / tests
+
+No code, templates, handlers, SQL, static assets, or migrations are touched —
+CSRF, XSS via template.HTML, SQLi, path traversal, upload limits, HTMX/#map,
+parse-don't-validate, typed IDs, `status.Derive` are all out of scope of this
+diff by construction. The handoff contains no secret material (commands and
+exit codes only). No "Phase N" strings, no deps added, no test weakened,
+skipped, or special-cased; `type: chore`, `claims: []`, `ui: false` — no new
+test obligations. Nothing re-added to the index (`git diff --cached` empty at
+handoff; branch diff contains no blob additions under the three owned paths).
 
 ## Verdict
 
-The BLOCKED route is the packet-prescribed correct behaviour for the actual
-repo state, the worker stopped exactly where told, the diff is minimal and
-clean, and every substantive claim re-verified (two prose-level inaccuracies,
-F1/F2, neither load-bearing). No security, architecture or test concerns.
+The worker found the deliverable already on main, took the packet-prescribed
+BLOCKED route verbatim, proved it with re-runnable git evidence, ran the
+required checks, and — when the gate's own topology defect blocked the merge —
+diagnosed it precisely and reported it honestly instead of fabricating a
+commit or touching protected state. The only non-handoff hunk in the diff is
+the gate's own scheduler-state commit. Recommended operator action is the
+handoff's option 1: close T-106 as already-done and drop the branch (no merge
+needed); if the history must land, rebase per option 2, which is verified
+conflict-free.
 
 VERDICT: PASS
