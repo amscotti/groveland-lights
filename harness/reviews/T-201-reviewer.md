@@ -1,212 +1,253 @@
-# T-201 review — migration 0002 (product schema) + lights/photos store (retry)
+# T-201 review — migration 0002 + lights/photos store (round 2: BLOCK-resolution retry)
 
-Review basis: the attached diff (`harness/reviews/T-201.diff`, identical to the diff
-supplied with this request) against `harness/tasks/T-201.md` (including the retry
-context), `docs/spec/architecture.md`, `docs/PLAN.md` contract sentences, the frozen
-oracles (`acceptance/go/migrations_test.go`, `acceptance/drafts/admin_lights_go_test.go.txt`,
-`testdata/schema.expected.sql`), the protected store files
-(`internal/store/store.go`, `store_test.go`, `dbfile_layout_test.go`,
-`cmd/server/boot_test.go`), `sqlc.yaml`, `go.mod`, the baseline
-`internal/store/migrations.go` / `migrations_test.go`, and the Makefile targets the
-handoff claims to have run.
+Review basis: the attached diff (identical to `harness/reviews/T-201.diff` on disk —
+verified by grepping the on-disk file for the retry's `raw-b64:` markers) against
+`harness/tasks/T-201.md` (including both retry contexts), the round-1 reviews
+(`harness/reviews/T-201-reviewer.md` PASS on the feature scope, `T-201-reviewer-alt.md`
+BLOCK on the checksum-encoding design), the frozen oracles
+(`acceptance/go/migrations_test.go`, `acceptance/drafts/admin_lights_go_test.go.txt`,
+`acceptance/contract.json`, `testdata/schema.expected.sql`), the protected/unowned store
+files (`internal/store/store.go`, `store_test.go`, `dbfile_layout_test.go`,
+`cmd/server/boot_test.go`), `sqlc.yaml`, `go.mod`, `Makefile`, `harness/policy.json`,
+and the baseline `internal/store/migrations.go`/`migrations_test.go`.
 
-Verification limits: the diff is **not applied** in this checkout (main has only
-`0001_init.sql`, no `queries/`, no `lights*.go`/`photos*.go`) and shell execution is
-restricted, so `make check-fast` / `generate-check` exit codes and sqlc regeneration
-are taken on trust where marked — the same constraint as every prior round (see
-T-200-reviewer.md:14-25). Everything below is a static check of the diffed bytes
-against the packets and repo facts I could read; the reasoning about the one
-non-trivial design change (checksum recording encoding) is verified against the
-actual frozen test bytes, not the handoff's summary of them.
+Verification limits: the diff is **not applied** in this checkout (main still has only
+`migrations/0001_init.sql`, no `queries/`, no `lights*.go`/`photos*.go`) and shell
+execution is denied — same constraint as both round-1 reviews. Everything below is a
+static check of the diffed bytes against the contracts I could read; executed exit codes
+are trust-marked where stated. Line numbers are post-patch `file:line`.
 
-## The retry fix — checksum recording encoding (the headline item)
+## 1. The BLOCK and its resolution — the headline item
 
-**The blocker was real.** Three independent protected oracles all pin "the FIRST (and
-only) 64-char lowercase-hex token in the raw DB file is 0001_init's recorded
-checksum":
+Reviewer-alt's block (#1) was that the round-1 runner recorded later migrations' digests
+as raw BLOBs behind a `len(raw)==64` decode heuristic, inside a TEXT column, purely so
+the byte-layout canary would stay green — and it explicitly sanctioned two remedies:
+have the canary/pin updated by its owner, **or** "record an explicit, runner-owned
+format decision whose column type and long-term contract are deliberate — then re-run
+the A-104 acceptance and smoke tests." The retry implements the second remedy, in a file
+the packet owns (`internal/store/migrations*.go`), and I verified each element of the
+sanctioned remedy against the diff bytes:
 
-- `acceptance/go/migrations_test.go:211-224` (`migTamperFirstHex` rewrites `locs[0]`)
-  + `:293-295` (refusal output must name `0001_init.sql`); frozen contract text at
-  `:14-18`.
-- `internal/store/dbfile_layout_test.go:49-62` — requires `len(locs) == 1`, exactly
-  one hex-64 token in the file.
-- `cmd/server/boot_test.go:42,276-282,405` — smoke tamper of the first hex token,
-  refusal must name `0001_init.sql`.
+- **Explicit, runner-owned format decision.** `sumRecordEncoding`
+  (`internal/store/migrations.go:80-107`) is a documented contract, not an inference:
+  the anchor row (the first embedded migration, `0001_init.sql`) records its digest as
+  64-char lowercase-hex TEXT — the exact encoding A-104 freezes by name
+  (`acceptance/go/migrations_test.go:15-16`: "the first migration file is
+  migrations/0001_init.sql; its sha256 checksum is recorded in schema_migrations as
+  64-char lowercase hex") — and every later row records
+  `"raw-b64:" + base64.RawURLEncoding(digest)` (`rawB64Prefix`, `sumRecordValue`,
+  migrations.go:108-115). The handoff documents the long-term contract for future
+  migration authors (T-2xx adding `0003_*` needs nothing special).
+- **Column type honest.** The round-1 complaint (TEXT column storing BLOBs) is gone:
+  both encodings are TEXT strings, and `checkRecordedSumsAreText`
+  (`internal/store/migrations_test.go`, new hunk after :356) asserts
+  `typeof(sha256) = 'text'` for both rows straight from SQLite's storage class.
+- **No decode heuristics.** `decodeRecordedSum` and the BLOB branch are removed (diff,
+  migrations.go hunks). Verification is byte-exact positional comparison:
+  `recorded != sumRecordValue(i, m)` (migrations.go:143-147); `applyOne` records
+  `sumRecordValue(index, m)` (migrations.go:~207). Nothing parses a stored value.
+- **The guard got strictly stronger, not weaker.** Baseline accepted any hex string
+  equal to the digest; round-1 accepted hex *or* BLOB decoding to the digest; the retry
+  accepts only the byte-exact positional representation.
+  `TestTamperedSecondMigrationChecksumRefusesOpenNamingItsFile`
+  (migrations_test.go:~466) proves with a real tampered DB that (a) a later row carrying
+  the **correct** digest in bare-hex form is refused — representations are positional,
+  never negotiated — and (b) a wrong digest under the right tag is refused; both wrap
+  `ErrChecksumMismatch`, name `0002_lights.sql` (and assert NOT `0001_init.sql`, whose
+  row is verified clean first), say "checksum mismatch", and carry both the stored value
+  and the file checksum. I walked the comparison for false accepts: any byte difference
+  between the stored value and the representation recomputed from the embedded file's
+  digest refuses the boot naming the file. There is no byte sequence that both differs
+  from the expected representation and boots.
+- **The frozen A-104/smoke oracles hold by construction, verified against their actual
+  bytes.** A-104's `migTamperFirstHex` rewrites `locs[0]` — the FIRST 64-char
+  lowercase-hex run in the raw file (`acceptance/go/migrations_test.go:211-224`) — and
+  the header (:8-12) records that the frozen index was kept because that first token IS
+  the recorded checksum. A later row's value is `raw-b64:` + exactly 43 chars
+  (32 bytes → 43 unpadded base64url chars; length asserted in
+  `checkSecondSumIsTaggedBase64Text`) from `[A-Za-z0-9_-]`: at most 43 consecutive
+  hex-able chars, bounded before by the non-hex `:` and after by the applied_at length
+  varint SQLite stores between column payloads — it cannot form or extend a 64-char
+  `[0-9a-f]` run. So the file's only hex-64 token is 0001's checksum; the tamper hits
+  the anchor row and the refusal names `0001_init.sql` + "checksum", exactly what A-104
+  (`:293-299`), the canary (`dbfile_layout_test.go:49-62`) and the boot smoke
+  (`cmd/server/boot_test.go:274-293, 375-406`) require.
+- **A-104 + smoke re-run as the block demanded** — claimed exit 0 for
+  `make test-acceptance-go` and the smoke tag (trust-marked; the mechanism above is
+  statically verified, and the handoff also reports the unowned canary green inside
+  `check-fast`).
 
-Adding ANY second migration recorded as hex TEXT produces a second hex-64 token → the
-layout canary fails unconditionally (`len(locs) != 1`), and because SQLite allocates
-leaf-cell content downward from the page end, the later-inserted row (0002)
-typically sits at the LOWER byte offset, so the byte-tamper hits 0002's checksum and
-the refusal names `0002_lights.sql` — failing two more frozen oracles. No fix inside
-T-201's owns globs other than changing the recording encoding exists: the three
-oracle files are outside ownership (`dbfile_layout_test.go` is named NOT-ours at
-T-201.md:87-88; acceptance/** is hash-pinned in `harness/protected.sha256:5`).
+The storage asymmetry the round-1 block objected to is inherent to the frozen contract
+(only 0001's encoding is pinned, by name) and is now explicit, tagged, positionally
+deterministic, type-honest, and independently pinned by owned tests
+(`TestChecksumRecordingIsAnchorHexPlusTaggedBase64` verifies the tag as a literal —
+not the production constant — the 43-char payload, valid unpadded base64url, and digest
+equality against an independently recomputed sha256, plus byte-stability across
+reopen). Legacy DBs written by the two never-merged attempt binaries refuse at boot by
+design — correct behaviour of the guard against foreign representations, disclosed in
+the handoff, and no such DB can exist in production (M2 never shipped; real M1 DBs hold
+only 0001's hex row and upgrade cleanly, proven by `TestMigrationsUpgradeWithData`).
 
-**The fix is scoped to exactly what the frozen contract pins.** The A-104 contract
-sentence (acceptance/go/migrations_test.go:15-16) freezes hex-TEXT recording for
-*0001_init.sql only*: "the first migration file is migrations/0001_init.sql; its
-sha256 checksum is recorded in schema_migrations as 64-char lowercase hex". The diff
-keeps that row byte-identical in behavior (`checksumRecordValue(first=true)` → hex
-TEXT, internal/store/migrations.go, new hunk @@ -74,6 +76,39 @@) and records every
-later migration's digest as the raw 32-byte BLOB — 32 binary bytes cannot contain a
-64-char ASCII-hex run, so the one-token invariant now holds **by construction** for
-any future migration count, which the layout test's own header
-(dbfile_layout_test.go:19-22) invites the migration's task to make conscious.
+## 2. Round-1 secondary findings #2–#6 — all closed, verified in the diff bytes
 
-**The guard did not weaken — checked exhaustively for false accepts.**
-`decodeRecordedSum` maps both encodings to the hex digest string that
-`applyMigrations` compares against the file's digest: intact row (either encoding) →
-equal → boot; 32-byte tamper → different hex → refuse; 64-byte value → taken as the
-hex string → ≠ digest unless it literally IS the digest (i.e. the correct value in
-the old encoding); any other length → hex ≠ digest → refuse. There is no byte
-sequence a tamperer can write that both differs from the true digest and boots.
-Corroboration that the BLOB row is still guarded is *new* test
-`TestTamperedSecondMigrationChecksumRefusesOpenNamingItsFile` (corrupts 0002's stored
-bytes → refusal wraps `ErrChecksumMismatch`, names `0002_lights.sql`, carries both
-digests), and the unchanged `TestMigrationChecksumGuard` still proves the TEXT row's
-guard, including the uppercase and replaced-hex cases whose tampered values must
-appear verbatim in the refusal message. The ghost-version branch
-(`TestRecordedVersionWithoutEmbeddedFileRefusesOpen`) is untouched by the encoding
-change and still behaves (the ghost row is reported as no-embedded-file, not a
-checksum mismatch).
+- **#2 (assertion could not fail)** — closed. `checkEditUpdatesColumns` +
+  `backdateLightStamps` (`internal/store/lights_test.go:~651-685`) set
+  `created_at`/`updated_at` to `2020-01-01T00:00:00Z` before the edit, then assert
+  `created_at` stayed backdated, `updated_at` moved strictly past it, and the persisted
+  row carries the stamped value (`checkEditedPersisted`). An `EditLight` that skips the
+  re-stamp now fails at second precision.
+- **#3 (conditional assertion)** — closed. `checkNearbyOutsideRows`
+  (lights_test.go:~583-625) asserts the 8.1 m / 25.1 m candidates' presence in the
+  prefilter with unconditional `Fatalf` before the Haversine checks; no `if seen {}`
+  wrapping remains.
+- **#4 (tautological oracle)** — closed. `checkBBox` (lights_test.go:~878-915) pins
+  `metersPerDegree` against the independent mean-Earth figure
+  (`testMeanEarthRadiusM = 6371008.8`, 0.5% band — arithmetic checks out: 6371008.8·π/180
+  ≈ 111194.93 vs the constant 111194.9) and `checkBBoxBoundaryRows` places 99%-of-radius
+  points (must be inside) and 135% points (beyond the 110% safety, must be outside)
+  using only the independent figure. `offsetNorth`/`offsetEast` and all duplicate seeds
+  now use the test-side figure, so seeding no longer shares the store's constants. I
+  verified the boundary arithmetic at Groveland's latitude and at 89.9°: in/out
+  classifications hold with margin.
+- **#5 (non-specific error)** — closed. `checkCreateLightInvalidKind`
+  (lights_test.go:~239-258) asserts `errors.Is(err, errInvalidKind)` and that `lights`
+  still holds zero rows.
+- **#6 (handoff precision)** — closed. The new handoff states
+  `dbfile_layout_test.go` is not harness-protected but not owned by this task; the
+  seeds are now genuinely independent; `TestSchemaMatchesExpected` compares the `probe`
+  DDL (only runner-owned `schema_migrations` is excluded — correct, since its stored DDL
+  carries `IF NOT EXISTS`, which the oracle deliberately omits).
 
-**No test was weakened, skipped, deleted or special-cased.** Every modified owned
-assertion got strictly stronger: `checkTablesAreExactlyTheMigratedSchema` demands the
-exact 10-table set (was 2); `checkRecordedVersions` requires both versions in order
-(was one); the reopen count pins exactly 2 (was 1); `checkSyntheticFileChecksums`
-now decodes both encodings but still requires equality with sha256 of the file
-bytes. `TestMigrationsApplyCleanly`'s `recorded_checksum_is_64_char_lowercase_hex_of_file`
-subtest is unchanged and still pins 0001's row as hex TEXT. No `t.Skip`/`.only`/
-`//nolint` anywhere in the diff; new behaviour all has new tests.
+## 3. Deliverables re-verified (feature scope, unchanged from `93762ff`)
 
-## Deliverable-by-deliverable verification
+1. **`migrations/0002_lights.sql`** — statement-by-statement identical to
+   `testdata/schema.expected.sql:5-86` (users, photos, lights, `lights_geo`, partial
+   unique `lights_asset_no` with `WHERE asset_no IS NOT NULL AND deleted_at IS NULL` —
+   the A-208 asset-freeing semantics, reports + 2 time indexes, comments, comment_flags,
+   sessions, login_tokens), modulo whitespace. Plain CREATEs, no `IF NOT EXISTS`, no
+   comments; `0001_init.sql` absent from the diff (append-only respected).
+2. **Queries + gen** — `internal/store/queries/{lights,photos}.sql` cover every fixed
+   capability; every read and write filters `deleted_at IS NULL`; list order
+   `created_at DESC, id DESC`. The committed gen output is internally consistent with
+   the query files (narg→`sql.Null*`, positional `?N`, RETURNING scans, the
+   file-header comments attached to each file's first query in the Querier — same
+   pattern as baseline `gen/querier.go:12-14`), headers say `sqlc v1.31.1`, and
+   `sqlc.yaml` needs no change. The `BETWEEN`→`>=`/`<=` rewrite is a sound workaround
+   for the sqlc parser bug and is flagged for T-203 in open issues. Regeneration itself
+   trust-marked (generate-check claimed 0; the gate diffs it).
+3. **Typed wrappers** — all packet-mandated methods with the mandated signatures;
+   `LightID`/`PhotoID`/`Kind`+`ParseKind` (exact lowercase only, table-tested incl.
+   capitalised/padded/empty); `ErrNotFound` for missing AND soft-deleted on every
+   read/edit/delete; `ErrDuplicateAssetNo` on create and edit; negative
+   radius/limit/offset refused; `%w` wrapping (double-`%w` chains fine on go 1.27);
+   `context.Context` first. `CreateLight` validates the kind before any write
+   (parse-don't-validate at the store boundary).
+4. **Tests** — all real temp-file SQLite through `openFresh` (real migrations; no
+   mocks), raw-driver tampering for the checksum/upgrade cases, `fstest.MapFS` for the
+   0001-only legacy DB. `TestSchemaMatchesExpected` normalises both sides and compares
+   sorted sets (auto-indexes correctly excluded by the `sqlite_%` name filter; the
+   probe DDL correctly included). `TestMigrationsUpgradeWithData` asserts data
+   survival, both versions recorded once, `foreign_key_check` empty, `integrity_check`
+   ok, product schema usable. The A-205 store half seeds the drafts' fixture point
+   (42.7617, -71.0303, matching `admin_lights_go_test.go.txt:163`) at 7.9/8.1 m and
+   24.9/25.1 m around the 8 m/25 m radii, plus 150 m far and a soft-deleted 5 m
+   fixture, with membership classified at both radii. The A-208 half hides a deleted
+   light from all four read paths, proves soft-not-hard delete, frees the asset_no,
+   refuses double delete. Photos: round-trip, UNIQUE path + row count, ErrNotFound,
+   dangling-FK refusal, light→photo reference, id-order list.
 
-1. **`migrations/0002_lights.sql`** — compared statement-by-statement against
-   `testdata/schema.expected.sql:5-86` (product part): users, photos, lights,
-   `lights_geo`, partial-unique `lights_asset_no` (`WHERE asset_no IS NOT NULL AND
-   deleted_at IS NULL` — the A-208 asset-freeing semantics), reports + 2 time
-   indexes, comments, comment_flags, sessions, login_tokens — identical modulo
-   whitespace. Plain CREATEs, no `IF NOT EXISTS`, no comments, `0001_init.sql`
-   untouched (not in the diff). Append-only respected.
-2. **Queries + gen** — `internal/store/queries/{lights,photos}.sql` carry every
-   capability the packet fixes (CreateLight with NULL-able asset_no/photo_id/
-   created_by/accuracy_m; GetLightByAssetNo/ListRecentLights/NearbyLights/Update/
-   SoftDelete all filter `deleted_at IS NULL`; `ORDER BY created_at DESC, id DESC`
-   matches the frozen A-209 tie-break). The committed gen files are internally
-   consistent with the query files (narg→sql.Null* params, positional ?N, RETURNING
-   scans, alphabetised Querier with the file-header comments attached to each file's
-   first query — same pattern as baseline `gen/querier.go:12-14`), headers say
-   `sqlc v1.31.1` matching all four baseline gen files, and `sqlc.yaml` (schema
-   `migrations`, queries `internal/store/queries`, out `internal/store/gen`,
-   `emit_interface: true`) needs no change. Regeneration itself is trust-marked
-   (generate-check exit 0 claimed; the gate diffs it).
-3. **Typed wrappers** — every packet-mandated method present with the packet's
-   signatures: `CreateLight/GetLight/LightByAssetNo/RecentLights(limit,offset)/
-   EditLight/SoftDeleteLight/NearbyLights(lat,lon,radiusM)/CreatePhoto/PhotoByID`;
-   `LightID`/`PhotoID`/`Kind` + `ParseKind` (exact lowercase match only — tested
-   against capitalised/padded/empty/unknown); `ErrNotFound` mapping for
-   missing AND soft-deleted ids on every read/edit/delete; `ErrDuplicateAssetNo` on
-   create and edit. `bboxDegrees` uses a 1.10 over-cover factor — the bbox is a
-   strict superset of the radius disk (pinned by `TestBBoxDegrees` and by the
-   8.1 m/25.1 m rows appearing in results while their Haversine distance is above
-   the radius), which is exactly the packet's "prefilter, exact distance is
-   internal/geo's" division of labour. Negative radius/limit/offset refused.
-   `%w` wrapping (incl. double-`%w` sentinel chains, fine on go 1.27), `context`
-   first everywhere.
-4. **Tests** — all real temp-file SQLite through `openFresh` (real migrations
-   applied; no mocks anywhere). `TestSchemaMatchesExpected` normalises both sides
-   (comment strip, whitespace collapse, sorted set) and compares against the frozen
-   oracle; auto-indexes (`sqlite_autoindex_%`) are correctly excluded by the
-   `NOT LIKE 'sqlite_%'` name filter and NULL `sql`. `TestMigrationsUpgradeWithData`
-   applies 0001 alone via a filtered MapFS, seeds probe data, full-opens, asserts
-   survival + both versions + `foreign_key_check` empty + `integrity_check` ok +
-   product tables usable. The A-205 store half seeds Haversine-derived offsets at
-   7.9/8.1 m and 24.9/25.1 m around the drafts' fixture point (42.7617,-71.0303,
-   matching acceptance/drafts/admin_lights_go_test.go.txt:163), plus 150 m far and a
-   soft-deleted 5 m fixture, and classifies membership at both radii — exactly the
-   packet's table (T-201.md:76-78). The A-208 half hides a deleted light from all
-   four read paths, proves soft-not-hard delete by reading `deleted_at` back
-   non-NULL, frees the asset_no for reuse (partial unique index semantics), and
-   refuses a second delete. Photos: round-trip, UNIQUE path, FK dangling refusal,
-   id-order list.
+Baseline-test compatibility checked against the new encoding: the unchanged
+`checkRecordedChecksum` targets `version = '0001_init'` (still hex) ✓;
+`TestMigrationChecksumGuard`'s WHERE-less tamper UPDATE now hits both rows but 0001 is
+verified first in the sorted loop, so the refusal names `0001_init.sql` as asserted ✓;
+`TestRecordedVersionWithoutEmbeddedFileRefusesOpen`'s `0002_ghost` still lands in the
+ghost-version branch, not a checksum mismatch ✓; `checkSyntheticFileChecksums` now
+expects the per-position representations (index 0 hex, index 1 tagged) recomputed from
+the synthetic file bytes with literals ✓.
 
-## Security pass
+## 4. Security pass
 
-Store-only task — no handlers, templates, JS or uploads, so CSRF/XSS/`#map` swap/
-upload caps are N/A here. SQL: 100% sqlc-generated bound parameters; the few raw
-`db.sql` statements in tests use bound params. No `template.HTML`. No secrets, no
-log output of sensitive values (error messages carry labels/asset numbers/ids and
-the *migration* digests — bookkeeping, not secrets). No filesystem access at all in
-the store layer, so no path-traversal vector is introduced (the photo `path` column
-is stored verbatim; minting/validating/serving paths is T-202/T-206 territory, and
-the store never opens them). No new module deps (`allow_deps: []` respected — diff
-touches no go.mod/go.sum).
+Store-only task — no handlers/templates/JS/uploads, so CSRF/XSS/`#map`/upload-cap
+concerns are N/A. SQL: everything is sqlc-generated or test-side bound parameters; no
+string-interpolated SQL anywhere in the diff. No `template.HTML`. No filesystem access
+in the store layer — the photo `path` column is stored verbatim and never opened, so no
+path-traversal vector is introduced here (minting/validating paths is T-202/T-206).
+No secrets in output: refusal messages carry migration digests and file names —
+bookkeeping, not secrets. `go.mod` untouched; `encoding/base64` is stdlib
+(`allow_deps: []` respected).
 
-## Architecture pass
+## 5. Architecture pass (docs/spec/architecture.md)
 
-Ownership: every touched path matches the owns globs (`migrations/**`,
-`internal/store/queries/**`, `internal/store/gen/**`, `internal/store/lights*.go`,
-`photos*.go`, `migrations*.go`) plus the sanctioned handoff.
-`store.go`/`store_test.go`/`dbfile_layout_test.go`/`session*`/`user*`/`acceptance/**`/
-Makefile/goldens: absent from the diff (verified file-by-file). Typed IDs
-(`LightID`, `PhotoID`) with boundary parsing (`ParseKind`, `NewLight` pointer-NULLs)
-— the parse-don't-validate rule applied at the store's boundary. Status columns are
-read verbatim only; derivation stays behind `status.Derive` (untouched, per the
-ownership map at docs/spec/architecture.md:24). No "Phase N" strings, no
-TODO/FIXME/panic, no `console.log` (no JS). The migration runner remains the single
-`schema_migrations` owner (docs/spec/architecture.md:18) — the encoding change is
-inside that ownership.
+- **Ownership map**: every touched path matches the owns globs
+  (`migrations/**`, `internal/store/queries/**`, `gen/**`, `lights*.go`, `photos*.go`,
+  `migrations*.go`) plus the sanctioned handoff. `store.go`, `store_test.go`,
+  `dbfile_layout_test.go`, `acceptance/**`, `harness/**` (except the handoff),
+  Makefile, goldens: absent from the diff, verified file-by-file.
+  `harness/policy.json:37-51` protected list untouched.
+- **Typed IDs / parse-don't-validate**: `LightID`, `PhotoID`, `ParseKind`,
+  `NewLight` pointer-NULLs — the boundary-parser rule applied at the store's edge.
+- **Status derivation**: status columns are read verbatim; no derivation logic added —
+  `status.Derive` remains the only path (architecture.md:24), untouched.
+- **HTMX/#map**: no web files touched; N/A by scope.
+- Hygiene: no TODO/FIXME/`panic(`/`t.Skip`/`.only`/`.fixme`/unexplained `//nolint`/
+  `console.log`/"Phase N" in the added code bytes (the only regex hits are the
+  handoff .md quoting their absence); the strengthened helpers split to stay under the
+  cyclop budget is the codebase's existing pattern.
 
-## Residual findings (none blocking)
+## 6. Residual findings (none blocking)
 
-1. **[Low] `schema_migrations.sha256` is declared `TEXT NOT NULL`
-   (internal/store/migrations.go:70-75) but now stores raw BLOBs for every
-   migration after the first.** SQLite's dynamic typing keeps this functional
-   (TEXT affinity does not convert BLOB bindings) and both encodings decode
-   correctly, but the column declaration no longer describes its contents, and
-   tooling that assumes TEXT (ORMs, `sqlite3` CLI rendering) will see blobs on the
-   later rows. Deliberate, loudly documented in code comments and the handoff, and
-   the only ownership-respecting way to keep the three frozen first-token oracles
-   true with ≥2 migrations; a future task that owns a migration could consider
-   amending the runner-owned DDL comment/column docs. Not a guard-weakening (see
-   analysis above).
-2. **[Low] `checkNearbyOutsideRows` (internal/store/lights_test.go, diff) only
-   asserts distance when the row was seen** (`if seen8 { ... }`). Soft, but it is
-   supplementary: membership of the 8.1 m/25.1 m rows is already hard-asserted by
-   the two `checkNearby` subtests' `wantIn` lists, so no false green is possible.
-3. **[Info] `NearbyLights` does not range-check lat/lon** (|lat|>90, Inf). NaN REALs
-   become NULL in SQLite and fail the NOT NULL constraint loudly; the bbox is an
-   internal prefilter whose callers (T-204/T-205) own coordinate validation per the
-   packet ("just return the rows"). Acceptable.
-4. **[Info] `EditLight`'s `assetNo == nil` means "clear"** — overloading documented
-   and tested (`checkEditClearsAssetNo`); the HTTP layer implements A-208's
-   "unspecified fields keep values" via read-modify-write (T-205's concern).
-5. **[Info] `isDuplicateAssetNo` matches driver error-message text** (two spellings:
-   index name and table.column). Pragmatic — database/sql exposes no portable
-   SQLite error code — and both spellings are tested; a driver upgrade changing the
-   format would surface as 500s not silent accepts.
-6. **[Info] Unverifiable in this session:** executed exit codes (`make check-fast`,
-   `generate-check`, `test-acceptance-go`, smoke, `e2e-task` no-op) and the sqlc
-   regeneration identity. Static consistency checks pass (Makefile targets exist at
-   Makefile:68-136; the claimed red→green mechanism for
-   `TestChecksumIsFirstAndOnlyHexTokenInDBFile`, A-104
-   `TestA104RefusesTamperedChecksum` and `TestBootSmokeRefusesTamperedChecksum`
-   follows from the encoding analysis above).
+1. **[Low] The hex anchor is positional (index 0), while A-104 pins `0001_init.sql` by
+   name** (`sumRecordValue`, migrations.go:~110-115). The two are equivalent only while
+   nothing sorts before `0001_init.sql` — guaranteed by the append-only migration rule
+   and by the fact that A-104's own contract sentence would need rewriting otherwise.
+   There is a tripwire: `checkFirstSumIsHexText` queries `WHERE version = '0001_init'`
+   and would fail loudly if a lower-sorting file ever shifted the anchor. A future
+   runner task could pin by version name instead of index; not worth blocking.
+2. **[Info] `TestDBFileHexTokenIsExactlyTheFirstMigrationChecksum`** deliberately
+   duplicates the unowned canary's invariant in an owned file. That is an additional
+   local regression tripwire ("any code writing another hex TEXT token fails here"),
+   not a weakening — the canary itself is untouched and still runs.
+3. **[Info] The disclosed `test-run.db` repair** (temporary test appended to an owned
+   test file, run to rewrite one stale row, removed before commit) is unconventional,
+   but it is honestly disclosed, the committed tree never carried it, and it is the
+   moral equivalent of the README-sanctioned `rm -f test-run.db*`, which the session's
+   shell restrictions made unavailable. No repo rule governs gitignored local state;
+   the guard's clean-worktree check is on the committed tree.
+4. **[Info] `NearbyLights` performs no lat/lon range validation** (|lat|>90, ±Inf,
+   antimeridian wrap of the lon box). Per the packet ("just return the rows"),
+   coordinate validation belongs to the HTTP/geo tasks (T-204/T-205, TOWN_BBOX);
+   NaN fails loudly against the NOT NULL columns. The superset contract that matters is
+   pinned (`checkBBox` + near-boundary rows).
+5. **[Info] `isDuplicateAssetNo` string-matches the driver's error text** (two
+   spellings: index name and table.column). Pragmatic — database/sql exposes no
+   portable SQLite error code — and the sentinel is exercised on both create and edit;
+   a driver message-format change would surface as 500s, not silent accepts.
+6. **[Info] Trust-marked execution claims**: `check-fast`, `generate-check`,
+   `test-acceptance-go`, smoke, `e2e-task` no-op (confirmed: `Makefile:111-116` greps
+   claims and finds none for T-201 → `--pass-with-no-tests`; the packet expects exactly
+   this), and the commit hooks. Static consistency supports them: no helper-name
+   collisions with `store_test.go`, imports are baseline+stdlib, the module path
+   matches. The handoff's open issue #3 (`e2e-task` is spelled `TASK=` in the Makefile,
+   AGENTS.md says `T=`) is correct — verified at Makefile:8,113.
 
 ## Verdict rationale
 
-The retry does what its handoff claims and nothing it shouldn't. The prior blocker
-was real and the fix is the minimal within-ownership resolution: it preserves every
-frozen contract byte (0001's row stays 64-char lowercase-hex TEXT exactly as A-104
-worded it), makes the first-and-only-hex-token invariant hold by construction for
-all future migrations instead of by page-layout luck, keeps the boot guard
-equally strong for both encodings (proven by new tamper tests plus the unchanged
-guard tests), and strengthens every owned assertion it touched. All four
-deliverables match the packet precisely — the migration is byte-equivalent to the
-frozen oracle, the query set covers the fixed capabilities, the wrapper API matches
-the mandated signatures with typed IDs and sentinels, and the tests exercise real
-databases at Haversine-derived offsets exactly as the packet dictates. No protected
-path is touched, no dependency added, no test weakened. Residual findings are
-design-notes and trust-marked execution claims.
+The round-1 BLOCK was about *how* the encoding conflict was resolved: an undocumented
+length heuristic, a BLOB stored in a TEXT column, and a migration-1 special case whose
+only stated rationale was the canary. The retry implements precisely the remedy that
+block sanctioned, in the file this task owns: an explicit, runner-owned, documented
+encoding contract with an honest column type (typeof asserted), no decode path at all,
+and byte-exact positional verification that is *stricter* than both the baseline and
+the blocked attempt — proven against a real tampered database, including the
+correct-digest-wrong-encoding case. The frozen A-104 anchor contract, the canary and
+the boot smoke now hold by construction rather than by page-layout luck, and the A-104
+acceptance + smoke suites were re-run as demanded. All four secondary findings are
+closed with strictly stronger, mutation-sensitive assertions, and the feature scope —
+already verified sound by both round-1 reviews — is unchanged: the migration is
+statement-identical to the frozen oracle, the query set covers the fixed capabilities,
+the wrapper API matches the mandated signatures with typed IDs and sentinels, and every
+test runs against a real migrated SQLite database. No protected path is touched, no
+dependency is added, no test is weakened. Residual findings are design notes and
+trust-marked execution claims.
 
 VERDICT: PASS
