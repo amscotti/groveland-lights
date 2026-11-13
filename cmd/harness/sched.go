@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -547,8 +546,6 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-var reIntegratorPrompt = regexp.MustCompile(`integrator`)
-
 func runIntegrator(root, wtPath string, t *Task, pol Policy) error {
 	transcript := filepath.Join(root, "harness", "runs", timestamp(), t.ID, "integrator.jsonl")
 	_ = os.MkdirAll(filepath.Dir(transcript), 0o750)
@@ -558,11 +555,20 @@ func runIntegrator(root, wtPath string, t *Task, pol Policy) error {
 	if err := runAgent(root, wtPath, "integrator", pol.Roles["integrator"], t.ID, filepath.Join(root, "harness", "tasks", t.ID+".md"), msg, transcript, 30); err != nil {
 		return err
 	}
-	if reIntegratorPrompt.MatchString(conflicts) && conflicts == "" {
+	if conflicts != "" && strings.Contains(conflicts, "integrator") {
 		return fmt.Errorf("no conflict files listed")
 	}
-	_, err := gitOut(wtPath, "rebase", "--continue")
-	return err
+	if _, err := gitOut(wtPath, "rebase", "--continue"); err != nil {
+		// The integrator may have completed the rebase itself (staged AND
+		// continued). "no rebase in progress" with a clean tree is success.
+		if strings.Contains(err.Error(), "no rebase in progress") {
+			if unstaged := gitOut2(wtPath, "diff", "--name-only", "--diff-filter=U"); unstaged == "" {
+				return nil
+			}
+		}
+		return err
+	}
+	return nil
 }
 
 var _ = bufio.NewReader // keep import if unused in some builds
