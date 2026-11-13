@@ -35,7 +35,8 @@ and T-203 freezes `Path=/` and `MaxAge` 24 h (`harness/tasks/T-203.md:62-64`);
 the handoff explicitly claims this closes the attempt-3 finding
 (`harness/handoffs/T-200.md` fix-map row "alt 7 / reviewer 1"). It does not.
 The same loop also never asserts `Max-Age`/`Expires`, so a session cookie with
-no 24 h lifetime passes the acceptance oracle even though T-203 requires it.
+no 24 h lifetime passes the acceptance oracle even though T-203 (and
+`README.md:105`) require it.
 This is a coverage-theatre/weaker-assertion issue, not an unsatisfiable test:
 the functional exchange and guard are still enforced, and the cookie's path
 does not affect the tested `/admin` flows. It is worth a one-line
@@ -90,8 +91,9 @@ await page.goto('/admin');
 `click()` does not wait for a navigation triggered by the button; the
 immediate `goto` can cancel the in-flight delete POST/303. The frozen contract
 is a 303 to `/admin` (`README.md:94`); wait for the URL/navigation (or the
-row's disappearance) before asserting the list. This is a mechanical
-`expect.poll`/`waitForURL` fix, but it should not ship frozen.
+row's disappearance) before asserting the list. This is a low-severity
+flake; T-207 rule 3 permits the mechanical `expect.poll`/`waitForURL` fix, but
+the frozen oracle should preferably carry the wait itself.
 
 ### 5. [Low] Edit "unspecified fields keep values" only proves asset + position
 
