@@ -31,8 +31,10 @@ The contract makes the token *globally* one-time:
 `login_tokens` row whose `used_at` makes a second call return `ErrTokenReused`;
 the holdout variant explicitly requires “one-time token is GLOBAL — client B
 (fresh jar) cannot replay client A's consumed token” (`harness/handoffs/T-200.md:29`).
-The visible e2e helper is therefore incompatible with the visible A-201 Go draft
-and the holdout.
+The visible e2e helper is therefore incompatible with T-203's global
+consume-once semantics and with the holdout variant. (The visible A-201 Go
+draft only replays from the same client, so it would not catch a per-client
+workaround; the holdout does.)
 
 Consequences, all fatal to T-207:
 
@@ -41,10 +43,10 @@ Consequences, all fatal to T-207:
   per project can succeed.
 - `playwright.config.ts:49-67` starts one webServer for the whole run with
   `DB_PATH=./test-run.db`. The `login_tokens` row persists, so a second
-  `npx playwright test` run has **zero** valid logins, and even the same
-  `make check` fails: `make check` runs `e2e` and then `a11y` as separate
-  Playwright invocations (`Makefile:136`); the `e2e` run consumes the token and
-  the `a11y` run's `@a11y` test (`admin-walk.spec.ts.txt:270`) then gets 403.
+  `npx playwright test` run has **zero** valid logins. Even if the `e2e` target
+  were made green, `make check` runs `a11y` as a second Playwright invocation
+  (`Makefile:136`) against the same DB; the `e2e` run consumes the token and the
+  `a11y` run's `@a11y` test (`admin-walk.spec.ts.txt:270`) then gets 403.
 - The only ways to make this green are to make the token reusable in test mode
   (a test-only special case that breaks the frozen A-201 replay assertion and
   the holdout) or to rewrite the e2e helper/oracle. That is exactly the
