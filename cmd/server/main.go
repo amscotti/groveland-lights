@@ -46,9 +46,7 @@ func run() error {
 	// cannot be acted on, so it is deliberately discarded.
 	defer func() { _ = db.Close() }()
 
-	web.SetProbeStore(db)
-
-	srv, err := web.New(cfg, logger)
+	srv, err := web.New(cfg, logger, db)
 	if err != nil {
 		return err
 	}

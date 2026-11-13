@@ -10,6 +10,7 @@ import (
 
 	assets "github.com/amscotti/groveland-lights"
 	"github.com/amscotti/groveland-lights/internal/config"
+	"github.com/amscotti/groveland-lights/internal/store"
 )
 
 // route is one mux registration. Method pattern per Go 1.22+ ServeMux.
@@ -26,20 +27,25 @@ func register(r route) { routes = append(routes, r) }
 
 // Server carries shared dependencies for handlers.
 type Server struct {
-	Cfg    config.Config
-	Log    *slog.Logger
+	Cfg config.Config
+	Log *slog.Logger
+	// Store is the SQLite database opened at boot and handed to every
+	// feature through New. It is nil only in unit tests that never touch
+	// the store; probe handlers answer 500 while it is nil.
+	Store  *store.DB
 	tpl    *templates
 	routes []route
 	mux    *http.ServeMux
 }
 
 // New assembles the server: templates, middleware and all registered routes.
-func New(cfg config.Config, log *slog.Logger) (*Server, error) {
+// db may be nil in unit tests that never touch the store.
+func New(cfg config.Config, log *slog.Logger, db *store.DB) (*Server, error) {
 	tpl, err := parseTemplates()
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{Cfg: cfg, Log: log, tpl: tpl, routes: routes}
+	s := &Server{Cfg: cfg, Log: log, Store: db, tpl: tpl, routes: routes}
 	return s, nil
 }
 

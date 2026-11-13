@@ -27,7 +27,9 @@ var tPath = os.TempDir()
 
 func newTestServer(t *testing.T, env config.Env) *Server {
 	t.Helper()
-	s, err := New(testConfig(env), slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	// Nil store: tests here never touch the database; probe tests that need
+	// a counter open a real temp store and set Server.Store themselves.
+	s, err := New(testConfig(env), slog.New(slog.NewTextHandler(os.Stderr, nil)), nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

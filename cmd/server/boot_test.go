@@ -1,9 +1,9 @@
 //go:build smoke
 
 // Boot-level integration tests for the server binary: the wiring main.go
-// does before serving (store.Open at boot, SetProbeStore, graceful shutdown)
-// is invisible to in-process handler tests, so these spawn bin/server and
-// exercise it black-box on a real port with a temp SQLite DB. They are the
+// does before serving (store.Open at boot, store handed to web.New, graceful
+// shutdown) is invisible to in-process handler tests, so these spawn
+// bin/server and exercise it black-box on a real port with a temp SQLite DB. They are the
 // unit-side equivalent of the A-103/A-104 draft contracts (persistence across
 // SIGTERM; checksum-mismatch boot refusal) and complement the protected
 // acceptance suite.

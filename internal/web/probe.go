@@ -4,12 +4,9 @@
 // double-submit CSRF, an HTMX partial and a no-JS form fallback (303 back to
 // the home page).
 //
-// SCAFFOLD: the store reaches these handlers through a package-level pointer
-// (SetProbeStore, called by main before web.New) because web.go — where a
-// store field on Server would live — is not owned by this file. Refactor
-// point: move the store onto Server (and render the home mount's live
-// fragment server-side with it) once web.go ownership allows; nothing else
-// here would change.
+// The store reaches these handlers through Server.Store (wired by main via
+// web.New); while it is nil — only possible in tests that never open a store
+// — every probe route answers 500 (a wiring bug, logged as such).
 package web
 
 import (
@@ -21,21 +18,12 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
-
-	"github.com/amscotti/groveland-lights/internal/store"
 )
 
-// probeStore is the process-wide store used by the probe handlers. It is nil
-// until SetProbeStore wires it at boot; while nil, every probe route answers
-// 500 (a boot-ordering bug, logged as such).
-var probeStore *store.DB
+const probeContentType = "text/html; charset=utf-8"
 
-// SetProbeStore wires the store the probe handlers read and increment
-// through. Call it once at boot, before web.New.
-func SetProbeStore(db *store.DB) { probeStore = db }
-
-// errProbeStoreUnset reports a probe request served before SetProbeStore.
-var errProbeStoreUnset = errors.New("probe: store not wired (SetProbeStore was not called)")
+// errProbeStoreNotWired reports a probe request served with a nil Server.Store.
+var errProbeStoreNotWired = errors.New("probe: store not wired")
 
 func init() {
 	register(route{pattern: "GET /probe", handler: probeGet})
@@ -66,22 +54,22 @@ func (t *templates) renderPartial(w io.Writer, name string, data any) error {
 	return err
 }
 
-// probeCount reads the counter through the wired store, collapsing the unset
-// case into an error so handlers keep a single failure path.
-func probeCount(ctx context.Context) (int64, error) {
-	if probeStore == nil {
-		return 0, errProbeStoreUnset
+// probeCount reads the counter through Server.Store, collapsing the nil
+// store into an error so handlers keep a single failure path.
+func (s *Server) probeCount(ctx context.Context) (int64, error) {
+	if s.Store == nil {
+		return 0, errProbeStoreNotWired
 	}
-	return probeStore.ProbeCount(ctx)
+	return s.Store.ProbeCount(ctx)
 }
 
-// probeInc increments the counter through the wired store, collapsing the
-// unset case into an error so handlers keep a single failure path.
-func probeInc(ctx context.Context) (int64, error) {
-	if probeStore == nil {
-		return 0, errProbeStoreUnset
+// probeInc increments the counter through Server.Store, collapsing the nil
+// store into an error so handlers keep a single failure path.
+func (s *Server) probeInc(ctx context.Context) (int64, error) {
+	if s.Store == nil {
+		return 0, errProbeStoreNotWired
 	}
-	return probeStore.ProbeInc(ctx)
+	return s.Store.ProbeInc(ctx)
 }
 
 // probeGet renders the probe fragment: heading, current count and the
@@ -89,7 +77,7 @@ func probeInc(ctx context.Context) (int64, error) {
 // home mount, hx-post on the form) and swaps it into <section id="probe">.
 func probeGet(w http.ResponseWriter, r *http.Request) {
 	s := serverFrom(r.Context())
-	n, err := probeCount(r.Context())
+	n, err := s.probeCount(r.Context())
 	if err != nil {
 		s.Log.Error("probe: count", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -100,6 +88,10 @@ func probeGet(w http.ResponseWriter, r *http.Request) {
 		return // IssueCSRFToken could not mint a token and answered 500.
 	}
 	data := probeData{Count: n, CSRFToken: token}
+	// The fragment is a full HTML document for a no-JS visitor who navigates
+	// here directly; with the global nosniff header it must not be left to
+	// sniffing (which reads it as text/plain and shows escaped source).
+	w.Header().Set("Content-Type", probeContentType)
 	if err := s.tpl.renderPartial(w, "partials/probe.html", data); err != nil {
 		s.Log.Error("probe: render", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -145,7 +137,7 @@ func probePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	n, err := probeInc(r.Context())
+	n, err := s.probeInc(r.Context())
 	if err != nil {
 		s.Log.Error("probe: inc", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -164,6 +156,9 @@ func probePost(w http.ResponseWriter, r *http.Request) {
 		return // IssueCSRFToken could not mint a token and answered 500.
 	}
 	data := probeData{Count: n, CSRFToken: token}
+	// Same nosniff reasoning as probeGet: the swapped fragment must declare
+	// itself HTML, not rely on sniffing.
+	w.Header().Set("Content-Type", probeContentType)
 	if err := s.tpl.renderPartial(w, "partials/probe.html", data); err != nil {
 		s.Log.Error("probe: render", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -175,7 +170,7 @@ func probePost(w http.ResponseWriter, r *http.Request) {
 // (contract A-103). JS clients get the same markup refreshed by htmx.
 func probeFragment(w http.ResponseWriter, r *http.Request) (template.HTML, error) { //nolint:forbidigo // §8.4 audited door: the ONLY template.HTML return type, for server-rendered fragments
 	s := serverFrom(r.Context())
-	n, err := probeCount(r.Context())
+	n, err := s.probeCount(r.Context())
 	if err != nil {
 		return "", err
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
@@ -22,20 +23,24 @@ import (
 // the span sits between the prefix and the digits in the HTML source.
 var probeReCount = regexp.MustCompile(`<span id="probe-count">(\d+)</span>`)
 
+// probeReToken extracts the minted CSRF token from the fragment's hidden
+// input (used by the wire-level Content-Type test).
+var probeReToken = regexp.MustCompile(`<input type="hidden" name="csrf_token" value="([^"]+)">`)
+
 // newProbeServer builds a Server whose probe handlers run against a real
-// store (store.Open on a temp-file SQLite DB, migrations included) wired
-// through the same SetProbeStore call main uses. Cleanup closes the store
-// and unsets the package-level wiring so rows stay independent.
-func newProbeServer(t *testing.T) *Server {
+// store: store.Open on a temp-file SQLite DB (migrations included), set on
+// Server.Store exactly as main's web.New call does. Cleanup closes the
+// store, so rows stay independent per test.
+func newProbeServer(t *testing.T) (*Server, *store.DB) {
 	t.Helper()
 	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "probe.db"))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	SetProbeStore(db)
-	t.Cleanup(func() { SetProbeStore(nil) })
-	return newTestServer(t, config.EnvTest)
+	s := newTestServer(t, config.EnvTest)
+	s.Store = db
+	return s, db
 }
 
 // probeMint GETs /probe through the full middleware chain once: it returns
@@ -103,13 +108,13 @@ func probePostForm(t *testing.T, s *Server, cookie *http.Cookie, form url.Values
 	return rec
 }
 
-// probeCountNow reads the counter straight from the wired store.
-func probeCountNow(t *testing.T) int64 {
+// probeCountNow reads the counter straight from the store under test.
+func probeCountNow(t *testing.T, db *store.DB) int64 {
 	t.Helper()
-	if probeStore == nil {
+	if db == nil {
 		t.Fatal("probe store not wired")
 	}
-	n, err := probeStore.ProbeCount(context.Background())
+	n, err := db.ProbeCount(context.Background())
 	if err != nil {
 		t.Fatalf("ProbeCount: %v", err)
 	}
@@ -133,7 +138,7 @@ func probeTamper(token string) string {
 
 func TestProbeGet(t *testing.T) {
 	t.Run("renders the contract fragment", func(t *testing.T) {
-		s := newProbeServer(t)
+		s, _ := newProbeServer(t)
 		body, cookie, n := probeMint(t, s)
 
 		// Frozen fragment contract: h2 heading exactly "Probe"; the count
@@ -161,7 +166,7 @@ func TestProbeGet(t *testing.T) {
 	})
 
 	t.Run(`fragment has no html/body and no id="map"`, func(t *testing.T) {
-		s := newProbeServer(t)
+		s, _ := newProbeServer(t)
 		body := s.probeGet(t).Body.String()
 		// The fragment is swapped INTO the home page: a full document here
 		// would nest html/body tags, and id="map" would collide with the
@@ -176,19 +181,20 @@ func TestProbeGet(t *testing.T) {
 		}
 	})
 
-	t.Run("store unset answers 500", func(t *testing.T) {
-		s := newProbeServer(t)
-		SetProbeStore(nil)
+	t.Run("store nil answers 500", func(t *testing.T) {
+		// newTestServer wires no store (Server.Store == nil): the same path
+		// a mis-booted server would take.
+		s := newTestServer(t, config.EnvTest)
 		rec := httptest.NewRecorder()
 		s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/probe", nil))
 		if rec.Code != http.StatusInternalServerError {
-			t.Fatalf("GET /probe with store unset: status %d, want 500", rec.Code)
+			t.Fatalf("GET /probe with nil store: status %d, want 500", rec.Code)
 		}
 	})
 
 	t.Run("store failure answers 500", func(t *testing.T) {
-		s := newProbeServer(t)
-		if err := probeStore.Close(); err != nil {
+		s, db := newProbeServer(t)
+		if err := db.Close(); err != nil {
 			t.Fatalf("close store: %v", err)
 		}
 		rec := httptest.NewRecorder()
@@ -201,7 +207,7 @@ func TestProbeGet(t *testing.T) {
 
 func TestProbePost(t *testing.T) {
 	t.Run("valid token increments", func(t *testing.T) {
-		s := newProbeServer(t)
+		s, db := newProbeServer(t)
 		_, cookie, n := probeMint(t, s)
 
 		form := url.Values{CSRFTokenName: {cookie.Value}}
@@ -217,13 +223,13 @@ func TestProbePost(t *testing.T) {
 		if err != nil || got != n+1 {
 			t.Fatalf("POST /probe fragment count = %v, want %d; body:\n%s", m[1], n+1, rec.Body.String())
 		}
-		if got := probeCountNow(t); got != n+1 {
+		if got := probeCountNow(t, db); got != n+1 {
 			t.Fatalf("store count after valid POST = %d, want %d", got, n+1)
 		}
 	})
 
 	t.Run("missing token 403 leaves count unchanged", func(t *testing.T) {
-		s := newProbeServer(t)
+		s, db := newProbeServer(t)
 		_, cookie, n := probeMint(t, s)
 
 		// Empty body: no csrf_token field at all (HTMX-shaped header, as the
@@ -232,13 +238,13 @@ func TestProbePost(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("POST /probe without csrf_token: status %d, want 403; body:\n%s", rec.Code, rec.Body.String())
 		}
-		if got := probeCountNow(t); got != n {
+		if got := probeCountNow(t, db); got != n {
 			t.Fatalf("count changed after rejected POST: %d, want %d", got, n)
 		}
 	})
 
 	t.Run("tampered token 403", func(t *testing.T) {
-		s := newProbeServer(t)
+		s, db := newProbeServer(t)
 		_, cookie, n := probeMint(t, s)
 
 		form := url.Values{CSRFTokenName: {probeTamper(cookie.Value)}}
@@ -246,13 +252,13 @@ func TestProbePost(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("POST /probe with tampered csrf_token: status %d, want 403; body:\n%s", rec.Code, rec.Body.String())
 		}
-		if got := probeCountNow(t); got != n {
+		if got := probeCountNow(t, db); got != n {
 			t.Fatalf("count changed after tampered POST: %d, want %d", got, n)
 		}
 	})
 
 	t.Run("non-HTMX post redirects 303 to /", func(t *testing.T) {
-		s := newProbeServer(t)
+		s, db := newProbeServer(t)
 		_, cookie, n := probeMint(t, s)
 
 		// The no-JS submit: valid token, no HX-Request header. The counter
@@ -265,13 +271,13 @@ func TestProbePost(t *testing.T) {
 		if loc := rec.Header().Get("Location"); loc != "/" {
 			t.Fatalf("POST /probe without HX-Request: Location = %q, want \"/\"", loc)
 		}
-		if got := probeCountNow(t); got != n+1 {
+		if got := probeCountNow(t, db); got != n+1 {
 			t.Fatalf("count after no-JS POST = %d, want %d", got, n+1)
 		}
 	})
 
 	t.Run("unparseable body 400", func(t *testing.T) {
-		s := newProbeServer(t)
+		s, db := newProbeServer(t)
 		_, cookie, n := probeMint(t, s)
 
 		// An invalid media type is the one POST shape ParseForm itself
@@ -285,7 +291,7 @@ func TestProbePost(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("POST /probe with unparseable body: status %d, want 400", rec.Code)
 		}
-		if got := probeCountNow(t); got != n {
+		if got := probeCountNow(t, db); got != n {
 			t.Fatalf("count changed after unparseable POST: %d, want %d", got, n)
 		}
 	})
@@ -295,7 +301,7 @@ func TestProbePost(t *testing.T) {
 // section with the HTMX load attributes and the plain link no-JS visitors
 // follow to reach the fragment's form.
 func TestProbeHomeMount(t *testing.T) {
-	s := newProbeServer(t)
+	s, _ := newProbeServer(t)
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
 	if rec.Code != http.StatusOK {
@@ -313,5 +319,101 @@ func TestProbeHomeMount(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("GET / missing probe mount markup %q; body:\n%s", want, body)
 		}
+	}
+}
+
+// TestProbeFragmentContentType pins the judge-M1 gap-(b) fix: both fragment
+// transports set Content-Type exactly "text/html; charset=utf-8" before
+// writing. The assertions run over a real net/http connection
+// (httptest.NewServer), not a ResponseRecorder, because the defect itself was
+// wire-level: without the header the server sniffs the fragment — it starts
+// with <h2>, which is not in Go's HTML sniff signature list — into
+// "text/plain; charset=utf-8", and the global X-Content-Type-Options: nosniff
+// then makes a no-JS visitor who navigates to /probe directly see escaped
+// source.
+func TestProbeFragmentContentType(t *testing.T) {
+	const want = "text/html; charset=utf-8"
+
+	cases := []struct {
+		name string
+		do   func(t *testing.T, c *http.Client, base string) *http.Response
+	}{
+		{
+			name: "GET /probe",
+			do: func(t *testing.T, c *http.Client, base string) *http.Response {
+				t.Helper()
+				req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, base+"/probe", nil)
+				if err != nil {
+					t.Fatalf("new GET /probe: %v", err)
+				}
+				resp, err := c.Do(req)
+				if err != nil {
+					t.Fatalf("GET /probe: %v", err)
+				}
+				return resp
+			},
+		},
+		{
+			name: "HTMX POST /probe",
+			do: func(t *testing.T, c *http.Client, base string) *http.Response {
+				t.Helper()
+				// Mint a token first: the jar captures the CSRF cookie.
+				mintReq, err := http.NewRequestWithContext(context.Background(), http.MethodGet, base+"/probe", nil)
+				if err != nil {
+					t.Fatalf("new GET /probe (mint): %v", err)
+				}
+				mint, err := c.Do(mintReq)
+				if err != nil {
+					t.Fatalf("GET /probe (mint): %v", err)
+				}
+				body, err := io.ReadAll(mint.Body)
+				_ = mint.Body.Close()
+				if err != nil {
+					t.Fatalf("GET /probe (mint) body: %v", err)
+				}
+				m := probeReToken.FindStringSubmatch(string(body))
+				if m == nil {
+					t.Fatalf("minted fragment has no csrf_token input; body:\n%s", body)
+				}
+				form := url.Values{CSRFTokenName: {m[1]}}
+				req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, base+"/probe", strings.NewReader(form.Encode()))
+				if err != nil {
+					t.Fatalf("new POST /probe: %v", err)
+				}
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				req.Header.Set("HX-Request", "true")
+				resp, err := c.Do(req)
+				if err != nil {
+					t.Fatalf("POST /probe: %v", err)
+				}
+				return resp
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newProbeServer(t)
+			srv := httptest.NewServer(s.Handler())
+			t.Cleanup(srv.Close)
+			jar, err := cookiejar.New(nil)
+			if err != nil {
+				t.Fatalf("cookie jar: %v", err)
+			}
+			client := &http.Client{Jar: jar}
+
+			resp := tc.do(t, client, srv.URL)
+			body, err := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if err != nil {
+				t.Fatalf("%s: read body: %v", tc.name, err)
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("%s: status %d, want 200; body:\n%s", tc.name, resp.StatusCode, body)
+			}
+			if got := resp.Header.Get("Content-Type"); got != want {
+				t.Fatalf("%s: fragment Content-Type = %q, want exactly %q; body:\n%s", tc.name, got, want, body)
+			}
+		})
 	}
 }
