@@ -1,0 +1,1272 @@
+diff --git a/harness/handoffs/T-206.md b/harness/handoffs/T-206.md
+new file mode 100644
+index 0000000..2d00908
+--- /dev/null
++++ b/harness/handoffs/T-206.md
+@@ -0,0 +1,209 @@
++# T-206 handoff — Photo HTTP side: upload parsing, storage, serving
++
++VERDICT: DONE. Commit `3cd232b` on `task/T-206` (this worktree). `make
++check-fast`, the packet's `go test ./internal/web/... -count=1`, `make
++e2e-task TASK=T-206` and the full `make check` gate battery are green. The
++claimed A-206/A-207 specs are inert drafts (packet-predicted no-op, exit 0);
++the red evidence for the draft contract stands from T-200 (7/7 FAIL at
++`alLogin` — no `/admin` routes exist on main; unchanged by me — my layer is
++the photo helpers + /photos route the draft exercises through them).
++
++## What changed
++
++Two new files, exactly inside `owns` (`internal/web/upload*.go`) — nothing
++else touched:
++
++- **`internal/web/upload.go`** — the frozen API: `MaxPhotoBytes`,
++  `ErrPhotoTooLarge` / `ErrPhotoUnsupported` / `ErrPhotoTooManyPx`,
++  `LimitBody(r)`, `UploadedPhoto`, `(*Server).Photo(r)`, `PhotoProblem(err)`,
++  plus the serving route `GET /photos/{path...}` (`photoServe`) registered via
++  `init()` per the feature-file convention. Pipeline options frozen:
++  `img.Options{MaxBytes: MaxPhotoBytes, MaxPixels: 40_000_000, MaxEdge: 1600}`;
++  storage layout `PHOTO_DIR/YYYY/MM/<16-hex-rand>.jpg` (UTC year/month),
++  dirs 0755 / file 0644, name server-generated from `crypto/rand`; sha256
++  over the RE-ENCODED bytes; on any error nothing is left on disk and no row
++  is written (a failed `CreatePhoto` removes the file it had just written).
++- **`internal/web/upload_test.go`** — 11 test functions / every row of the
++  packet's test list, httptest + real temp PHOTO_DIR + real store
++  (`store.Open` on a temp SQLite file, `Server.Store` + `Server.Cfg.PhotoDir`
++  wired as production does). No new dependencies (`allow_deps: []`), no
++  Phase-N strings, no TODO/FIXME, two `//nolint:gosec` with on-line reasons
++  (rule 9) for the frozen 0755/0644 modes.
++
++## The exact API T-205 compiles against
++
++```go
++const MaxPhotoBytes = 15 << 20 // 15 MB
++func LimitBody(r *http.Request)
++type UploadedPhoto struct {
++    ID            store.PhotoID
++    Path          string // slash-relative to PHOTO_DIR; URL = "/photos/" + Path
++    Width, Height int
++}
++func (s *Server) Photo(r *http.Request) (*UploadedPhoto, error)
++func PhotoProblem(err error) (int, string)
++```
++
++### Parse-order contract (the part T-205 must follow)
++
++`r.MultipartReader()` is **single-use** on a request (verified on this
++toolchain: a second call errors `http: MultipartReader called twice`), and a
++streaming hand-off between handlers is impossible for the same reason. So
++`Photo` owns the request's ONE multipart parse (`MultipartReader` +
++`ReadForm(32<<20)`) and exposes it on `r.MultipartForm`. Two valid orders:
++
++**Order A (Photo-first — simplest, matches the frozen comment):**
++
++```go
++func (s *Server) createLight(w http.ResponseWriter, r *http.Request) {
++    LimitBody(r)                    // 1. FIRST, before any body read
++    up, perr := s.Photo(r)          // 2. Photo performs the parse
++    if perr != nil { status, msg := PhotoProblem(perr); http.Error(w, msg, status); return }
++    // 3. read csrf_token/label/kind/lat/lon/dup_choice from
++    //    r.MultipartForm.Value[...] (a later r.ParseMultipartForm is a no-op
++    //    returning nil); VerifyCSRF; bbox/dup checks; store the light.
++}
++```
++
++Caveat: the photo is persisted BEFORE the CSRF check in this order, so a
++request that fails CSRF after a successful `Photo` leaves a stored photo
++(row + file). The A-207 no-stray rule covers only 413/415 rejections, which
++`Photo` refuses before writing anything — but see Order B if T-205 wants
++zero-stray on CSRF failure too.
++
++**Order B (parse-first — CSRF-safe):**
++
++```go
++LimitBody(r)
++if err := r.ParseMultipartForm(photoMaxMemory); err != nil {
++    status, msg := PhotoProblem(err) // *http.MaxBytesError maps to 413
++    http.Error(w, msg, status); return
++    // on parse error DO NOT fall through to Photo: the reader is spent and
++    // Photo would answer 500 ("called twice").
++}
++if err := VerifyCSRF(r, r.MultipartForm.Value["csrf_token"]...); err != nil { 403; return } // nothing stored yet
++up, perr := s.Photo(r) // reuses r.MultipartForm (fallback path, tested)
++```
++
++### Semantics pinned by tests (T-205 can rely on all of these)
++
++- `Photo` returns **(nil, nil)** for: no photo field, a photo field sent as a
++  plain value (no filename), a file part with 0 bytes. Photo is optional.
++- Error → sentinel mapping (`errors.Is`-compatible, bare sentinels):
++  body over `LimitBody` cap or `img.ErrTooLarge` → `ErrPhotoTooLarge`;
++  `img.ErrPixelBomb` → `ErrPhotoTooManyPx`; `img.ErrUnsupported` →
++  `ErrPhotoUnsupported`; HEIC bytes wrap the same sentinel in an unexported
++  `heicUnsupported` marker (sniffed independently — img's sniff is private by
++  design).
++- `PhotoProblem` table: `ErrPhotoTooLarge` (and raw `*http.MaxBytesError`)
++  → **413 "Photo must be at most 15 MB"**; `ErrPhotoTooManyPx` → **415
++  "Photo has too many pixels"**; `ErrPhotoUnsupported` → **415 "Photo must be
++  JPEG, PNG or WebP"**, with HEIC-detected input → **415 "Photo must be JPEG,
++  PNG or WebP — please choose JPEG instead of HEIC"** (the draft asserts the
++  "please choose JPEG" substring); anything else → **500 "internal error"**
++  (wiring bugs: non-multipart request, nil `Server.Store`).
++- Storage: `PHOTO_DIR/YYYY/MM/<16-hex>.jpg` (UTC), file 0644 / dirs 0755,
++  dims 800×600 for the orient-6 fixture (T-202-frozen), row records path,
++  dims, re-encoded byte count and sha256-of-re-encoded-bytes.
++- Serving: `GET /photos/{path...}` from `s.Cfg.PhotoDir` ONLY — `Content-Type`
++  exactly `image/jpeg`, `Cache-Control: public, max-age=31536000, immutable`,
++  missing → 404, traversal → 404 (see nuance below), HEAD covered by the mux.
++
++### Traversal behavior (wire nuance, both 404 in the end)
++
++Go's mux **307-redirects** literal dot-dot paths (`/photos/../../go.mod` →
++`Location: /go.mod`, which 404s — the draft-style client sees a final 404);
++**percent-encoded** dot-dot (`/photos/%2e%2e%2fsecret.txt`) DOES reach
++`photoServe` with `PathValue("../secret.txt")` — the resolver roots the value
++(`path.Clean("/"+v)`), clamps it, and re-proves containment with
++`filepath.Rel`, so it can only resolve to a guaranteed miss inside PHOTO_DIR →
++404. Red-check: with both guards disabled the test suite fails with the
++planted secret actually served (see table).
++
++## Load-bearing environment facts (probe-verified, go1.27.4)
++
++- `http.MaxBytesReader(nil, body, n)` is legal (no panic) and `errors.As`
++  recovers `*http.MaxBytesError` — `LimitBody`'s frozen one-arg signature
++  works.
++- `multipart.Reader.ReadForm` over a capped body wraps the overflow with
++  `%w` (`multipart: NextPart: http: request body too large`) — `errors.As`
++  reaches it, so `Photo` maps it to `ErrPhotoTooLarge` exactly as frozen.
++- `r.MultipartReader()` is NOT cached — second call errors. Basis for the
++  parse-order contract above.
++- Go stdlib `jpeg.Encode` emits **no APP0/JFIF segment** (SOI, DQT, SOF0,
++  DHT, SOS only). T-202's handoff prose ("carries a JFIF APP0 only") is
++  imprecise; its TESTS pin no-APP1/APP2, which holds and is what I pin too
++  (SOI + no-APP1 + dims). Nobody should "fix" a missing APP0.
++
++## Test evidence (internal/web/upload_test.go)
++
++| Test | Pins |
++|---|---|
++| `TestPhotoPortraitOrient6Becomes1600EdgeJPEGWithoutEXIF` (+3 helpers) | fixture has APP1 → stored file: SOI JPEG, **no APP1**, no "Exif", exactly 800×600, `YYYY/MM/<16-hex>.jpg`, 0755/0644 (umask-safe assertion), row path/dims/bytes/sha256-of-stored-bytes, unique names per upload |
++| `TestPhotoAbsentFieldIsNotAnErrorAndStoresNothing` | no part / empty file part / plain value named photo → (nil, nil), 0 files, 0 rows |
++| `TestPhotoOversizeBodyYieldsErrTooLargeAndLeavesNoFile` | 16 MB valid-JPEG+pad-after-EOI built in memory → `ErrPhotoTooLarge`, 0 files, 0 rows, PhotoProblem 413 + frozen size message |
++| `TestPhotoTextAsJPEGYieldsErrUnsupportedAndLeavesNoFile` | text-as.jpg → `ErrPhotoUnsupported`, 0 files, plain (non-HEIC) 415 message |
++| `TestPhotoPixelBombYieldsErrPixelBombWithoutDecoding` | pixelbomb.png → `ErrPhotoTooManyPx`, 0 files, 415 + frozen pixel message (T-202 proves the no-full-decode ordering at package level) |
++| `TestPhotoHEICYieldsErrUnsupportedWithTheHEICMessage` | heic.bin → `ErrPhotoUnsupported`, 0 files, 415 + exact frozen HEIC wording |
++| `TestPhotoDirCountsUnchangedOnEveryError` | heic / text / pixelbomb / oversize / garbage / empty → 0 files and 0 rows after EVERY reject; happy path still lands exactly 1 file |
++| `TestServedPhotoHasContentTypeJPEGAndImmutableCacheHeader` | GET served bytes == stored bytes, `Content-Type: image/jpeg` exact, frozen `Cache-Control` exact, HEAD 200, missing 404 |
++| `TestPhotoTraversalAttempt404s` | %2e%2e / dot-dot / backslash / NUL / bare-root requests never 200 and never leak the planted outside-secret; white-box `photoAbsPath` containment; literal dot-dot through the mux resolves to a final 404 |
++| `TestPhotoProblemMappingTable` | 11 rows: every sentinel (+wrapped, +deep-wrapped, +HEIC-marked), `*http.MaxBytesError`, unknown, nil |
++| `TestPhotoFieldsReadableAfterPhotoParses` / `TestPhotoReusesFormTheCallerParsed` / `TestPhotoNonMultipartIsAWiringErrorNotASentinel` | the two parse orders + the wiring-error path (matches none of the sentinels → 500) |
++
++## How verified (commands run, exit codes)
++
++| Command | Exit | Result |
++|---|---|---|
++| `make check-fast` (baseline, pre-change) | 0 | repo green before my diff |
++| `make build` | 0 | bin/server (e2e webServer prerequisite, missing in fresh worktree) |
++| `make e2e-task TASK=T-206` (baseline) | 0 | grep `@A-206\|@A-207` → only inert drafts → pass-with-no-tests, the packet-predicted no-op |
++| `make check-fast` (after first implementation) | 2 | lint: cyclop on the portrait test (23 > 15) + gosec G301/G306 on 0755/0644 — fixed (test decomposed into 3 helpers; on-line `//nolint:gosec` reasons, rule 9) |
++| `make check-fast` (mid) | 2 | vet: `undefined: io` / unused `image` import — fixed |
++| red-check: traversal guards disabled → `go test ./internal/web/ -run TestPhotoTraversalAttempt404s` | **1** | 6 failures: `%2e%2e` requests served the planted outside-secret, white-box resolver escaped PHOTO_DIR — the test bites |
++| red-check: MaxBytes mapping removed → `go test ./internal/web/ -run 'TestPhotoOversizeBodyYieldsErrTooLargeAndLeavesNoFile\|TestPhotoDirCountsUnchangedOnEveryError'` | **1** | raw `http: request body too large` leaks, want `ErrPhotoTooLarge` — the test bites |
++| guards restored → same commands + `gofmt -l internal/web/` | 0 | green, formatting clean |
++| `make check-fast` (final) | 0 | fmt-check (go mod tidy), vet, golangci-lint **0 issues**, `-race -shuffle=on` all packages |
++| `go test ./internal/web/... -count=1` (packet's required cmd) | 0 | ok |
++| `go test -cover ./internal/web/ ./internal/img/` | 0 | **84.2%** web (policy floor 70) / 85.8% img |
++| `make test-acceptance-go` | 0 | protected Go acceptance suite green |
++| `make e2e-task TASK=T-206` (final) | 0 | no-op as predicted (inert drafts only) |
++| `make e2e-task T=T-206` | 2 | usage branch — Makefile variable is `TASK` (known discrepancy, open issue 1) |
++| `make check` (full gate battery) | 0 | coverage web 84.2%/config 81.1%, govulncheck clean, template snapshots + html-validate, tsc, acceptance-go ok, **e2e 32/32**, **a11y 8/8**, visual pass, gitleaks "no leaks found" (342 commits) |
++| `git commit` (lefthook pre-commit gitleaks+gofmt, commit-msg conventional) | 0 | `3cd232b`, 2 files, +1045 |
++
++## Guard self-check
++
++`git diff --name-only <pre-commit-HEAD>..HEAD` = `internal/web/upload.go`,
++`internal/web/upload_test.go` (+ this handoff) — every path in `owns`. No
++skip/only/fixme markers, no Phase-N strings, no TODO/FIXME, no go.mod or
++package.json changes, no new dependencies.
++
++## Open issues / notes
++
++1. **`make e2e-task T=<id>` (AGENTS.md/packet spelling) exits 2** — the
++   Makefile variable is `TASK`. Known since T-208's handoff (issue 1 there);
++   re-confirmed. Makefile is protected; planner to reconcile the docs.
++2. **CSRF vs photo persistence (for T-205's design)**: in Order A the photo
++   is stored before the CSRF check. If T-205 wants rejected-by-CSRF requests
++   to leave nothing behind, use Order B (parse → VerifyCSRF → Photo); on the
++   parse error path it must map `*http.MaxBytesError` via `PhotoProblem`
++   itself and never fall through to Photo. Both orders are tested.
++3. **Stdlib JPEG has no APP0/JFIF** — see environment facts; noted so T-202's
++   prose isn't mistaken for a regression.
++4. **HEIC sniff duplicated** from `img.isHEIC` (private by design per T-202's
++   frozen API note), brand sets kept identical (mif1/msf1 major-only), so the
++   frozen HEIC wording and the pipeline's refusal always agree.
++5. **Multiple photo file parts**: only the first `photo` file part is stored;
++   extras are ignored (ReadForm collects them; nothing stray is written —
++   only bytes I explicitly `writePhotoFile` hit PHOTO_DIR).
++6. **gosec G301/G306 `//nolint` with reasons** on the 0755/0644 writes — the
++   modes are frozen by this packet; the linter default (0750/0600) would
++   violate the spec. Flagged for the reviewer as deliberate.
++7. Pre-existing worktree artifact: untracked `node_modules` symlink
++   (`.gitignore` doesn't match symlinks) — guard-tolerated per T-200/T-202/
++   T-208; never committed, unchanged.
++8. Coverage 84.2% on internal/web — the uncovered remainder is probe/auth
++   scaffolding and error paths of other features; upload paths are covered
++   including the failed-insert cleanup's error branch via the non-multipart
++   and wiring tests.
+diff --git a/internal/web/upload.go b/internal/web/upload.go
+new file mode 100644
+index 0000000..113755f
+--- /dev/null
++++ b/internal/web/upload.go
+@@ -0,0 +1,370 @@
++// Photo HTTP side (A-206/A-207): multipart intake through the img pipeline,
++// persistence under PHOTO_DIR, and the GET /photos/ file route. T-205's form
++// handler calls into this file's frozen API (LimitBody, Photo, PhotoProblem)
++// without a prefix; the parse-order contract it compiles against lives on
++// Photo.
++package web
++
++import (
++	"context"
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/binary"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"io"
++	"mime/multipart"
++	"net/http"
++	"os"
++	"path"
++	"path/filepath"
++	"strings"
++	"time"
++
++	"github.com/amscotti/groveland-lights/internal/img"
++	"github.com/amscotti/groveland-lights/internal/store"
++)
++
++// MaxPhotoBytes is the upload size limit (A-206/A-207). It caps the whole
++// request body (via LimitBody) and, redundantly, the photo bytes inside the
++// img pipeline.
++const MaxPhotoBytes = 15 << 20 // 15 MB
++
++// Frozen pixel and edge caps for the pipeline (A-206: long edge <= 1600,
++// >40 MP bombs refused before decode).
++const (
++	photoMaxPixels = 40_000_000
++	photoMaxEdge   = 1600
++)
++
++// photoField is the multipart field Photo parses; photoMaxMemory is passed to
++// ReadForm. The body is already capped at MaxPhotoBytes (15 MB) by LimitBody,
++// so a 32 MB memory limit keeps every compliant upload fully in RAM — no
++// part ever spills to a temp file.
++const (
++	photoField     = "photo"
++	photoMaxMemory = 32 << 20
++)
++
++// Photo cache header: names under PHOTO_DIR are server-minted and never
++// rewritten, so stored photos may be cached forever.
++const photoCacheControl = "public, max-age=31536000, immutable"
++
++var (
++	ErrPhotoTooLarge    = errors.New("photo: above the size limit")
++	ErrPhotoUnsupported = errors.New("photo: unsupported image format")
++	ErrPhotoTooManyPx   = errors.New("photo: above the pixel limit")
++)
++
++// heicUnsupported marks ErrPhotoUnsupported whose source bytes sniffed as
++// HEIC (ftyp box carrying a heic-family brand), so PhotoProblem can answer
++// with the frozen "please choose JPEG instead of HEIC" wording.
++type heicUnsupported struct{ err error }
++
++func (e heicUnsupported) Error() string { return e.err.Error() }
++
++func (e heicUnsupported) Unwrap() error { return e.err }
++
++// LimitBody wraps the request body with http.MaxBytesReader(MaxPhotoBytes).
++// Call it BEFORE any multipart parsing; the overflow surfaces as
++// ErrPhotoTooLarge from Photo.
++func LimitBody(r *http.Request) {
++	r.Body = http.MaxBytesReader(nil, r.Body, MaxPhotoBytes)
++}
++
++// UploadedPhoto is one persisted, processed photo. Path is relative to
++// PHOTO_DIR and doubles as the URL path under /photos/ (URL = "/photos/" +
++// Path).
++type UploadedPhoto struct {
++	ID            store.PhotoID
++	Path          string // relative to PHOTO_DIR; URL path under /photos/
++	Width, Height int
++}
++
++// Photo parses the optional "photo" file part through the img pipeline and
++// persists it: PHOTO_DIR/YYYY/MM/<16-hex-rand>.jpg plus a photos row
++// (relative path, dimensions, re-encoded byte count, sha256 of the
++// RE-ENCODED bytes). It returns (nil, nil) when the field is absent or empty
++// (photo is optional). On ANY error nothing is left on disk and no row is
++// written. Error mapping: img.ErrTooLarge → ErrPhotoTooLarge;
++// img.ErrUnsupported → ErrPhotoUnsupported (HEIC included);
++// img.ErrPixelBomb → ErrPhotoTooManyPx.
++//
++// Parse-order contract for callers (T-205):
++//
++//  1. LimitBody(r) FIRST, before anything reads the body.
++//  2. Call s.Photo(r). It performs the ONE multipart parse of the request
++//     (MultipartReader + ReadForm — a request allows only one) and stores
++//     the parsed form on r.MultipartForm.
++//  3. THEN read your own fields (csrf_token, label, ...) from
++//     r.MultipartForm.Value. A later r.ParseMultipartForm call is a no-op
++//     that returns nil; never call ParseMultipartForm / FormValue /
++//     ParseForm BEFORE Photo, or Photo would see an already-consumed body.
++//
++// If the caller has already parsed the form (r.MultipartForm != nil), Photo
++// reuses it instead of parsing again; in that ordering a body-overflow error
++// surfaces at the caller's parse as *http.MaxBytesError (PhotoProblem maps
++// it too).
++func (s *Server) Photo(r *http.Request) (*UploadedPhoto, error) {
++	form, err := photoForm(r)
++	if err != nil {
++		return nil, err
++	}
++	fhs := form.File[photoField]
++	if len(fhs) == 0 {
++		// Absent field, or a part without a filename (e.g. a file input
++		// left empty): photo is optional.
++		return nil, nil
++	}
++	f, err := fhs[0].Open()
++	if err != nil {
++		return nil, fmt.Errorf("photo: open upload: %w", err)
++	}
++	defer func() { _ = f.Close() }()
++	data, err := io.ReadAll(f)
++	if err != nil {
++		// The bytes were fully read by ReadForm already, so this cannot be
++		// a body-size error — treat it as a broken upload part.
++		return nil, fmt.Errorf("photo: read upload: %w", err)
++	}
++	if len(data) == 0 {
++		// An empty part stores nothing and is not an error.
++		return nil, nil
++	}
++	return s.persistPhoto(r.Context(), data)
++}
++
++// photoForm returns the request's parsed multipart form, performing the
++// single parse if the caller has not already done it. A body over the
++// LimitBody cap surfaces here as ErrPhotoTooLarge.
++func photoForm(r *http.Request) (*multipart.Form, error) {
++	if r.MultipartForm != nil {
++		return r.MultipartForm, nil // caller parsed first; reuse it
++	}
++	mr, err := r.MultipartReader()
++	if err != nil {
++		return nil, fmt.Errorf("photo: request is not multipart form data: %w", err)
++	}
++	form, err := mr.ReadForm(photoMaxMemory)
++	if err != nil {
++		var mbe *http.MaxBytesError
++		if errors.As(err, &mbe) {
++			return nil, ErrPhotoTooLarge
++		}
++		return nil, fmt.Errorf("photo: read multipart body: %w", err)
++	}
++	// Hand the single parse to the caller for its own fields.
++	r.MultipartForm = form
++	return form, nil
++}
++
++// persistPhoto runs the img pipeline and writes the file + row. On any error
++// nothing is left on disk and no row is written (A-207).
++func (s *Server) persistPhoto(ctx context.Context, data []byte) (*UploadedPhoto, error) {
++	if s.Store == nil {
++		return nil, errors.New("photo: store not wired")
++	}
++	res, err := img.Process(data, img.Options{
++		MaxBytes:  MaxPhotoBytes,
++		MaxPixels: photoMaxPixels,
++		MaxEdge:   photoMaxEdge,
++	})
++	if err != nil {
++		return nil, mapImgError(err, data)
++	}
++	rel, err := s.writePhotoFile(res.JPEG)
++	if err != nil {
++		return nil, err
++	}
++	sum := sha256.Sum256(res.JPEG) // hash the RE-ENCODED bytes, never the source
++	row, err := s.Store.CreatePhoto(ctx, store.NewPhoto{
++		Path:   rel,
++		Width:  res.Width,
++		Height: res.Height,
++		Bytes:  int64(len(res.JPEG)),
++		SHA256: hex.EncodeToString(sum[:]),
++	})
++	if err != nil {
++		// The row is the source of truth: a failed insert must not leave
++		// the file behind (no stray files, A-207).
++		_ = os.Remove(filepath.Join(s.Cfg.PhotoDir, filepath.FromSlash(rel)))
++		return nil, fmt.Errorf("photo: store: %w", err)
++	}
++	return &UploadedPhoto{ID: row.ID, Path: rel, Width: res.Width, Height: res.Height}, nil
++}
++
++// mapImgError translates the img pipeline's sentinels onto the photo API's
++// frozen ones. HEIC input is detected by an independent sniff of the source
++// bytes (the img package's sniff is private by design), so PhotoProblem can
++// answer with the frozen HEIC wording while the refusal itself stays
++// img.ErrUnsupported.
++func mapImgError(err error, src []byte) error {
++	switch {
++	case errors.Is(err, img.ErrTooLarge):
++		return ErrPhotoTooLarge
++	case errors.Is(err, img.ErrPixelBomb):
++		return ErrPhotoTooManyPx
++	case errors.Is(err, img.ErrUnsupported):
++		if sniffHEIC(src) {
++			return heicUnsupported{ErrPhotoUnsupported}
++		}
++		return ErrPhotoUnsupported
++	default:
++		return fmt.Errorf("photo: process: %w", err)
++	}
++}
++
++// writePhotoFile writes the re-encoded JPEG to
++// PHOTO_DIR/YYYY/MM/<16-hex-rand>.jpg (directories 0755, file 0644) and
++// returns the slash-separated path relative to PHOTO_DIR. The name is
++// server-generated; the client controls nothing about it.
++func (s *Server) writePhotoFile(jpeg []byte) (string, error) {
++	if s.Cfg.PhotoDir == "" {
++		return "", errors.New("photo: PHOTO_DIR is not configured")
++	}
++	var rnd [8]byte
++	if _, err := rand.Read(rnd[:]); err != nil {
++		return "", fmt.Errorf("photo: rand: %w", err)
++	}
++	now := time.Now().UTC()
++	rel := path.Join(now.Format("2006"), now.Format("01"), hex.EncodeToString(rnd[:])+".jpg")
++	abs := filepath.Join(s.Cfg.PhotoDir, filepath.FromSlash(rel))
++	//nolint:gosec // G301: 0755 directories are frozen by the A-206/A-207 contract (PHOTO_DIR/YYYY/MM layout)
++	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
++		return "", fmt.Errorf("photo: mkdir %s: %w", filepath.Dir(abs), err)
++	}
++	//nolint:gosec // G306: 0644 files are frozen by the A-206/A-207 contract; content is a server-generated JPEG
++	if err := os.WriteFile(abs, jpeg, 0o644); err != nil {
++		return "", fmt.Errorf("photo: write %s: %w", abs, err)
++	}
++	return rel, nil
++}
++
++// PhotoProblem maps an upload error to (httpStatus, userMessage):
++//
++//	ErrPhotoTooLarge    → 413, "Photo must be at most 15 MB"
++//	ErrPhotoUnsupported → 415, "Photo must be JPEG, PNG or WebP — please
++//	                       choose JPEG instead of HEIC" when the bytes
++//	                       sniffed as HEIC, else 415, "Photo must be JPEG,
++//	                       PNG or WebP"
++//	ErrPhotoTooManyPx   → 415, "Photo has too many pixels"
++//
++// Anything else (wiring bugs, store failures) is a 500 "internal error";
++// a *http.MaxBytesError is reported as the size problem it is.
++func PhotoProblem(err error) (int, string) {
++	var mbe *http.MaxBytesError
++	var heic heicUnsupported
++	switch {
++	case errors.Is(err, ErrPhotoTooLarge), errors.As(err, &mbe):
++		return http.StatusRequestEntityTooLarge, "Photo must be at most 15 MB"
++	case errors.Is(err, ErrPhotoTooManyPx):
++		return http.StatusUnsupportedMediaType, "Photo has too many pixels"
++	case errors.Is(err, ErrPhotoUnsupported):
++		if errors.As(err, &heic) {
++			return http.StatusUnsupportedMediaType,
++				"Photo must be JPEG, PNG or WebP — please choose JPEG instead of HEIC"
++		}
++		return http.StatusUnsupportedMediaType, "Photo must be JPEG, PNG or WebP"
++	default:
++		return http.StatusInternalServerError, "internal error"
++	}
++}
++
++// heicMajorBrands are the ISO-BMFF major brands that identify HEIC/HEIF
++// still images; heicCompatibleBrands the subset meaningful in the
++// compatible-brand list. Kept in step with the img package's sniff so the
++// frozen wording and the pipeline's refusal always agree.
++var (
++	heicMajorBrands = map[string]bool{
++		"heic": true, "heix": true, "hevc": true, "hevx": true,
++		"heim": true, "heis": true, "hevm": true, "hevs": true,
++		"mif1": true, "msf1": true,
++	}
++	heicCompatibleBrands = map[string]bool{
++		"heic": true, "heix": true, "hevc": true, "hevx": true,
++		"heim": true, "heis": true, "hevm": true, "hevs": true,
++	}
++)
++
++// sniffHEIC reports whether b sniffs as ISO-BMFF content carrying a
++// heic-family brand: the ftyp box type sits at bytes 4..8, the major brand
++// at 8..12, followed by the 4-byte minor version and the compatible-brand
++// list. Only the first ftyp box is inspected.
++func sniffHEIC(b []byte) bool {
++	if len(b) < 12 || string(b[4:8]) != "ftyp" {
++		return false
++	}
++	if heicMajorBrands[string(b[8:12])] {
++		return true
++	}
++	end := len(b)
++	if bl := int(binary.BigEndian.Uint32(b[0:4])); bl >= 16 && bl < end {
++		end = bl
++	}
++	for off := 16; off+4 <= end; off += 4 {
++		if heicCompatibleBrands[string(b[off:off+4])] {
++			return true
++		}
++	}
++	return false
++}
++
++func init() {
++	register(route{pattern: "GET /photos/{path...}", handler: photoServe})
++}
++
++// photoServe serves stored, re-encoded photos from PHOTO_DIR ONLY. Every
++// stored file is a JPEG produced by the upload pipeline, so the response is
++// always Content-Type image/jpeg with the frozen immutable cache header;
++// paths under PHOTO_DIR are server-minted and never rewritten, which is what
++// the header promises. Missing files — and any path that climbs out of
++// PHOTO_DIR, which the resolver clamps to a guaranteed miss — answer 404.
++func photoServe(w http.ResponseWriter, r *http.Request) {
++	s := serverFrom(r.Context())
++	abs, ok := photoAbsPath(s.Cfg.PhotoDir, r.PathValue("path"))
++	if !ok {
++		http.NotFound(w, r)
++		return
++	}
++	f, err := os.Open(abs) //nolint:gosec // abs comes from PHOTO_DIR joined with a cleaned rooted-relative name; photoAbsPath proves it cannot leave PHOTO_DIR
++	if err != nil {
++		http.NotFound(w, r)
++		return
++	}
++	defer func() { _ = f.Close() }()
++	st, err := f.Stat()
++	if err != nil || st.IsDir() {
++		http.NotFound(w, r)
++		return
++	}
++	w.Header().Set("Content-Type", "image/jpeg")
++	w.Header().Set("Cache-Control", photoCacheControl)
++	http.ServeContent(w, r, st.Name(), st.ModTime(), f)
++}
++
++// photoAbsPath resolves a /photos/{path...} value to a file path inside
++// photoDir. The value is cleaned against a rooted form first, so dot-dot
++// segments can never climb above PHOTO_DIR — a traversal attempt just
++// resolves to a name inside photoDir that misses and 404s. ok is false for
++// empty or unusable values.
++func photoAbsPath(photoDir, urlPath string) (abs string, ok bool) {
++	if photoDir == "" || strings.ContainsRune(urlPath, 0) {
++		return "", false
++	}
++	// Rooted clean: path.Clean of "/x/../../y" is "/y" — every ".." above
++	// the root is dropped, so no traversal survives.
++	clean := path.Clean("/" + urlPath)
++	rel := strings.TrimPrefix(clean, "/")
++	if rel == "" {
++		return "", false
++	}
++	abs = filepath.Join(photoDir, filepath.FromSlash(rel))
++	// Belt and braces on top of the rooted clean: the joined path must
++	// still be photoDir itself or below it.
++	under, err := filepath.Rel(photoDir, abs)
++	if err != nil || under == ".." || strings.HasPrefix(under, ".."+string(filepath.Separator)) {
++		return "", false
++	}
++	return abs, true
++}
+diff --git a/internal/web/upload_test.go b/internal/web/upload_test.go
+new file mode 100644
+index 0000000..a339518
+--- /dev/null
++++ b/internal/web/upload_test.go
+@@ -0,0 +1,675 @@
++// Photo intake and serving tests (A-206/A-207): the multipart upload flow
++// through a real temp PHOTO_DIR and a real store, the /photos file route,
++// the no-stray-files rule and the PhotoProblem mapping table.
++package web
++
++import (
++	"bytes"
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"image/jpeg"
++	"io"
++	"mime/multipart"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"regexp"
++	"strings"
++	"testing"
++
++	"github.com/amscotti/groveland-lights/internal/config"
++	"github.com/amscotti/groveland-lights/internal/store"
++)
++
++// uploadRePath pins the frozen storage layout PHOTO_DIR/YYYY/MM/<16 hex>.jpg.
++var uploadRePath = regexp.MustCompile(`\A\d{4}/\d{2}/[0-9a-f]{16}\.jpg\z`)
++
++// newUploadServer builds a Server with a real temp store and a real temp
++// PHOTO_DIR, wired exactly as production: Server.Store from store.Open,
++// Server.Cfg.PhotoDir under its own t.TempDir. Returns the server, the store
++// and the photo directory path.
++func newUploadServer(t *testing.T) (*Server, *store.DB, string) {
++	t.Helper()
++	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "upload.db"))
++	if err != nil {
++		t.Fatalf("store.Open: %v", err)
++	}
++	t.Cleanup(func() { _ = db.Close() })
++	s := newTestServer(t, config.EnvTest)
++	dir := filepath.Join(t.TempDir(), "photos")
++	s.Cfg.PhotoDir = dir
++	s.Store = db
++	return s, db, dir
++}
++
++// uploadFixture reads a photo fixture from the repo's testdata/photos.
++func uploadFixture(t *testing.T, name string) []byte {
++	t.Helper()
++	b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "photos", name))
++	if err != nil {
++		t.Fatalf("fixture testdata/photos/%s: %v", name, err)
++	}
++	return b
++}
++
++// uploadOversizeJPEG builds, in memory, a body past the 15 MB cap: a valid
++// fixture JPEG with junk padded after its EOI marker.
++func uploadOversizeJPEG(t *testing.T, want int) []byte {
++	t.Helper()
++	base := uploadFixture(t, "landscape.jpg")
++	if len(base) >= want {
++		t.Fatalf("fixture landscape.jpg is already %d bytes; pick a larger target", len(base))
++	}
++	out := make([]byte, 0, want)
++	out = append(out, base...)
++	out = append(out, bytes.Repeat([]byte{0x55}, want-len(base))...)
++	return out
++}
++
++// uploadRequest builds a multipart POST carrying the given fields and an
++// optional "photo" file part (photoName "" means no file part), with
++// LimitBody applied first — the frozen parse-order contract Photo documents.
++func uploadRequest(t *testing.T, fields map[string]string, photoName string, photoData []byte) *http.Request {
++	t.Helper()
++	var buf bytes.Buffer
++	mw := multipart.NewWriter(&buf)
++	for k, v := range fields {
++		if err := mw.WriteField(k, v); err != nil {
++			t.Fatalf("multipart field %s: %v", k, err)
++		}
++	}
++	if photoName != "" {
++		fw, err := mw.CreateFormFile(photoField, photoName)
++		if err != nil {
++			t.Fatalf("multipart file %s: %v", photoName, err)
++		}
++		if _, err := fw.Write(photoData); err != nil {
++			t.Fatalf("multipart write %s: %v", photoName, err)
++		}
++	}
++	if err := mw.Close(); err != nil {
++		t.Fatalf("multipart close: %v", err)
++	}
++	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/admin/lights", &buf)
++	req.Header.Set("Content-Type", mw.FormDataContentType())
++	LimitBody(req)
++	return req
++}
++
++// uploadPhoto runs one happy-path upload and fails the test on error.
++func uploadPhoto(t *testing.T, s *Server, name string, data []byte) *UploadedPhoto {
++	t.Helper()
++	req := uploadRequest(t, map[string]string{
++		"csrf_token": "tok", "label": "Upload lamp", "kind": "park", "lat": "42.76", "lon": "-71.03",
++	}, name, data)
++	up, err := s.Photo(req)
++	if err != nil {
++		t.Fatalf("Photo(%s): %v", name, err)
++	}
++	if up == nil {
++		t.Fatalf("Photo(%s): got nil, want a stored photo", name)
++	}
++	return up
++}
++
++// uploadCountFiles counts regular files under dir; a missing directory holds
++// 0 files.
++func uploadCountFiles(t *testing.T, dir string) int {
++	t.Helper()
++	var n int
++	err := filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
++		if err != nil {
++			if os.IsNotExist(err) {
++				return nil
++			}
++			return err
++		}
++		if !d.IsDir() {
++			n++
++		}
++		return nil
++	})
++	if err != nil {
++		t.Fatalf("walk %s: %v", dir, err)
++	}
++	return n
++}
++
++// uploadHasJpegMarker walks the JPEG marker segments from SOI until the scan
++// starts and reports whether the requested marker segment is present.
++func uploadHasJpegMarker(data []byte, want byte) bool {
++	if len(data) < 4 || data[0] != 0xFF || data[1] != 0xD8 {
++		return false
++	}
++	i := 2
++	for i+4 <= len(data) {
++		if data[i] != 0xFF {
++			return false
++		}
++		m := data[i+1]
++		if m == 0x01 || (m >= 0xD0 && m <= 0xD7) { // no payload length
++			i += 2
++			continue
++		}
++		if m == 0xD9 || m == 0xDA { // EOI / SOS: metadata only precedes the scan
++			return false
++		}
++		segLen := int(data[i+2])<<8 | int(data[i+3])
++		if segLen < 2 || i+2+segLen > len(data) {
++			return false
++		}
++		if m == want {
++			return true
++		}
++		i += 2 + segLen
++	}
++	return false
++}
++
++func TestPhotoPortraitOrient6Becomes1600EdgeJPEGWithoutEXIF(t *testing.T) {
++	s, db, dir := newUploadServer(t)
++	src := uploadFixture(t, "portrait-orient6-gps.jpg")
++	if !uploadHasJpegMarker(src, 0xE1) {
++		t.Fatal("the source fixture itself carries no APP1 segment; the strip assertion would prove nothing")
++	}
++
++	up := uploadPhoto(t, s, "portrait-orient6-gps.jpg", src)
++	uploadAssertStoredLayout(t, dir, up)
++	raw := uploadAssertReencodedJPEG(t, dir, up)
++	uploadAssertRowMatchesFile(t, db, up, raw)
++
++	// A second upload mints a different path (server-generated names).
++	up2 := uploadPhoto(t, s, "portrait-orient6-gps.jpg", src)
++	if up2.Path == up.Path {
++		t.Errorf("second upload reused path %q; names must be unique per upload", up.Path)
++	}
++}
++
++// uploadAssertStoredLayout pins the frozen storage contract for one stored
++// photo: exact processed dims (T-202: 800x600 for the Orientation=6 fixture),
++// the YYYY/MM/<16-hex>.jpg layout, and plain 0755/0644 permissions (asserted
++// modulo any umask: never group/world-writable).
++func uploadAssertStoredLayout(t *testing.T, dir string, up *UploadedPhoto) {
++	t.Helper()
++	if up.Width != 800 || up.Height != 600 {
++		t.Fatalf("stored photo is %dx%d, want exactly 800x600", up.Width, up.Height)
++	}
++	if !uploadRePath.MatchString(up.Path) {
++		t.Fatalf("stored path %q does not match YYYY/MM/<16-hex>.jpg", up.Path)
++	}
++	file := filepath.Join(dir, filepath.FromSlash(up.Path))
++	if st, err := os.Stat(file); err != nil {
++		t.Fatalf("stat stored photo: %v", err)
++	} else if st.Mode().Perm()&0o022 != 0 {
++		t.Errorf("stored photo mode %s is group/world-writable, want plain 0644", st.Mode())
++	}
++	if st, err := os.Stat(filepath.Dir(file)); err != nil {
++		t.Fatalf("stat year dir: %v", err)
++	} else if st.Mode().Perm()&0o022 != 0 {
++		t.Errorf("photo dir mode %s is group/world-writable, want plain 0755", st.Mode())
++	}
++}
++
++// uploadAssertReencodedJPEG reads the stored file back and pins the
++// re-encoding contract: JPEG from SOI, no APP1 segment at all (so no EXIF
++// and no GPS), exactly 800x600. Returns the stored bytes.
++func uploadAssertReencodedJPEG(t *testing.T, dir string, up *UploadedPhoto) []byte {
++	t.Helper()
++	raw, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(up.Path)))
++	if err != nil {
++		t.Fatalf("read stored photo: %v", err)
++	}
++	if len(raw) < 2 || raw[0] != 0xFF || raw[1] != 0xD8 {
++		t.Error("stored photo does not start with the JPEG SOI marker")
++	}
++	if uploadHasJpegMarker(raw, 0xE1) {
++		t.Error("stored photo still carries an APP1 segment: metadata must be stripped")
++	}
++	if bytes.Contains(raw, []byte("Exif")) {
++		t.Error("stored photo contains the string Exif")
++	}
++	cfg, err := jpeg.DecodeConfig(bytes.NewReader(raw))
++	if err != nil {
++		t.Fatalf("decode stored photo: %v", err)
++	}
++	if cfg.Width != 800 || cfg.Height != 600 {
++		t.Errorf("stored photo decodes as %dx%d, want 800x600", cfg.Width, cfg.Height)
++	}
++	return raw
++}
++
++// uploadAssertRowMatchesFile pins the photos row against the stored file:
++// path, dimensions, byte count and the sha256 of the RE-ENCODED bytes.
++func uploadAssertRowMatchesFile(t *testing.T, db *store.DB, up *UploadedPhoto, raw []byte) {
++	t.Helper()
++	sum := sha256.Sum256(raw)
++	row, err := db.PhotoByID(context.Background(), up.ID)
++	if err != nil {
++		t.Fatalf("PhotoByID(%d): %v", up.ID, err)
++	}
++	if row.Path != up.Path {
++		t.Errorf("row path %q, want %q", row.Path, up.Path)
++	}
++	if row.Width != up.Width || row.Height != up.Height {
++		t.Errorf("row dims %dx%d, want %dx%d", row.Width, row.Height, up.Width, up.Height)
++	}
++	if row.Bytes != int64(len(raw)) {
++		t.Errorf("row bytes %d, want %d", row.Bytes, len(raw))
++	}
++	if row.SHA256 != hex.EncodeToString(sum[:]) {
++		t.Errorf("row sha256 %s is not the digest of the re-encoded stored bytes", row.SHA256)
++	}
++}
++
++func TestPhotoAbsentFieldIsNotAnErrorAndStoresNothing(t *testing.T) {
++	s, db, dir := newUploadServer(t)
++	fields := map[string]string{"csrf_token": "tok", "label": "No photo lamp", "kind": "park"}
++
++	// No photo part at all.
++	req := uploadRequest(t, fields, "", nil)
++	up, err := s.Photo(req)
++	if err != nil {
++		t.Fatalf("Photo without a photo field: %v", err)
++	}
++	if up != nil {
++		t.Fatalf("Photo without a photo field returned %+v, want nil", up)
++	}
++
++	// An empty file part (a file input left empty) is equally absent.
++	req = uploadRequest(t, fields, "empty.jpg", nil)
++	if up, err = s.Photo(req); err != nil || up != nil {
++		t.Fatalf("Photo with an empty file part: photo=%v err=%v, want nil nil", up, err)
++	}
++
++	// A plain value named photo (no filename) is not an upload either.
++	var buf bytes.Buffer
++	mw := multipart.NewWriter(&buf)
++	if err := mw.WriteField(photoField, ""); err != nil {
++		t.Fatalf("write field: %v", err)
++	}
++	if err := mw.Close(); err != nil {
++		t.Fatalf("close writer: %v", err)
++	}
++	req = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/x", &buf)
++	req.Header.Set("Content-Type", mw.FormDataContentType())
++	LimitBody(req)
++	if up, err = s.Photo(req); err != nil || up != nil {
++		t.Fatalf("Photo with an empty value field: photo=%v err=%v, want nil nil", up, err)
++	}
++
++	if got := uploadCountFiles(t, dir); got != 0 {
++		t.Errorf("photo dir holds %d files, want 0", got)
++	}
++	if rows, err := db.PhotoList(context.Background(), 100); err != nil {
++		t.Fatalf("PhotoList: %v", err)
++	} else if len(rows) != 0 {
++		t.Errorf("photo table holds %d rows, want 0", len(rows))
++	}
++}
++
++func TestPhotoOversizeBodyYieldsErrTooLargeAndLeavesNoFile(t *testing.T) {
++	s, db, dir := newUploadServer(t)
++	// Valid JPEG + padding after EOI, past the 15 MB cap — built in memory.
++	oversize := uploadOversizeJPEG(t, 16<<20)
++
++	req := uploadRequest(t, map[string]string{"label": "Big lamp"}, "big.jpg", oversize)
++	up, err := s.Photo(req)
++	if up != nil {
++		t.Fatalf("oversize upload returned %+v, want nil", up)
++	}
++	if !errors.Is(err, ErrPhotoTooLarge) {
++		t.Fatalf("oversize upload err = %v, want ErrPhotoTooLarge", err)
++	}
++	if got := uploadCountFiles(t, dir); got != 0 {
++		t.Errorf("photo dir holds %d files after the rejected upload, want 0", got)
++	}
++	if rows, err := db.PhotoList(context.Background(), 100); err != nil {
++		t.Fatalf("PhotoList: %v", err)
++	} else if len(rows) != 0 {
++		t.Errorf("photo table holds %d rows, want 0", len(rows))
++	}
++	status, msg := PhotoProblem(err)
++	if status != http.StatusRequestEntityTooLarge {
++		t.Errorf("PhotoProblem status = %d, want 413", status)
++	}
++	if msg != "Photo must be at most 15 MB" {
++		t.Errorf("PhotoProblem message = %q, want the frozen size message", msg)
++	}
++}
++
++func TestPhotoTextAsJPEGYieldsErrUnsupportedAndLeavesNoFile(t *testing.T) {
++	s, _, dir := newUploadServer(t)
++	textAs := uploadFixture(t, "text-as.jpg")
++
++	req := uploadRequest(t, map[string]string{"label": "Text lamp"}, "text-as.jpg", textAs)
++	up, err := s.Photo(req)
++	if up != nil {
++		t.Fatalf("text upload returned %+v, want nil", up)
++	}
++	if !errors.Is(err, ErrPhotoUnsupported) {
++		t.Fatalf("text upload err = %v, want ErrPhotoUnsupported", err)
++	}
++	if got := uploadCountFiles(t, dir); got != 0 {
++		t.Errorf("photo dir holds %d files after the rejected upload, want 0", got)
++	}
++	status, msg := PhotoProblem(err)
++	if status != http.StatusUnsupportedMediaType {
++		t.Errorf("PhotoProblem status = %d, want 415", status)
++	}
++	if msg != "Photo must be JPEG, PNG or WebP" {
++		t.Errorf("PhotoProblem message = %q, want the plain unsupported message (not the HEIC one)", msg)
++	}
++}
++
++func TestPhotoPixelBombYieldsErrPixelBombWithoutDecoding(t *testing.T) {
++	s, _, dir := newUploadServer(t)
++	// The 45-byte bomb claims 50000x50000 (2.5e9 px > the 40 MP cap); the
++	// guard must refuse it from the header alone — a full decode would try
++	// to allocate ~10 GB of raster and the refusal must still be the
++	// pixel error, never a decode failure.
++	bomb := uploadFixture(t, "pixelbomb.png")
++
++	req := uploadRequest(t, map[string]string{"label": "Bomb lamp"}, "pixelbomb.png", bomb)
++	up, err := s.Photo(req)
++	if up != nil {
++		t.Fatalf("bomb upload returned %+v, want nil", up)
++	}
++	if !errors.Is(err, ErrPhotoTooManyPx) {
++		t.Fatalf("bomb upload err = %v, want ErrPhotoTooManyPx", err)
++	}
++	if got := uploadCountFiles(t, dir); got != 0 {
++		t.Errorf("photo dir holds %d files after the rejected upload, want 0", got)
++	}
++	status, msg := PhotoProblem(err)
++	if status != http.StatusUnsupportedMediaType {
++		t.Errorf("PhotoProblem status = %d, want 415", status)
++	}
++	if msg != "Photo has too many pixels" {
++		t.Errorf("PhotoProblem message = %q, want the frozen pixel message", msg)
++	}
++}
++
++func TestPhotoHEICYieldsErrUnsupportedWithTheHEICMessage(t *testing.T) {
++	s, _, dir := newUploadServer(t)
++	heic := uploadFixture(t, "heic.bin")
++
++	req := uploadRequest(t, map[string]string{"label": "Heic lamp"}, "heic.bin", heic)
++	up, err := s.Photo(req)
++	if up != nil {
++		t.Fatalf("HEIC upload returned %+v, want nil", up)
++	}
++	if !errors.Is(err, ErrPhotoUnsupported) {
++		t.Fatalf("HEIC upload err = %v, want ErrPhotoUnsupported", err)
++	}
++	if got := uploadCountFiles(t, dir); got != 0 {
++		t.Errorf("photo dir holds %d files after the rejected upload, want 0", got)
++	}
++	status, msg := PhotoProblem(err)
++	if status != http.StatusUnsupportedMediaType {
++		t.Errorf("PhotoProblem status = %d, want 415", status)
++	}
++	const want = "Photo must be JPEG, PNG or WebP — please choose JPEG instead of HEIC"
++	if msg != want {
++		t.Errorf("PhotoProblem message = %q, want the frozen HEIC wording %q", msg, want)
++	}
++}
++
++func TestPhotoDirCountsUnchangedOnEveryError(t *testing.T) {
++	s, db, dir := newUploadServer(t)
++	oversize := uploadOversizeJPEG(t, 16<<20)
++	rejects := []struct {
++		name string
++		file string
++		data []byte
++	}{
++		{"heic", "heic.bin", uploadFixture(t, "heic.bin")},
++		{"text-as-jpg", "text-as.jpg", uploadFixture(t, "text-as.jpg")},
++		{"pixelbomb", "pixelbomb.png", uploadFixture(t, "pixelbomb.png")},
++		{"oversize", "big.jpg", oversize},
++		{"garbage", "junk.jpg", []byte("this is not an image at all, really")},
++		{"empty", "empty.jpg", nil},
++	}
++	if before := uploadCountFiles(t, dir); before != 0 {
++		t.Fatalf("photo dir holds %d files before any upload, want 0", before)
++	}
++	for _, r := range rejects {
++		req := uploadRequest(t, map[string]string{"label": "Stray " + r.name}, r.file, r.data)
++		up, err := s.Photo(req)
++		if up != nil || err == nil && r.file != "empty.jpg" {
++			t.Fatalf("%s upload: photo=%v err=%v, want a rejection", r.name, up, err)
++		}
++		if got := uploadCountFiles(t, dir); got != 0 {
++			t.Fatalf("%s upload left stray files: photo dir held 0, now %d", r.name, got)
++		}
++		if rows, err := db.PhotoList(context.Background(), 100); err != nil {
++			t.Fatalf("PhotoList: %v", err)
++		} else if len(rows) != 0 {
++			t.Fatalf("%s upload left %d photo rows, want 0", r.name, len(rows))
++		}
++	}
++	// The happy path still works after all the rejections.
++	uploadPhoto(t, s, "landscape.jpg", uploadFixture(t, "landscape.jpg"))
++	if got := uploadCountFiles(t, dir); got != 1 {
++		t.Errorf("after the happy-path upload the photo dir holds %d files, want exactly 1", got)
++	}
++}
++
++func TestServedPhotoHasContentTypeJPEGAndImmutableCacheHeader(t *testing.T) {
++	s, _, dir := newUploadServer(t)
++	up := uploadPhoto(t, s, "landscape.jpg", uploadFixture(t, "landscape.jpg"))
++	stored, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(up.Path)))
++	if err != nil {
++		t.Fatalf("read stored photo: %v", err)
++	}
++
++	h := s.Handler()
++	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/photos/"+up.Path, nil)
++	rec := httptest.NewRecorder()
++	h.ServeHTTP(rec, req)
++	if rec.Code != http.StatusOK {
++		t.Fatalf("GET /photos/%s: status %d, want 200; body: %.200s", up.Path, rec.Code, rec.Body.String())
++	}
++	if got := rec.Header().Get("Content-Type"); got != "image/jpeg" {
++		t.Errorf("Content-Type = %q, want exactly image/jpeg", got)
++	}
++	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
++		t.Errorf("Cache-Control = %q, want the frozen immutable header", got)
++	}
++	if !bytes.Equal(rec.Body.Bytes(), stored) {
++		t.Error("served bytes differ from the stored file")
++	}
++
++	// HEAD works through the same route (mux: GET patterns match HEAD).
++	req = httptest.NewRequestWithContext(context.Background(), http.MethodHead, "/photos/"+up.Path, nil)
++	rec = httptest.NewRecorder()
++	h.ServeHTTP(rec, req)
++	if rec.Code != http.StatusOK {
++		t.Errorf("HEAD /photos/%s: status %d, want 200", up.Path, rec.Code)
++	}
++
++	// A missing photo answers 404.
++	req = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/photos/2026/01/ffffffffffffffff.jpg", nil)
++	rec = httptest.NewRecorder()
++	h.ServeHTTP(rec, req)
++	if rec.Code != http.StatusNotFound {
++		t.Errorf("missing photo: status %d, want 404", rec.Code)
++	}
++}
++
++func TestPhotoTraversalAttempt404s(t *testing.T) {
++	s, _, dir := newUploadServer(t)
++	// A secret beside PHOTO_DIR (inside its temp parent, outside the photo
++	// root) that a traversal must never serve.
++	secret := filepath.Join(dir, "..", "secret.txt")
++	if err := os.WriteFile(secret, []byte("top secret"), 0o600); err != nil {
++		t.Fatalf("plant secret: %v", err)
++	}
++	h := s.Handler()
++
++	// Percent-encoded dot-dot values DO reach the handler (the mux only
++	// cleans literal dots); the resolver must clamp them inside PHOTO_DIR.
++	for _, target := range []string{
++		"/photos/%2e%2e%2fsecret.txt",
++		"/photos/%2e%2e%2f%2e%2e%2fgo.mod",
++		"/photos/sub/%2e%2e%2f%2e%2e%2fsecret.txt",
++		"/photos/..%5c..%5cgo.mod", // backslashes are plain bytes here
++		"/photos/.%2e/secret.txt",
++		"/photos/",      // bare root
++		"/photos/..%00", // NUL byte
++	} {
++		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
++		rec := httptest.NewRecorder()
++		h.ServeHTTP(rec, req)
++		if rec.Code == http.StatusOK {
++			t.Errorf("GET %s: status 200, want a 404 family answer; body: %.100s", target, rec.Body.String())
++		}
++		if bytes.Contains(rec.Body.Bytes(), []byte("top secret")) {
++			t.Errorf("GET %s served the secret outside PHOTO_DIR", target)
++		}
++	}
++
++	// White-box: the resolver clamps every dot-dot climb inside the photo
++	// root — the resolved path can never name the outside secret.
++	for _, val := range []string{"../../secret.txt", "a/../../../secret.txt", "/../../secret.txt", "\x00"} {
++		abs, ok := photoAbsPath(dir, val)
++		if !ok {
++			continue // rejected outright (NUL) — also fine
++		}
++		if abs != dir && !strings.HasPrefix(abs, dir+string(filepath.Separator)) {
++			t.Errorf("photoAbsPath(%q) = %q, which escapes %q", val, abs, dir)
++		}
++		if _, err := os.Stat(abs); err == nil {
++			t.Errorf("photoAbsPath(%q) = %q, which exists — traversal may have escaped", val, abs)
++		}
++	}
++
++	// Literal dot-dot through the mux: Go's mux redirects non-canonical
++	// paths to their cleaned form, so the traversal request resolves to a
++	// 404 — never the file.
++	srv := httptest.NewServer(h)
++	t.Cleanup(srv.Close)
++	client := &http.Client{}
++	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/photos/../../go.mod", nil)
++	if err != nil {
++		t.Fatalf("new request: %v", err)
++	}
++	resp, err := client.Do(req)
++	if err != nil {
++		t.Fatalf("GET traversal: %v", err)
++	}
++	defer func() { _ = resp.Body.Close() }()
++	body, _ := io.ReadAll(resp.Body)
++	if resp.StatusCode != http.StatusNotFound {
++		t.Errorf("traversal /photos/../../go.mod resolves to status %d, want a final 404; body: %.100s", resp.StatusCode, body)
++	}
++	if bytes.Contains(body, []byte("module ")) {
++		t.Error("traversal served the repo's go.mod")
++	}
++}
++
++func TestPhotoProblemMappingTable(t *testing.T) {
++	heic := heicUnsupported{ErrPhotoUnsupported}
++	cases := []struct {
++		name   string
++		err    error
++		status int
++		msg    string
++	}{
++		{"too large sentinel", ErrPhotoTooLarge, http.StatusRequestEntityTooLarge, "Photo must be at most 15 MB"},
++		{"too large wrapped", fmt.Errorf("photo: body: %w", ErrPhotoTooLarge), http.StatusRequestEntityTooLarge, "Photo must be at most 15 MB"},
++		{"unsupported sentinel", ErrPhotoUnsupported, http.StatusUnsupportedMediaType, "Photo must be JPEG, PNG or WebP"},
++		{"unsupported wrapped", fmt.Errorf("read: %w", ErrPhotoUnsupported), http.StatusUnsupportedMediaType, "Photo must be JPEG, PNG or WebP"},
++		{"heic marked", heic, http.StatusUnsupportedMediaType, "Photo must be JPEG, PNG or WebP — please choose JPEG instead of HEIC"},
++		{"heic deep wrapped", fmt.Errorf("a: %w", fmt.Errorf("b: %w", heic)), http.StatusUnsupportedMediaType, "Photo must be JPEG, PNG or WebP — please choose JPEG instead of HEIC"},
++		{"too many px sentinel", ErrPhotoTooManyPx, http.StatusUnsupportedMediaType, "Photo has too many pixels"},
++		{"too many px wrapped", fmt.Errorf("cfg: %w", ErrPhotoTooManyPx), http.StatusUnsupportedMediaType, "Photo has too many pixels"},
++		{"max bytes raw", &http.MaxBytesError{Limit: MaxPhotoBytes}, http.StatusRequestEntityTooLarge, "Photo must be at most 15 MB"},
++		{"unknown error", errors.New("boom"), http.StatusInternalServerError, "internal error"},
++		{"nil error", nil, http.StatusInternalServerError, "internal error"},
++	}
++	for _, c := range cases {
++		status, msg := PhotoProblem(c.err)
++		if status != c.status || msg != c.msg {
++			t.Errorf("%s: PhotoProblem = (%d, %q), want (%d, %q)", c.name, status, msg, c.status, c.msg)
++		}
++	}
++}
++
++// TestPhotoFieldsReadableAfterPhotoParses pins the parse-order contract
++// T-205 compiles against: Photo performs the request's ONE multipart parse,
++// and the caller's scalar fields are readable from r.MultipartForm.Value
++// afterwards.
++func TestPhotoFieldsReadableAfterPhotoParses(t *testing.T) {
++	s, _, _ := newUploadServer(t)
++	fields := map[string]string{
++		"csrf_token": "tok-123", "label": "Contract lamp", "kind": "building",
++		"lat": "42.7617", "lon": "-71.0303", "asset_no": "GP-9001",
++	}
++	req := uploadRequest(t, fields, "landscape.jpg", uploadFixture(t, "landscape.jpg"))
++	up, err := s.Photo(req)
++	if err != nil {
++		t.Fatalf("Photo: %v", err)
++	}
++	if up == nil {
++		t.Fatal("Photo returned nil for a valid upload")
++	}
++	for k, want := range fields {
++		got := req.MultipartForm.Value[k]
++		if len(got) != 1 || got[0] != want {
++			t.Errorf("field %s = %v after Photo, want [%q]", k, got, want)
++		}
++	}
++	// A caller-side ParseMultipartForm after Photo is a no-op returning nil.
++	if err := req.ParseMultipartForm(photoMaxMemory); err != nil {
++		t.Errorf("ParseMultipartForm after Photo: %v, want a no-op nil", err)
++	}
++}
++
++// TestPhotoReusesFormTheCallerParsed covers the reverse order: a handler
++// that parsed the form before calling Photo still gets the photo processed
++// from the already-parsed field.
++func TestPhotoReusesFormTheCallerParsed(t *testing.T) {
++	s, _, dir := newUploadServer(t)
++	req := uploadRequest(t, map[string]string{"label": "Pre-parsed lamp"}, "tiny.png", uploadFixture(t, "tiny.png"))
++	if err := req.ParseMultipartForm(photoMaxMemory); err != nil {
++		t.Fatalf("caller ParseMultipartForm: %v", err)
++	}
++	up, err := s.Photo(req)
++	if err != nil {
++		t.Fatalf("Photo: %v", err)
++	}
++	if up == nil {
++		t.Fatal("Photo returned nil for a valid pre-parsed upload")
++	}
++	if got := uploadCountFiles(t, dir); got != 1 {
++		t.Errorf("photo dir holds %d files, want exactly 1", got)
++	}
++}
++
++// TestPhotoNonMultipartIsAWiringErrorNotASentinel: a body that never was
++// multipart must not be confused with a photo-format problem.
++func TestPhotoNonMultipartIsAWiringErrorNotASentinel(t *testing.T) {
++	s, _, dir := newUploadServer(t)
++	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/x", strings.NewReader("label=x"))
++	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++	LimitBody(req)
++	up, err := s.Photo(req)
++	if up != nil || err == nil {
++		t.Fatalf("Photo on a non-multipart request: photo=%v err=%v, want a wrapped error", up, err)
++	}
++	for _, sentinel := range []error{ErrPhotoTooLarge, ErrPhotoUnsupported, ErrPhotoTooManyPx} {
++		if errors.Is(err, sentinel) {
++			t.Errorf("non-multipart request err = %v, which wrongly matches %v", err, sentinel)
++		}
++	}
++	if status, _ := PhotoProblem(err); status != http.StatusInternalServerError {
++		t.Errorf("PhotoProblem status = %d, want 500 for a wiring error", status)
++	}
++	if got := uploadCountFiles(t, dir); got != 0 {
++		t.Errorf("photo dir holds %d files, want 0", got)
++	}
++}
