@@ -1,7 +1,7 @@
 // @ts-check
 // Walk-the-town client (T-205): geolocation readout, low-accuracy save gate,
-// draggable/keyboard pin pad (±25 m), manual fallback, photo preview,
-// htmx error-swap config. CSP: no eval/inline/console.
+// pin pad (±25 m: drag + arrows), manual fallback, photo preview, htmx
+// error-swap config. CSP: no eval/inline/console.
 
 const EARTH_M_PER_DEG = 111194.9; // mean-earth metres per degree of latitude
 const ACCURACY_GATE_M = 30;
@@ -68,11 +68,8 @@ function setAlert(message) {
   const alert = el('walk-alert');
   if (!(alert instanceof HTMLElement)) return;
   const text = el('walk-alert-text');
-  if (text) {
-    text.textContent = message;
-  } else {
-    alert.textContent = message;
-  }
+  if (text) text.textContent = message;
+  else alert.textContent = message;
   alert.hidden = message === '';
 }
 
@@ -101,9 +98,7 @@ function render(/** @type {{lat: number, lon: number} | null} */ pt) {
   if (low instanceof HTMLElement) low.hidden = !needChoice;
 }
 
-function update() {
-  render(state.manual ? manualPoint() : effective());
-}
+const update = () => render(state.manual ? manualPoint() : effective());
 
 /** Geolocation denied or unavailable: fall back to typed coordinates. */
 function enterManual() {
@@ -129,9 +124,8 @@ function startWatch() {
     state.accuracyM = pos.coords.accuracy;
     update();
   }, (err) => {
-    // Denied/unavailable falls back to manual input — but only before any
-    // fix: permission overrides (setGeolocation) can surface a transient
-    // error mid-watch, and the next callback refreshes the readout.
+    // Manual fallback only before any fix: setGeolocation overrides can
+    // surface a transient error mid-watch; the next callback refreshes.
     if ((err.code === 1 || err.code === 2) && state.baseLat === null) enterManual();
   }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 });
 }
@@ -178,17 +172,14 @@ function bindPhotoPreview() {
     const file = input.files?.[0];
     if (!file) return;
     const img = document.createElement('img');
-    img.id = 'photo-preview';
-    img.alt = 'Photo preview';
-    img.src = URL.createObjectURL(file);
+    Object.assign(img, { id: 'photo-preview', alt: 'Photo preview', src: URL.createObjectURL(file) });
     slot.append(img);
   });
 }
 
 function init() {
   // htmx 2.0.11 must swap 4xx bodies (the 422 alert / 409 dup panel) into the
-  // form's #dup-slot target: base.html's htmx-config meta carries allowEval,
-  // but the vendored default refuses to swap 4xx — override before init.
+  // form's #dup-slot: the vendored default refuses 4xx — override before init.
   const h = window.htmx;
   if (h) {
     h.config.responseHandling = [
