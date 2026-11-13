@@ -1,0 +1,681 @@
+diff --git a/cmd/server/boot_test.go b/cmd/server/boot_test.go
+index 12e1f8e..15b4d2f 100644
+--- a/cmd/server/boot_test.go
++++ b/cmd/server/boot_test.go
+@@ -1,9 +1,9 @@
+ //go:build smoke
+ 
+ // Boot-level integration tests for the server binary: the wiring main.go
+-// does before serving (store.Open at boot, SetProbeStore, graceful shutdown)
+-// is invisible to in-process handler tests, so these spawn bin/server and
+-// exercise it black-box on a real port with a temp SQLite DB. They are the
++// does before serving (store.Open at boot, store handed to web.New, graceful
++// shutdown) is invisible to in-process handler tests, so these spawn
++// bin/server and exercise it black-box on a real port with a temp SQLite DB. They are the
+ // unit-side equivalent of the A-103/A-104 draft contracts (persistence across
+ // SIGTERM; checksum-mismatch boot refusal) and complement the protected
+ // acceptance suite.
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+index 24605cf..9825c57 100644
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -46,9 +46,7 @@ func run() error {
+ 	// cannot be acted on, so it is deliberately discarded.
+ 	defer func() { _ = db.Close() }()
+ 
+-	web.SetProbeStore(db)
+-
+-	srv, err := web.New(cfg, logger)
++	srv, err := web.New(cfg, logger, db)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/harness/handoffs/T-208.md b/harness/handoffs/T-208.md
+new file mode 100644
+index 0000000..8958345
+--- /dev/null
++++ b/harness/handoffs/T-208.md
+@@ -0,0 +1,153 @@
++# T-208 handoff — store onto Server + /probe fragment Content-Type
++
++VERDICT: DONE (both deliverables in; full `make check` green on the final tree)
++
++## Retry note (attempt 2)
++
++Attempt 1 completed both deliverables but edited `internal/web/middleware_logging_test.go`
++(one token: added `, nil` to its `New` call) because the packet's literal
++3-arg `New` signature does not compile against main's 2-arg call in that
++file. That file is not in `owns`, so the gate's guard failed with **exit 4**
++(`ERROR: out of ownership: internal/web/middleware_logging_test.go not covered
++by owns of T-208`; guard.go checkOwnership over `git diff --name-only
++main...HEAD`).
++
++Attempt 2 resolves the deadlock inside `owns`: `New`'s store parameter is
++**variadic** (`db ...*store.DB`), which is the unique signature for which
++(a) main's untouched `New(testConfig(env), slog.New(h))` call compiles, and
++(b) the production call form `New(cfg, log, db)` compiles. The middleware
++test file is restored **byte-identical to main** (`git diff main --
++internal/web/middleware_logging_test.go` is empty), so it no longer appears
++in the branch diff. See "Frozen API" and "Spec deviation, precisely" below.
++
++## Frozen API (T-203 / T-205 / T-206 compile against this)
++
++- `web.Server` has an **exported field `Store *store.DB`** — read it as `s.Store`.
++- `web.New(cfg config.Config, log *slog.Logger, db ...*store.DB) (*Server, error)`.
++  **Production and every store-backed test call it exactly as the packet froze:
++  `New(cfg, log, db)`.** Store-less unit tests may call `New(cfg, log)` or pass
++  `nil` — both leave `Server.Store == nil`, and every store-backed route
++  answers 500. More than one store argument is ignored past the first (no
++  caller does this; it exists only so the 2-arg form compiles).
++- `web.SetProbeStore` is **deleted**. Nothing else in `internal/web` reads a
++  global store. Feature tasks (auth/session, photos, admin) get the store via
++  `serverFrom(r.Context()).Store` — do NOT add another package-global setter.
++
++## What changed where
++
++| File | Change |
++|---|---|
++| `internal/web/web.go` | `Server` gains `Store *store.DB` (doc comment: nil only in store-less unit tests); `New` takes the store as a variadic third parameter (see retry note); `store` import added. `home`/middleware untouched. |
++| `internal/web/probe.go` | Deleted `probeStore`, `SetProbeStore`, `errProbeStoreUnset` and the SCAFFOLD doc note. `probeCount`/`probeInc` are now methods on `*Server` reading `s.Store` (nil → `errProbeStoreNotWired = errors.New("probe: store not wired")` → same 500 path: log + `http.Error(..., 500)`). **Content-Type fix (judge-M1 gap b):** `probeGet` and the HTMX branch of `probePost` set `Content-Type: text/html; charset=utf-8` (const `probeContentType`) immediately before `renderPartial`; on render failure `http.Error` overwrites it with its own plain-text 500, so error responses are unchanged. No-JS POST (303) untouched. `probeFragment` now calls `s.probeCount`. Probe behaviour otherwise byte-identical (A-103/104/105 green). |
++| `cmd/server/main.go` | `web.SetProbeStore(db)` deleted; `web.New(cfg, logger, db)`. Boot order now: config → logger → `store.Open` → checksum-refusal on error → `defer db.Close()` → `web.New(cfg, logger, db)` → serve. |
++| `cmd/server/boot_test.go` | Comment-only: "store.Open at boot, store handed to web.New" (was "SetProbeStore"). Test bodies unchanged — they are black-box (spawn the binary) and needed no edits. |
++| `internal/web/web_test.go` | `newTestServer` passes nil store (with comment). |
++| `internal/web/probe_test.go` | `newProbeServer` returns `(*Server, *store.DB)`: opens a real temp store (`store.Open(ctx, filepath.Join(t.TempDir(), "probe.db"))`, migrations included) and sets `s.Store = db`; cleanup closes the DB (no package global to unset). `probeCountNow(t, db)` takes the handle. "store unset answers 500" subtest renamed "store nil answers 500" and builds its server via `newTestServer` (nil `Server.Store` — same code path a mis-boot would take). All other rows still assert the frozen fragment/markup/CSRF/303 contracts. **NEW:** `TestProbeFragmentContentType` — table-driven, two rows (GET `/probe`; HTMX POST `/probe`), each asserting `Content-Type` **exactly** `text/html; charset=utf-8` over a **real net/http connection** (`httptest.NewServer` + `cookiejar`), not a `ResponseRecorder` — see the header-fix section for why. |
++| `internal/web/middleware_logging_test.go` | **Restored byte-identical to main** (attempt 1 had added `, nil` to its `New` call; reverted via the variadic signature). `git diff main -- <file>` is empty; the file is absent from `git diff --name-only main...HEAD`, so guard ownership passes. |
++
++No new dependencies (`allow_deps: []` respected — only stdlib + existing module
++imports). No "Phase N" strings (phase-grep green inside `make check`). No
++TODO/FIXME added (guard marker scan green).
++
++## Spec deviation, precisely (for reviewer/planner)
++
++The packet says the signature "becomes `New(cfg config.Config, log *slog.Logger,
++db *store.DB) (*Server, error)`". Delivered as `db ...*store.DB` because the
++packet is self-contradictory on this point and the contradiction is
++mechanically enforced:
++
++- main's `internal/web/middleware_logging_test.go` calls `New(testConfig(env),
++  slog.New(h))` — 2 args. Go has no default arguments; with a fixed-arity
++  3-param `New` that line cannot compile.
++- Editing that file is outside `owns` (packet: `cmd/server/**`,
++  `internal/web/web.go`, `context.go`, `web_test.go`, `probe*.go`) — attempt 1
++  did it anyway and the guard rejected the branch with exit 4. There is no
++  exemption path in guard.go for it.
++- Therefore the two packet requirements "exact 3-arg signature" and "diff stays
++  inside owns" cannot both hold. The variadic third parameter is the only
++  signature satisfying both "main's tests compile untouched" and "owns clean",
++  while preserving every semantic requirement: `New(cfg, log, db)` is the
++  frozen call form (compiles, and is what main.go and downstream tasks use),
++  nil-db is allowed, `s.Store` is the frozen access path, `SetProbeStore` is
++  gone, behaviour is unchanged.
++
++If the planner prefers the literal fixed-arity signature, the one-line fix is
++to extend owns (e.g. add `internal/web/middleware_logging_test.go` or
++`internal/web/**`) for whichever task lands that change — the compile edit is
++unavoidable the next time the signature moves.
++
++## The header fix, precisely
++
++With the global `X-Content-Type-Options: nosniff` (web.go `withSecurityHeaders`),
++a fragment response without `Content-Type` is sniffed by Go's server: the
++fragment starts with `<h2>`, which is **not** in Go's HTML sniff signature list,
++so the wire response was `Content-Type: text/plain; charset=utf-8` — a no-JS
++visitor hitting `/probe` directly saw escaped source (judge-M1 "Gap (b)").
++
++Re-proven on this tree (attempt 2): with the two
++`w.Header().Set(probeContentType)` lines temporarily disabled,
++`TestProbeFragmentContentType` fails with
++`fragment Content-Type = "text/plain; charset=utf-8"` on both rows (exit 1);
++with them restored it passes (exit 0), and `git diff` on probe.go is empty
++afterwards. The recorder-based assertions used elsewhere in the suite cannot
++see this because the recorder never sniffs — hence the wire-level
++(`httptest.NewServer`) table test.
++
++## Commands run (attempt 2, final tree)
++
++| Command | Exit | Result |
++|---|---|---|
++| `make check-fast` | 0 | fmt-check, vet, lint 0 issues, unit (−race, −shuffle) green — run with the variadic `New` + reverted middleware test in place |
++| `go test ./internal/web/... ./cmd/server/... -count=1` (packet's required cmd) | 0 | ok |
++| red-check: header lines disabled → `go test ./internal/web/ -run TestProbeFragmentContentType -count=1` | **1** | expected failure reproducing judge-M1 gap (b): `text/plain; charset=utf-8` on both rows |
++| header lines restored → same command | 0 | green; `git diff` on probe.go empty |
++| `make build` | 0 | binary rebuilt through `web.New(cfg, logger, db)` |
++| `go test -tags smoke -count=1 ./cmd/server/` | 0 | boot smoke: probe flows + persistence across SIGTERM/respawn + checksum-refusal, black-box against the rebuilt binary |
++| `make e2e-task T=T-208` | 2 | usage branch — Makefile variable is `TASK` (AGENTS.md/packet spell it `T=`; Makefile protected, discrepancy recorded as open issue 1) |
++| `make e2e-task TASK=T-208` | 0 | "no claims for T-208" (packet has `"claims": []`) |
++| `make check` (final tree) | 0 | full gate: check-fast, generate-check (go mod tidy), cover (web 86.5% / config 81.1%), govulncheck, templates-check (render snapshots + html-validate), tsc, acceptance-go, e2e 32/32, a11y 8/8, visual, gitleaks — all green |
++| `git diff main -- internal/web/middleware_logging_test.go` | 0 | empty output — byte-identical to main |
++
++Notes: the first `make check` run failed at the e2e step with "port 8931
++already in use" (a stale webServer from an earlier session; `lsof -ti :8931`
++found nothing seconds later). The immediate re-run was green — no code
++implication. Attempt 1's evidence (same probe.go bytes): baseline
++`make check-fast` / `make test-acceptance-go` / `@A-103` Playwright green
++pre-change; `make check` full gate green post-change; `noctx` lint fix in the
++new wire-level test (`NewRequestWithContext` + `client.Do`).
++
++## Open issues / notes
++
++1. **`make e2e-task T=<id>` (AGENTS.md spelling) exits 2** — the Makefile
++   variable is `TASK`, so the doc's `T=` form hits the usage branch
++   (`usage: make e2e-task TASK=T-###`). `TASK=` works. Makefile is protected;
++   recorded for the planner since this task's packet has empty claims and the
++   discrepancy will bite the next worker with actual claims.
++2. **Owns gap for signature-moving tasks** (see "Spec deviation"): the packet's
++   owns list omits `internal/web/middleware_logging_test.go`, which is forced
++   to change by any fixed-arity change to `New`. Planner options: extend owns
++   next time, or accept the variadic signature as delivered (recommended —
++   downstream call form is unchanged).
++3. The untracked `node_modules` symlink (pre-existing environment link;
++   `.gitignore`'s `node_modules/` does not match symlinks) is whitelisted by
++   the guard's `DirtyLines` (`p == "node_modules"` in ratchet.go) — left
++   untracked, not committed.
++4. `renderPage` (home page) also sets no Content-Type — currently harmless (the
++   page starts `<!doctype html>`, which sniffs as text/html). `templates.go` is
++   not T-208's; noting in case M2 wants the same explicitness there (T-205 owns
++   templates).
++5. As delivered: T-106 (untrack test-run.db blobs) ran/will run separately per
++   harness/state.md; nothing in this task touches those files.
++
++## Verification summary
++
++- Deliverable 1 (store onto Server): done — `Server.Store` exported field +
++  `New(cfg, log, db)` call form frozen + nil-db tests + deleted globals; main
++  and boot wiring proven by the smoke-tagged spawn tests (persistence across
++  SIGTERM/respawn on the same DB_PATH green) — with the one documented
++  signature-shape deviation above, forced by the owns list.
++- Deliverable 2 (Content-Type): done — exact header set in both fragment
++  transports, wire-level table test added, red/green re-demonstrated on the
++  final tree.
++- Observable probe behaviour otherwise unchanged; A-103/A-104/A-105 active specs
++  green in the final `make check` (acceptance-go + 32/32 Playwright).
+diff --git a/internal/web/probe.go b/internal/web/probe.go
+index 212b6f0..7568eb8 100644
+--- a/internal/web/probe.go
++++ b/internal/web/probe.go
+@@ -4,12 +4,9 @@
+ // double-submit CSRF, an HTMX partial and a no-JS form fallback (303 back to
+ // the home page).
+ //
+-// SCAFFOLD: the store reaches these handlers through a package-level pointer
+-// (SetProbeStore, called by main before web.New) because web.go — where a
+-// store field on Server would live — is not owned by this file. Refactor
+-// point: move the store onto Server (and render the home mount's live
+-// fragment server-side with it) once web.go ownership allows; nothing else
+-// here would change.
++// The store reaches these handlers through Server.Store (wired by main via
++// web.New); while it is nil — only possible in tests that never open a store
++// — every probe route answers 500 (a wiring bug, logged as such).
+ package web
+ 
+ import (
+@@ -21,21 +18,12 @@ import (
+ 	"io"
+ 	"net/http"
+ 	"path/filepath"
+-
+-	"github.com/amscotti/groveland-lights/internal/store"
+ )
+ 
+-// probeStore is the process-wide store used by the probe handlers. It is nil
+-// until SetProbeStore wires it at boot; while nil, every probe route answers
+-// 500 (a boot-ordering bug, logged as such).
+-var probeStore *store.DB
+-
+-// SetProbeStore wires the store the probe handlers read and increment
+-// through. Call it once at boot, before web.New.
+-func SetProbeStore(db *store.DB) { probeStore = db }
++const probeContentType = "text/html; charset=utf-8"
+ 
+-// errProbeStoreUnset reports a probe request served before SetProbeStore.
+-var errProbeStoreUnset = errors.New("probe: store not wired (SetProbeStore was not called)")
++// errProbeStoreNotWired reports a probe request served with a nil Server.Store.
++var errProbeStoreNotWired = errors.New("probe: store not wired")
+ 
+ func init() {
+ 	register(route{pattern: "GET /probe", handler: probeGet})
+@@ -66,22 +54,22 @@ func (t *templates) renderPartial(w io.Writer, name string, data any) error {
+ 	return err
+ }
+ 
+-// probeCount reads the counter through the wired store, collapsing the unset
+-// case into an error so handlers keep a single failure path.
+-func probeCount(ctx context.Context) (int64, error) {
+-	if probeStore == nil {
+-		return 0, errProbeStoreUnset
++// probeCount reads the counter through Server.Store, collapsing the nil
++// store into an error so handlers keep a single failure path.
++func (s *Server) probeCount(ctx context.Context) (int64, error) {
++	if s.Store == nil {
++		return 0, errProbeStoreNotWired
+ 	}
+-	return probeStore.ProbeCount(ctx)
++	return s.Store.ProbeCount(ctx)
+ }
+ 
+-// probeInc increments the counter through the wired store, collapsing the
+-// unset case into an error so handlers keep a single failure path.
+-func probeInc(ctx context.Context) (int64, error) {
+-	if probeStore == nil {
+-		return 0, errProbeStoreUnset
++// probeInc increments the counter through Server.Store, collapsing the nil
++// store into an error so handlers keep a single failure path.
++func (s *Server) probeInc(ctx context.Context) (int64, error) {
++	if s.Store == nil {
++		return 0, errProbeStoreNotWired
+ 	}
+-	return probeStore.ProbeInc(ctx)
++	return s.Store.ProbeInc(ctx)
+ }
+ 
+ // probeGet renders the probe fragment: heading, current count and the
+@@ -89,7 +77,7 @@ func probeInc(ctx context.Context) (int64, error) {
+ // home mount, hx-post on the form) and swaps it into <section id="probe">.
+ func probeGet(w http.ResponseWriter, r *http.Request) {
+ 	s := serverFrom(r.Context())
+-	n, err := probeCount(r.Context())
++	n, err := s.probeCount(r.Context())
+ 	if err != nil {
+ 		s.Log.Error("probe: count", "err", err)
+ 		http.Error(w, "internal error", http.StatusInternalServerError)
+@@ -100,6 +88,10 @@ func probeGet(w http.ResponseWriter, r *http.Request) {
+ 		return // IssueCSRFToken could not mint a token and answered 500.
+ 	}
+ 	data := probeData{Count: n, CSRFToken: token}
++	// The fragment is a full HTML document for a no-JS visitor who navigates
++	// here directly; with the global nosniff header it must not be left to
++	// sniffing (which reads it as text/plain and shows escaped source).
++	w.Header().Set("Content-Type", probeContentType)
+ 	if err := s.tpl.renderPartial(w, "partials/probe.html", data); err != nil {
+ 		s.Log.Error("probe: render", "err", err)
+ 		http.Error(w, "internal error", http.StatusInternalServerError)
+@@ -145,7 +137,7 @@ func probePost(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
+-	n, err := probeInc(r.Context())
++	n, err := s.probeInc(r.Context())
+ 	if err != nil {
+ 		s.Log.Error("probe: inc", "err", err)
+ 		http.Error(w, "internal error", http.StatusInternalServerError)
+@@ -164,6 +156,9 @@ func probePost(w http.ResponseWriter, r *http.Request) {
+ 		return // IssueCSRFToken could not mint a token and answered 500.
+ 	}
+ 	data := probeData{Count: n, CSRFToken: token}
++	// Same nosniff reasoning as probeGet: the swapped fragment must declare
++	// itself HTML, not rely on sniffing.
++	w.Header().Set("Content-Type", probeContentType)
+ 	if err := s.tpl.renderPartial(w, "partials/probe.html", data); err != nil {
+ 		s.Log.Error("probe: render", "err", err)
+ 		http.Error(w, "internal error", http.StatusInternalServerError)
+@@ -175,7 +170,7 @@ func probePost(w http.ResponseWriter, r *http.Request) {
+ // (contract A-103). JS clients get the same markup refreshed by htmx.
+ func probeFragment(w http.ResponseWriter, r *http.Request) (template.HTML, error) { //nolint:forbidigo // §8.4 audited door: the ONLY template.HTML return type, for server-rendered fragments
+ 	s := serverFrom(r.Context())
+-	n, err := probeCount(r.Context())
++	n, err := s.probeCount(r.Context())
+ 	if err != nil {
+ 		return "", err
+ 	}
+diff --git a/internal/web/probe_test.go b/internal/web/probe_test.go
+index 0289b44..283e174 100644
+--- a/internal/web/probe_test.go
++++ b/internal/web/probe_test.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"io"
+ 	"net/http"
++	"net/http/cookiejar"
+ 	"net/http/httptest"
+ 	"net/url"
+ 	"path/filepath"
+@@ -22,20 +23,24 @@ import (
+ // the span sits between the prefix and the digits in the HTML source.
+ var probeReCount = regexp.MustCompile(`<span id="probe-count">(\d+)</span>`)
+ 
++// probeReToken extracts the minted CSRF token from the fragment's hidden
++// input (used by the wire-level Content-Type test).
++var probeReToken = regexp.MustCompile(`<input type="hidden" name="csrf_token" value="([^"]+)">`)
++
+ // newProbeServer builds a Server whose probe handlers run against a real
+-// store (store.Open on a temp-file SQLite DB, migrations included) wired
+-// through the same SetProbeStore call main uses. Cleanup closes the store
+-// and unsets the package-level wiring so rows stay independent.
+-func newProbeServer(t *testing.T) *Server {
++// store: store.Open on a temp-file SQLite DB (migrations included), set on
++// Server.Store exactly as main's web.New call does. Cleanup closes the
++// store, so rows stay independent per test.
++func newProbeServer(t *testing.T) (*Server, *store.DB) {
+ 	t.Helper()
+ 	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "probe.db"))
+ 	if err != nil {
+ 		t.Fatalf("store.Open: %v", err)
+ 	}
+ 	t.Cleanup(func() { _ = db.Close() })
+-	SetProbeStore(db)
+-	t.Cleanup(func() { SetProbeStore(nil) })
+-	return newTestServer(t, config.EnvTest)
++	s := newTestServer(t, config.EnvTest)
++	s.Store = db
++	return s, db
+ }
+ 
+ // probeMint GETs /probe through the full middleware chain once: it returns
+@@ -103,13 +108,13 @@ func probePostForm(t *testing.T, s *Server, cookie *http.Cookie, form url.Values
+ 	return rec
+ }
+ 
+-// probeCountNow reads the counter straight from the wired store.
+-func probeCountNow(t *testing.T) int64 {
++// probeCountNow reads the counter straight from the store under test.
++func probeCountNow(t *testing.T, db *store.DB) int64 {
+ 	t.Helper()
+-	if probeStore == nil {
++	if db == nil {
+ 		t.Fatal("probe store not wired")
+ 	}
+-	n, err := probeStore.ProbeCount(context.Background())
++	n, err := db.ProbeCount(context.Background())
+ 	if err != nil {
+ 		t.Fatalf("ProbeCount: %v", err)
+ 	}
+@@ -133,7 +138,7 @@ func probeTamper(token string) string {
+ 
+ func TestProbeGet(t *testing.T) {
+ 	t.Run("renders the contract fragment", func(t *testing.T) {
+-		s := newProbeServer(t)
++		s, _ := newProbeServer(t)
+ 		body, cookie, n := probeMint(t, s)
+ 
+ 		// Frozen fragment contract: h2 heading exactly "Probe"; the count
+@@ -161,7 +166,7 @@ func TestProbeGet(t *testing.T) {
+ 	})
+ 
+ 	t.Run(`fragment has no html/body and no id="map"`, func(t *testing.T) {
+-		s := newProbeServer(t)
++		s, _ := newProbeServer(t)
+ 		body := s.probeGet(t).Body.String()
+ 		// The fragment is swapped INTO the home page: a full document here
+ 		// would nest html/body tags, and id="map" would collide with the
+@@ -176,19 +181,20 @@ func TestProbeGet(t *testing.T) {
+ 		}
+ 	})
+ 
+-	t.Run("store unset answers 500", func(t *testing.T) {
+-		s := newProbeServer(t)
+-		SetProbeStore(nil)
++	t.Run("store nil answers 500", func(t *testing.T) {
++		// newTestServer wires no store (Server.Store == nil): the same path
++		// a mis-booted server would take.
++		s := newTestServer(t, config.EnvTest)
+ 		rec := httptest.NewRecorder()
+ 		s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/probe", nil))
+ 		if rec.Code != http.StatusInternalServerError {
+-			t.Fatalf("GET /probe with store unset: status %d, want 500", rec.Code)
++			t.Fatalf("GET /probe with nil store: status %d, want 500", rec.Code)
+ 		}
+ 	})
+ 
+ 	t.Run("store failure answers 500", func(t *testing.T) {
+-		s := newProbeServer(t)
+-		if err := probeStore.Close(); err != nil {
++		s, db := newProbeServer(t)
++		if err := db.Close(); err != nil {
+ 			t.Fatalf("close store: %v", err)
+ 		}
+ 		rec := httptest.NewRecorder()
+@@ -201,7 +207,7 @@ func TestProbeGet(t *testing.T) {
+ 
+ func TestProbePost(t *testing.T) {
+ 	t.Run("valid token increments", func(t *testing.T) {
+-		s := newProbeServer(t)
++		s, db := newProbeServer(t)
+ 		_, cookie, n := probeMint(t, s)
+ 
+ 		form := url.Values{CSRFTokenName: {cookie.Value}}
+@@ -217,13 +223,13 @@ func TestProbePost(t *testing.T) {
+ 		if err != nil || got != n+1 {
+ 			t.Fatalf("POST /probe fragment count = %v, want %d; body:\n%s", m[1], n+1, rec.Body.String())
+ 		}
+-		if got := probeCountNow(t); got != n+1 {
++		if got := probeCountNow(t, db); got != n+1 {
+ 			t.Fatalf("store count after valid POST = %d, want %d", got, n+1)
+ 		}
+ 	})
+ 
+ 	t.Run("missing token 403 leaves count unchanged", func(t *testing.T) {
+-		s := newProbeServer(t)
++		s, db := newProbeServer(t)
+ 		_, cookie, n := probeMint(t, s)
+ 
+ 		// Empty body: no csrf_token field at all (HTMX-shaped header, as the
+@@ -232,13 +238,13 @@ func TestProbePost(t *testing.T) {
+ 		if rec.Code != http.StatusForbidden {
+ 			t.Fatalf("POST /probe without csrf_token: status %d, want 403; body:\n%s", rec.Code, rec.Body.String())
+ 		}
+-		if got := probeCountNow(t); got != n {
++		if got := probeCountNow(t, db); got != n {
+ 			t.Fatalf("count changed after rejected POST: %d, want %d", got, n)
+ 		}
+ 	})
+ 
+ 	t.Run("tampered token 403", func(t *testing.T) {
+-		s := newProbeServer(t)
++		s, db := newProbeServer(t)
+ 		_, cookie, n := probeMint(t, s)
+ 
+ 		form := url.Values{CSRFTokenName: {probeTamper(cookie.Value)}}
+@@ -246,13 +252,13 @@ func TestProbePost(t *testing.T) {
+ 		if rec.Code != http.StatusForbidden {
+ 			t.Fatalf("POST /probe with tampered csrf_token: status %d, want 403; body:\n%s", rec.Code, rec.Body.String())
+ 		}
+-		if got := probeCountNow(t); got != n {
++		if got := probeCountNow(t, db); got != n {
+ 			t.Fatalf("count changed after tampered POST: %d, want %d", got, n)
+ 		}
+ 	})
+ 
+ 	t.Run("non-HTMX post redirects 303 to /", func(t *testing.T) {
+-		s := newProbeServer(t)
++		s, db := newProbeServer(t)
+ 		_, cookie, n := probeMint(t, s)
+ 
+ 		// The no-JS submit: valid token, no HX-Request header. The counter
+@@ -265,13 +271,13 @@ func TestProbePost(t *testing.T) {
+ 		if loc := rec.Header().Get("Location"); loc != "/" {
+ 			t.Fatalf("POST /probe without HX-Request: Location = %q, want \"/\"", loc)
+ 		}
+-		if got := probeCountNow(t); got != n+1 {
++		if got := probeCountNow(t, db); got != n+1 {
+ 			t.Fatalf("count after no-JS POST = %d, want %d", got, n+1)
+ 		}
+ 	})
+ 
+ 	t.Run("unparseable body 400", func(t *testing.T) {
+-		s := newProbeServer(t)
++		s, db := newProbeServer(t)
+ 		_, cookie, n := probeMint(t, s)
+ 
+ 		// An invalid media type is the one POST shape ParseForm itself
+@@ -285,7 +291,7 @@ func TestProbePost(t *testing.T) {
+ 		if rec.Code != http.StatusBadRequest {
+ 			t.Fatalf("POST /probe with unparseable body: status %d, want 400", rec.Code)
+ 		}
+-		if got := probeCountNow(t); got != n {
++		if got := probeCountNow(t, db); got != n {
+ 			t.Fatalf("count changed after unparseable POST: %d, want %d", got, n)
+ 		}
+ 	})
+@@ -295,7 +301,7 @@ func TestProbePost(t *testing.T) {
+ // section with the HTMX load attributes and the plain link no-JS visitors
+ // follow to reach the fragment's form.
+ func TestProbeHomeMount(t *testing.T) {
+-	s := newProbeServer(t)
++	s, _ := newProbeServer(t)
+ 	rec := httptest.NewRecorder()
+ 	s.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
+ 	if rec.Code != http.StatusOK {
+@@ -315,3 +321,99 @@ func TestProbeHomeMount(t *testing.T) {
+ 		}
+ 	}
+ }
++
++// TestProbeFragmentContentType pins the judge-M1 gap-(b) fix: both fragment
++// transports set Content-Type exactly "text/html; charset=utf-8" before
++// writing. The assertions run over a real net/http connection
++// (httptest.NewServer), not a ResponseRecorder, because the defect itself was
++// wire-level: without the header the server sniffs the fragment — it starts
++// with <h2>, which is not in Go's HTML sniff signature list — into
++// "text/plain; charset=utf-8", and the global X-Content-Type-Options: nosniff
++// then makes a no-JS visitor who navigates to /probe directly see escaped
++// source.
++func TestProbeFragmentContentType(t *testing.T) {
++	const want = "text/html; charset=utf-8"
++
++	cases := []struct {
++		name string
++		do   func(t *testing.T, c *http.Client, base string) *http.Response
++	}{
++		{
++			name: "GET /probe",
++			do: func(t *testing.T, c *http.Client, base string) *http.Response {
++				t.Helper()
++				req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, base+"/probe", nil)
++				if err != nil {
++					t.Fatalf("new GET /probe: %v", err)
++				}
++				resp, err := c.Do(req)
++				if err != nil {
++					t.Fatalf("GET /probe: %v", err)
++				}
++				return resp
++			},
++		},
++		{
++			name: "HTMX POST /probe",
++			do: func(t *testing.T, c *http.Client, base string) *http.Response {
++				t.Helper()
++				// Mint a token first: the jar captures the CSRF cookie.
++				mintReq, err := http.NewRequestWithContext(context.Background(), http.MethodGet, base+"/probe", nil)
++				if err != nil {
++					t.Fatalf("new GET /probe (mint): %v", err)
++				}
++				mint, err := c.Do(mintReq)
++				if err != nil {
++					t.Fatalf("GET /probe (mint): %v", err)
++				}
++				body, err := io.ReadAll(mint.Body)
++				_ = mint.Body.Close()
++				if err != nil {
++					t.Fatalf("GET /probe (mint) body: %v", err)
++				}
++				m := probeReToken.FindStringSubmatch(string(body))
++				if m == nil {
++					t.Fatalf("minted fragment has no csrf_token input; body:\n%s", body)
++				}
++				form := url.Values{CSRFTokenName: {m[1]}}
++				req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, base+"/probe", strings.NewReader(form.Encode()))
++				if err != nil {
++					t.Fatalf("new POST /probe: %v", err)
++				}
++				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++				req.Header.Set("HX-Request", "true")
++				resp, err := c.Do(req)
++				if err != nil {
++					t.Fatalf("POST /probe: %v", err)
++				}
++				return resp
++			},
++		},
++	}
++
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			s, _ := newProbeServer(t)
++			srv := httptest.NewServer(s.Handler())
++			t.Cleanup(srv.Close)
++			jar, err := cookiejar.New(nil)
++			if err != nil {
++				t.Fatalf("cookie jar: %v", err)
++			}
++			client := &http.Client{Jar: jar}
++
++			resp := tc.do(t, client, srv.URL)
++			body, err := io.ReadAll(resp.Body)
++			_ = resp.Body.Close()
++			if err != nil {
++				t.Fatalf("%s: read body: %v", tc.name, err)
++			}
++			if resp.StatusCode != http.StatusOK {
++				t.Fatalf("%s: status %d, want 200; body:\n%s", tc.name, resp.StatusCode, body)
++			}
++			if got := resp.Header.Get("Content-Type"); got != want {
++				t.Fatalf("%s: fragment Content-Type = %q, want exactly %q; body:\n%s", tc.name, got, want, body)
++			}
++		})
++	}
++}
+diff --git a/internal/web/web.go b/internal/web/web.go
+index 0ff08bd..ede7e28 100644
+--- a/internal/web/web.go
++++ b/internal/web/web.go
+@@ -10,6 +10,7 @@ import (
+ 
+ 	assets "github.com/amscotti/groveland-lights"
+ 	"github.com/amscotti/groveland-lights/internal/config"
++	"github.com/amscotti/groveland-lights/internal/store"
+ )
+ 
+ // route is one mux registration. Method pattern per Go 1.22+ ServeMux.
+@@ -26,20 +27,32 @@ func register(r route) { routes = append(routes, r) }
+ 
+ // Server carries shared dependencies for handlers.
+ type Server struct {
+-	Cfg    config.Config
+-	Log    *slog.Logger
++	Cfg config.Config
++	Log *slog.Logger
++	// Store is the SQLite database opened at boot and handed to every
++	// feature through New. It is nil only in unit tests that never touch
++	// the store; probe handlers answer 500 while it is nil.
++	Store  *store.DB
+ 	tpl    *templates
+ 	routes []route
+ 	mux    *http.ServeMux
+ }
+ 
+ // New assembles the server: templates, middleware and all registered routes.
+-func New(cfg config.Config, log *slog.Logger) (*Server, error) {
++// Production passes the boot-opened store exactly once: New(cfg, log, db).
++// The store parameter is variadic so store-less unit tests keep compiling
++// unchanged (New(cfg, log)); omitting it, or passing nil, leaves Server.Store
++// nil and every store-backed route answers 500.
++func New(cfg config.Config, log *slog.Logger, db ...*store.DB) (*Server, error) {
+ 	tpl, err := parseTemplates()
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	s := &Server{Cfg: cfg, Log: log, tpl: tpl, routes: routes}
++	var st *store.DB
++	if len(db) > 0 {
++		st = db[0]
++	}
++	s := &Server{Cfg: cfg, Log: log, Store: st, tpl: tpl, routes: routes}
+ 	return s, nil
+ }
+ 
+diff --git a/internal/web/web_test.go b/internal/web/web_test.go
+index ddac666..d08c54c 100644
+--- a/internal/web/web_test.go
++++ b/internal/web/web_test.go
+@@ -27,7 +27,9 @@ var tPath = os.TempDir()
+ 
+ func newTestServer(t *testing.T, env config.Env) *Server {
+ 	t.Helper()
+-	s, err := New(testConfig(env), slog.New(slog.NewTextHandler(os.Stderr, nil)))
++	// Nil store: tests here never touch the database; probe tests that need
++	// a counter open a real temp store and set Server.Store themselves.
++	s, err := New(testConfig(env), slog.New(slog.NewTextHandler(os.Stderr, nil)), nil)
+ 	if err != nil {
+ 		t.Fatalf("New: %v", err)
+ 	}
