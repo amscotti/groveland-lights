@@ -205,7 +205,7 @@
         "steps": 200,
         "wall_min": 90
       },
-      "findings": "gate: make check failed: exit status 2"
+      "findings": "rebase conflict unresolved"
     }
   ]
 }
