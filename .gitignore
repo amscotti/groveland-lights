@@ -17,3 +17,5 @@ dist/
 testdata/rendered/*
 !testdata/rendered/.gitkeep
 harness/.merge.lock
+test-run.db*
+test-run-photos/
