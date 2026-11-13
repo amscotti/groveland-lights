@@ -237,8 +237,9 @@
       "claims": [],
       "ui": false,
       "allow_deps": [],
-      "status": "merging",
-      "attempts": 2,
+      "status": "rework",
+      "attempts": 3,
+      "model": "glm",
       "budget": {
         "steps": 50,
         "wall_min": 30
