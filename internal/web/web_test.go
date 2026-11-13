@@ -149,7 +149,6 @@ func TestRenderAll(t *testing.T) {
 					Status:    "on",
 				},
 			},
-			Page:      1,
 			OlderPage: 2,
 			HasOlder:  true,
 		},

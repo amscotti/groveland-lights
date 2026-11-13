@@ -34,16 +34,25 @@ func init() {
 // data, so the styled pipeline output is captured once at startup and installed
 // as that template. The frozen strings are unchanged; the served page now uses
 // base.html (pico.css, 44 px button) instead of auth.go's minimal markup.
+//
+// A parse/render failure is a build defect, not a runtime condition: panic with
+// the template name rather than silently serving the legacy minimal page, which
+// would make TestRenderAll/visual checks green against a page production never
+// serves.
 func installLoginPage() {
 	tpl, err := parseTemplates()
 	if err != nil {
-		return // New will report the parse failure; keep the minimal page.
+		panic("web: admin login: parse templates: " + err.Error())
 	}
 	var buf bytes.Buffer
 	if err := tpl.renderPage(&buf, "admin-login.html", pageData{Title: "Admin login"}); err != nil {
-		return
+		panic("web: admin login: render: " + err.Error())
 	}
-	loginPageTmpl = template.Must(template.New("admin-login").Parse(buf.String()))
+	parsed, err := template.New("admin-login").Parse(buf.String())
+	if err != nil {
+		panic("web: admin login: parse rendered page: " + err.Error())
+	}
+	loginPageTmpl = parsed
 }
 
 // adminPageSize is the frozen admin list page size: the 50 most recent
@@ -81,7 +90,6 @@ type rowView struct {
 type listData struct {
 	pageData
 	Rows      []rowView
-	Page      int
 	OlderPage int
 	NewerPage int
 	HasOlder  bool
@@ -149,7 +157,6 @@ func (s *Server) recentRows(ctx context.Context, page int) (listData, error) {
 	}
 	data := listData{
 		pageData:  pageData{Title: "Lights"},
-		Page:      page,
 		NewerPage: page - 1,
 		OlderPage: page + 1,
 		HasNewer:  page > 1,

@@ -37,16 +37,25 @@ type badSubmission struct {
 	message string
 }
 
-func (b *badSubmission) Error() string { return b.message }
-
 func bad(status int, message string) *badSubmission {
 	return &badSubmission{status: status, message: message}
 }
 
 // walkSubmission is a POST /admin/lights body parsed once at the boundary;
-// after parseWalkSubmission no handler touches the form.
+// after parseWalkSubmission no handler touches the form. The Raw fields hold
+// exactly what the admin typed, so every error re-render can echo them; the
+// typed fields are filled by validateWalkSubmission only after CSRF passes.
 type walkSubmission struct {
 	CSRFToken string
+	LabelRaw  string
+	AssetRaw  string
+	KindRaw   string
+	LatRaw    string
+	LonRaw    string
+	AccRaw    string
+	DupRaw    string
+	HTMX      bool
+
 	Label     string
 	AssetNo   *string
 	Kind      store.Kind
@@ -54,12 +63,13 @@ type walkSubmission struct {
 	Lon       float64
 	AccuracyM *float64
 	DupChoice string
-	HTMX      bool
 }
 
 // parseWalkSubmission lifts the multipart form into a typed submission.
 // LimitBody(r) MUST have been called first (the handler does); the parse here
 // is the request's single multipart parse, and the photo pipeline reuses it.
+// This step is syntactic only: field validation runs after CSRF so the frozen
+// parse → CSRF → bbox order always answers 403 to a bad token.
 func parseWalkSubmission(r *http.Request) (walkSubmission, *badSubmission) {
 	if err := r.ParseMultipartForm(adminFormMemory); err != nil {
 		// A body over the LimitBody cap surfaces as *http.MaxBytesError and
@@ -73,57 +83,54 @@ func parseWalkSubmission(r *http.Request) (walkSubmission, *badSubmission) {
 	}
 	v := r.MultipartForm.Value
 	val := func(key string) string { return firstValue(v, key) }
-	sub := walkSubmission{
+	return walkSubmission{
 		CSRFToken: strings.TrimSpace(val(CSRFTokenName)),
+		LabelRaw:  val("label"),
+		AssetRaw:  val("asset_no"),
+		KindRaw:   val("kind"),
+		LatRaw:    val("lat"),
+		LonRaw:    val("lon"),
+		AccRaw:    val("accuracy_m"),
+		DupRaw:    val("dup_choice"),
 		HTMX:      r.Header.Get("HX-Request") != "",
-	}
-	if perr := parseWalkCore(&sub, val); perr != nil {
-		return walkSubmission{}, perr
-	}
-	if perr := parseWalkOptional(&sub, val); perr != nil {
-		return walkSubmission{}, perr
-	}
-	return sub, nil
+	}, nil
 }
 
-// parseWalkCore parses the required fields: label, asset number, kind, position.
-func parseWalkCore(sub *walkSubmission, val func(string) string) *badSubmission {
-	sub.Label = strings.TrimSpace(val("label"))
+// validateWalkSubmission parses the required fields (label, asset number, kind,
+// position) and the optional ones (accuracy, dup_choice) into their typed form.
+// It runs after CSRF verification.
+func validateWalkSubmission(sub *walkSubmission) *badSubmission {
+	sub.Label = strings.TrimSpace(sub.LabelRaw)
 	if len(sub.Label) < 1 || len(sub.Label) > 120 {
 		return bad(http.StatusUnprocessableEntity, "Label must be 1 to 120 characters")
 	}
-	if raw := strings.TrimSpace(val("asset_no")); raw != "" {
+	if raw := strings.TrimSpace(sub.AssetRaw); raw != "" {
 		if !assetNoPattern.MatchString(raw) {
 			return bad(http.StatusUnprocessableEntity, "Asset number must be 1-32 letters, digits or dashes")
 		}
 		asset := raw
 		sub.AssetNo = &asset
 	}
-	kind, err := store.ParseKind(strings.TrimSpace(val("kind")))
+	kind, err := store.ParseKind(strings.TrimSpace(sub.KindRaw))
 	if err != nil || kind == store.KindStreet {
 		// street is reserved for the later import; the walk form offers
 		// park|building only (frozen reconciliation 3).
 		return bad(http.StatusUnprocessableEntity, "Choose a kind: park or building")
 	}
 	sub.Kind = kind
-	lat, lon, perr := parseLatLon(val("lat"), val("lon"))
+	lat, lon, perr := parseLatLon(sub.LatRaw, sub.LonRaw)
 	if perr != nil {
 		return bad(http.StatusUnprocessableEntity, "A position is required — wait for a fix or type one in")
 	}
 	sub.Lat, sub.Lon = lat, lon
-	return nil
-}
-
-// parseWalkOptional parses the optional fields: accuracy and dup_choice.
-func parseWalkOptional(sub *walkSubmission, val func(string) string) *badSubmission {
-	if raw := strings.TrimSpace(val("accuracy_m")); raw != "" {
+	if raw := strings.TrimSpace(sub.AccRaw); raw != "" {
 		acc, err := strconv.ParseFloat(raw, 64)
 		if err != nil || acc < 0 || !finite(acc) {
 			return bad(http.StatusUnprocessableEntity, "Accuracy must be a metre value of zero or more")
 		}
 		sub.AccuracyM = &acc
 	}
-	switch dc := val("dup_choice"); dc {
+	switch dc := sub.DupRaw; dc {
 	case "", "merge", "save":
 		sub.DupChoice = dc
 	default:
@@ -173,8 +180,11 @@ func adminCreate(w http.ResponseWriter, r *http.Request) {
 		s.walkReject(w, r, nil, perr.status, perr.message)
 		return
 	}
-	if err := VerifyCSRF(r, sub.CSRFToken); err != nil {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if !s.verifyWalkCSRF(w, r, sub) {
+		return
+	}
+	if perr := validateWalkSubmission(&sub); perr != nil {
+		s.walkReject(w, r, &sub, perr.status, perr.message)
 		return
 	}
 	if !s.Cfg.TownBBox.Contains(sub.Lat, sub.Lon) {
@@ -182,34 +192,76 @@ func adminCreate(w http.ResponseWriter, r *http.Request) {
 			"That position is outside Groveland town bounds")
 		return
 	}
-	photo, err := s.Photo(r) // reuses the boundary parse; validates the upload
-	if err != nil {
-		status, message := PhotoProblem(err)
-		if status == http.StatusInternalServerError {
-			s.Log.Error("admin create: photo", "err", err)
-			http.Error(w, "internal error", status)
-			return
-		}
-		s.walkReject(w, r, &sub, status, message)
+	photo, ok := s.walkPhoto(w, r, &sub)
+	if !ok {
 		return
 	}
-	decision, dup := s.classifyDuplicate(r, sub)
-	if dup {
-		switch {
-		case sub.DupChoice == "merge":
-			s.mergeDuplicate(w, r, sub, decision, photo)
-			return
-		case sub.DupChoice == "save" && decision.Numbered:
-			// Frozen: save-anyway is unnumbered-only.
-			s.walkReject(w, r, &sub, http.StatusUnprocessableEntity,
-				"This fixture has an asset number — merge it or cancel instead")
-			return
-		case sub.DupChoice == "":
-			s.respondDuplicate(w, r, sub, decision)
-			return
-		}
+	if s.respondWalkDuplicate(w, r, sub, photo) {
+		return
 	}
-	_, err = s.Store.CreateLight(r.Context(), store.NewLight{
+	s.createWalkLight(w, r, sub, photo)
+}
+
+// verifyWalkCSRF answers 403 for a bad or missing token. It runs before any
+// semantic field validation (frozen parse → CSRF → bbox order).
+func (s *Server) verifyWalkCSRF(w http.ResponseWriter, r *http.Request, sub walkSubmission) bool {
+	if err := VerifyCSRF(r, sub.CSRFToken); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// walkPhoto runs the photo pipeline and maps its errors. ok is false when a
+// response has already been written.
+func (s *Server) walkPhoto(w http.ResponseWriter, r *http.Request, sub *walkSubmission) (*UploadedPhoto, bool) {
+	photo, err := s.Photo(r) // reuses the boundary parse; validates the upload
+	if err == nil {
+		return photo, true
+	}
+	status, message := PhotoProblem(err)
+	if status == http.StatusInternalServerError {
+		s.Log.Error("admin create: photo", "err", err)
+		http.Error(w, "internal error", status)
+		return nil, false
+	}
+	s.walkReject(w, r, sub, status, message)
+	return nil, false
+}
+
+// respondWalkDuplicate handles a classified duplicate. It reports true when it
+// has written the response and the caller must stop.
+func (s *Server) respondWalkDuplicate(w http.ResponseWriter, r *http.Request, sub walkSubmission, photo *UploadedPhoto) bool {
+	decision, dup, err := s.classifyDuplicate(r, sub)
+	if err != nil {
+		s.Log.Error("admin create: duplicate lookup", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return true
+	}
+	if !dup {
+		return false
+	}
+	switch {
+	case sub.DupChoice == "merge":
+		s.mergeDuplicate(w, r, sub, decision, photo)
+		return true
+	case sub.DupChoice == "save" && decision.Numbered:
+		// Frozen: save-anyway is unnumbered-only.
+		s.walkReject(w, r, &sub, http.StatusUnprocessableEntity,
+			"This fixture has an asset number — merge it or cancel instead")
+		return true
+	case sub.DupChoice == "":
+		s.respondDuplicate(w, r, sub, decision)
+		return true
+	default:
+		// dup_choice=save on an unnumbered duplicate: fall through and create.
+		return false
+	}
+}
+
+// createWalkLight inserts the light and answers success (or the race panel).
+func (s *Server) createWalkLight(w http.ResponseWriter, r *http.Request, sub walkSubmission, photo *UploadedPhoto) {
+	_, err := s.Store.CreateLight(r.Context(), store.NewLight{
 		AssetNo:   sub.AssetNo,
 		Kind:      sub.Kind,
 		Label:     sub.Label,
@@ -218,24 +270,30 @@ func adminCreate(w http.ResponseWriter, r *http.Request) {
 		AccuracyM: sub.AccuracyM,
 		PhotoID:   photoIDOf(photo),
 	})
-	if errors.Is(err, store.ErrDuplicateAssetNo) {
-		// Lost a race against a concurrent create with the same asset number:
-		// show the numbered duplicate panel for the row that won.
-		if existing, gerr := s.Store.LightByAssetNo(r.Context(), *sub.AssetNo); gerr == nil {
-			s.respondDuplicate(w, r, sub, geo.DupDecision{
-				Numbered:   true,
-				ExistingID: int64(existing.ID),
-				DistanceM:  geo.DistanceM(geo.Point{Lat: sub.Lat, Lon: sub.Lon}, geo.Point{Lat: existing.Lat, Lon: existing.Lon}),
-			})
-			return
-		}
-	}
-	if err != nil {
-		s.Log.Error("admin create", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+	if err == nil {
+		s.respondWalkOK(w, r)
 		return
 	}
-	s.respondWalkOK(w, r)
+	if errors.Is(err, store.ErrDuplicateAssetNo) && s.respondCreateRace(w, r, sub) {
+		return
+	}
+	s.Log.Error("admin create", "err", err)
+	http.Error(w, "internal error", http.StatusInternalServerError)
+}
+
+// respondCreateRace shows the numbered duplicate panel for the row that won a
+// concurrent same-asset-number create.
+func (s *Server) respondCreateRace(w http.ResponseWriter, r *http.Request, sub walkSubmission) bool {
+	existing, err := s.Store.LightByAssetNo(r.Context(), *sub.AssetNo)
+	if err != nil {
+		return false
+	}
+	s.respondDuplicate(w, r, sub, geo.DupDecision{
+		Numbered:   true,
+		ExistingID: int64(existing.ID),
+		DistanceM:  geo.DistanceM(geo.Point{Lat: sub.Lat, Lon: sub.Lon}, geo.Point{Lat: existing.Lat, Lon: existing.Lon}),
+	})
+	return true
 }
 
 // photoIDOf converts an optional uploaded photo into its typed id reference.
@@ -248,23 +306,30 @@ func photoIDOf(photo *UploadedPhoto) *store.PhotoID {
 }
 
 // classifyDuplicate gathers the near candidates (plus the asset-number hit,
-// which is distance-independent) and lets geo.ClassifyDuplicate decide.
-func (s *Server) classifyDuplicate(r *http.Request, sub walkSubmission) (geo.DupDecision, bool) {
+// which is distance-independent) and lets geo.ClassifyDuplicate decide. A
+// store failure is returned to the caller, never swallowed: falling through
+// would create a light with duplicate detection silently disabled.
+func (s *Server) classifyDuplicate(r *http.Request, sub walkSubmission) (geo.DupDecision, bool, error) {
 	newPt := geo.Point{Lat: sub.Lat, Lon: sub.Lon}
 	var candidates []geo.Candidate
 	if sub.AssetNo != nil {
-		if existing, err := s.Store.LightByAssetNo(r.Context(), *sub.AssetNo); err == nil {
+		existing, err := s.Store.LightByAssetNo(r.Context(), *sub.AssetNo)
+		switch {
+		case err == nil:
 			candidates = append(candidates, geo.Candidate{
 				LightID: int64(existing.ID),
 				AssetNo: *sub.AssetNo,
 				Point:   geo.Point{Lat: existing.Lat, Lon: existing.Lon},
 			})
+		case errors.Is(err, store.ErrNotFound):
+			// No numbered duplicate; the proximity check still runs.
+		default:
+			return geo.DupDecision{}, false, fmt.Errorf("light by asset_no: %w", err)
 		}
 	}
 	nearby, err := s.Store.NearbyLights(r.Context(), sub.Lat, sub.Lon, geo.NumberedRadiusM)
 	if err != nil {
-		s.Log.Error("admin create: nearby", "err", err)
-		return geo.DupDecision{}, false
+		return geo.DupDecision{}, false, fmt.Errorf("nearby lights: %w", err)
 	}
 	for _, l := range nearby {
 		asset := ""
@@ -281,46 +346,8 @@ func (s *Server) classifyDuplicate(r *http.Request, sub walkSubmission) (geo.Dup
 	if sub.AssetNo != nil {
 		newAsset = *sub.AssetNo
 	}
-	return geo.ClassifyDuplicate(newAsset, newPt, candidates)
-}
-
-// mergeDuplicate applies the new submission's label and photo onto the
-// existing row (frozen: no new light row is created).
-func (s *Server) mergeDuplicate(w http.ResponseWriter, r *http.Request, sub walkSubmission, decision geo.DupDecision, photo *UploadedPhoto) {
-	existing, err := s.Store.GetLight(r.Context(), store.LightID(decision.ExistingID))
-	if err != nil {
-		// The duplicate vanished between the check and the merge: save as a
-		// plain new light instead (keeping the uploaded photo).
-		_, cerr := s.Store.CreateLight(r.Context(), store.NewLight{
-			AssetNo:   sub.AssetNo,
-			Kind:      sub.Kind,
-			Label:     sub.Label,
-			Lat:       sub.Lat,
-			Lon:       sub.Lon,
-			AccuracyM: sub.AccuracyM,
-			PhotoID:   photoIDOf(photo),
-		})
-		if cerr != nil {
-			s.Log.Error("admin merge: create", "err", cerr)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		s.respondWalkOK(w, r)
-		return
-	}
-	if _, err := s.Store.EditLight(r.Context(), existing.ID, sub.Label, existing.AssetNo); err != nil {
-		s.Log.Error("admin merge", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if photo != nil {
-		if err := s.attachPhoto(r.Context(), existing.ID, photo.ID); err != nil {
-			s.Log.Error("admin merge: attach photo", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-	}
-	s.respondWalkOK(w, r)
+	decision, dup := geo.ClassifyDuplicate(newAsset, newPt, candidates)
+	return decision, dup, nil
 }
 
 // respondDuplicate answers 409 with the duplicate panel: the fragment for
@@ -371,7 +398,7 @@ func (s *Server) walkReject(w http.ResponseWriter, r *http.Request, sub *walkSub
 		}
 		return
 	}
-	submitted := walkSubmission{Kind: store.KindPark}
+	submitted := walkSubmission{Kind: store.KindPark, KindRaw: string(store.KindPark)}
 	if sub != nil {
 		submitted = *sub
 	}
@@ -387,37 +414,23 @@ func (s *Server) walkReject(w http.ResponseWriter, r *http.Request, sub *walkSub
 }
 
 // walkPageDataOf rebuilds the walk page data from a parsed submission so the
-// no-JS error re-render keeps the admin's typed values.
+// no-JS error re-render keeps the admin's typed values exactly as submitted
+// (Raw fields), even when validation stopped before every typed field was
+// filled. A parse failure has no submission, so the caller passes park.
 func (s *Server) walkPageDataOf(w http.ResponseWriter, r *http.Request, sub walkSubmission) walkPageData {
 	return walkPageData{
 		pageData:  pageData{Title: "Walk the town", TestEnv: s.Cfg.IsTest()},
 		CSRFToken: IssueCSRFToken(w, r),
 		BBox:      formatBBox(s.Cfg.TownBBox),
 		Values: walkValues{
-			Label:     sub.Label,
-			AssetNo:   assetString(sub.AssetNo),
-			Kind:      string(sub.Kind),
-			Lat:       strconv.FormatFloat(sub.Lat, 'f', -1, 64),
-			Lon:       strconv.FormatFloat(sub.Lon, 'f', -1, 64),
-			AccuracyM: accuracyString(sub.AccuracyM),
+			Label:     sub.LabelRaw,
+			AssetNo:   sub.AssetRaw,
+			Kind:      sub.KindRaw,
+			Lat:       sub.LatRaw,
+			Lon:       sub.LonRaw,
+			AccuracyM: sub.AccRaw,
 		},
 	}
-}
-
-// assetString renders an optional asset number for re-render.
-func assetString(asset *string) string {
-	if asset == nil {
-		return ""
-	}
-	return *asset
-}
-
-// accuracyString renders an optional accuracy for re-render.
-func accuracyString(acc *float64) string {
-	if acc == nil {
-		return ""
-	}
-	return strconv.FormatFloat(*acc, 'f', -1, 64)
 }
 
 // respondWalkOK answers success: role=status "Saved" fragment for HTMX, the

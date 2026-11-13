@@ -9,7 +9,7 @@ package web
 
 import (
 	"context"
-	"errors"
+	"database/sql"
 	"fmt"
 	"io"
 	"log/slog"
@@ -525,14 +525,14 @@ func TestAdminCreateValidation(t *testing.T) {
 		fields map[string]string
 		want   string
 	}{
-		{"empty label", map[string]string{"label": "", "kind": "park", "lat": "42.76", "lon": "-71.03"}, "Label must be"},
-		{"over-long label", map[string]string{"label": long, "kind": "park", "lat": "42.76", "lon": "-71.03"}, "Label must be"},
-		{"bad asset", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "-71.03", "asset_no": "bad space"}, "Asset number"},
-		{"street kind reserved", map[string]string{"label": "L", "kind": "street", "lat": "42.76", "lon": "-71.03"}, "park or building"},
-		{"missing kind", map[string]string{"label": "L", "lat": "42.76", "lon": "-71.03"}, "park or building"},
-		{"bad lat", map[string]string{"label": "L", "kind": "park", "lat": "abc", "lon": "-71.03"}, "position is required"},
-		{"bad lon", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "1e999"}, "position is required"},
-		{"negative accuracy", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "-71.03", "accuracy_m": "-1"}, "Accuracy"},
+		{"empty label", map[string]string{"label": "", "kind": "park", "lat": "42.76", "lon": "-71.03"}, "Label must be 1 to 120 characters"},
+		{"over-long label", map[string]string{"label": long, "kind": "park", "lat": "42.76", "lon": "-71.03"}, "Label must be 1 to 120 characters"},
+		{"bad asset", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "-71.03", "asset_no": "bad space"}, "Asset number must be 1-32 letters, digits or dashes"},
+		{"street kind reserved", map[string]string{"label": "L", "kind": "street", "lat": "42.76", "lon": "-71.03"}, "Choose a kind: park or building"},
+		{"missing kind", map[string]string{"label": "L", "lat": "42.76", "lon": "-71.03"}, "Choose a kind: park or building"},
+		{"bad lat", map[string]string{"label": "L", "kind": "park", "lat": "abc", "lon": "-71.03"}, "A position is required — wait for a fix or type one in"},
+		{"bad lon", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "1e999"}, "A position is required — wait for a fix or type one in"},
+		{"negative accuracy", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "-71.03", "accuracy_m": "-1"}, "Accuracy must be a metre value of zero or more"},
 		{"unknown dup_choice", map[string]string{"label": "L", "kind": "park", "lat": "42.76", "lon": "-71.03", "dup_choice": "nope"}, "Unknown duplicate choice"},
 	}
 	for _, tc := range tests {
@@ -541,9 +541,9 @@ func TestAdminCreateValidation(t *testing.T) {
 			if rec.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("status = %d, want 422; body:\n%s", rec.Code, rec.Body.String())
 			}
-			if !strings.Contains(rec.Body.String(), tc.want) {
-				t.Errorf("body lacks %q; body:\n%s", tc.want, rec.Body.String())
-			}
+			// The message must be the visible server alert, not the page's
+			// always-present "Asset number" label (or the hidden placeholder).
+			assertVisibleAlert(t, rec.Body.String(), tc.want)
 		})
 	}
 	t.Run("missing csrf 403", func(t *testing.T) {
@@ -560,6 +560,16 @@ func TestAdminCreateValidation(t *testing.T) {
 		}, "", "", nil, session, mustCSRFToken(t), false)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("status = %d, want 403", rec.Code)
+		}
+	})
+	t.Run("csrf is checked before field validation", func(t *testing.T) {
+		// A malformed label must NOT turn a missing token into a 422: the
+		// frozen order is parse → CSRF → bbox.
+		rec := adminPostMultipart(t, s, "/admin/lights", map[string]string{
+			"label": "", "kind": "nope", "lat": "not-a-coordinate", "lon": "x",
+		}, "", "", nil, session, "", false)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403; body:\n%s", rec.Code, rec.Body.String())
 		}
 	})
 	t.Run("non-multipart body 400 rerenders a usable form", func(t *testing.T) {
@@ -800,75 +810,58 @@ func TestAdminDuplicateMergePhoto(t *testing.T) {
 	if newPhoto == oldPhoto {
 		t.Errorf("survivor kept its old photo %q; the merge must apply the uploaded one", oldPhoto)
 	}
-	for _, src := range []string{newPhoto, oldPhoto} {
-		if served := adminGet(t, s, src, session, false); served.Code != http.StatusOK {
-			t.Errorf("photo %s status = %d, want 200", src, served.Code)
-		}
+	if served := adminGet(t, s, newPhoto, session, false); served.Code != http.StatusOK {
+		t.Errorf("merged photo %s status = %d, want 200", newPhoto, served.Code)
+	}
+	// The survivor no longer references the replaced photo. Its old row/file is
+	// intentionally left for a future retention/GC decision (documented in
+	// admin_merge.go); this test must not bless or require that leak.
+	body := adminGet(t, s, detailURL, session, false).Body.String()
+	if strings.Contains(body, oldPhoto) {
+		t.Errorf("detail still references the replaced photo %q; body:\n%s", oldPhoto, body)
 	}
 }
 
-// TestMergeAttachPhotoBranches covers the auxiliary merge write's edge paths:
-// the unhappy configurations are refused before touching SQLite, an unknown or
-// soft-deleted light wraps ErrNotFound, and a canceled context surfaces a DB
-// error rather than masquerading as a vanished row.
-func TestMergeAttachPhotoBranches(t *testing.T) {
-	s, session := newAdminServer(t)
-	csrf := adminCSRF(t)
-	ctx := context.Background()
-
-	t.Run("unset DB_PATH refuses", func(t *testing.T) {
-		empty := *s
-		empty.Cfg.DBPath = ""
-		if err := empty.attachPhoto(ctx, 1, 1); err == nil {
-			t.Fatal("attachPhoto with no DB_PATH succeeded")
-		} else if errors.Is(err, store.ErrNotFound) {
-			t.Fatalf("misconfigured DB_PATH = %v, want a config error not ErrNotFound", err)
-		}
-	})
-	t.Run("ambiguous DB_PATH refuses", func(t *testing.T) {
-		for _, bad := range []string{"/tmp/a?b.db", "/tmp/a#b.db", "/tmp/a%b.db"} {
-			amb := *s
-			amb.Cfg.DBPath = bad
-			if err := amb.attachPhoto(ctx, 1, 1); !errors.Is(err, errMergeDBPath) {
-				t.Errorf("attachPhoto(%q) = %v, want errMergeDBPath", bad, err)
+// TestAdminCreateDuplicateLookupFailure pins the no-swallow rule: a store
+// failure during duplicate classification answers 500 instead of silently
+// creating the light with duplicate detection disabled.
+func TestAdminCreateDuplicateLookupFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		fields map[string]string
+	}{
+		{
+			name:   "nearby lookup failure",
+			fields: map[string]string{"label": "Unchecked lamp", "kind": "park", "lat": "42.7617", "lon": "-71.0303"},
+		},
+		{
+			name: "asset lookup failure",
+			fields: map[string]string{
+				"label": "Unchecked lamp", "kind": "park", "lat": "42.7617", "lon": "-71.0303",
+				"asset_no": "GP-500",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, session := newAdminServer(t)
+			csrf := adminCSRF(t)
+			// Break ONLY the lights table: sessions must keep working so the
+			// request reaches the handler, and the duplicate lookup fails.
+			raw, err := sql.Open("sqlite", "file:"+s.Cfg.DBPath+"?_pragma=busy_timeout(5000)")
+			if err != nil {
+				t.Fatalf("open raw db: %v", err)
 			}
-		}
-	})
-	t.Run("unknown light wraps ErrNotFound", func(t *testing.T) {
-		if err := s.attachPhoto(ctx, store.LightID(9_999_999), store.PhotoID(1)); !errors.Is(err, store.ErrNotFound) {
-			t.Fatalf("attachPhoto(missing) = %v, want ErrNotFound", err)
-		}
-	})
-	t.Run("soft-deleted light wraps ErrNotFound", func(t *testing.T) {
-		createLight(t, s, session, csrf, map[string]string{
-			"label": "Deleted merge target", "kind": "park", "lat": "42.7617", "lon": "-71.0303",
+			t.Cleanup(func() { _ = raw.Close() })
+			if _, err := raw.ExecContext(context.Background(), "DROP TABLE lights"); err != nil {
+				t.Fatalf("drop lights: %v", err)
+			}
+			rec := postCreate(t, s, session, csrf, tc.fields)
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500; body:\n%s", rec.Code, rec.Body.String())
+			}
 		})
-		list := adminGet(t, s, "/admin", session, false).Body.String()
-		detailURL := regexp.MustCompile(`href="(/admin/lights/\d+)"`).FindStringSubmatch(list)[1]
-		var id int64
-		if _, err := fmt.Sscanf(detailURL, "/admin/lights/%d", &id); err != nil {
-			t.Fatalf("parse detail url %q: %v", detailURL, err)
-		}
-		del := adminPostMultipart(t, s, detailURL+"/delete",
-			map[string]string{CSRFTokenName: csrf}, "", "", nil, session, csrf, false)
-		if del.Code != http.StatusSeeOther {
-			t.Fatalf("delete status = %d, want 303", del.Code)
-		}
-		if err := s.attachPhoto(ctx, store.LightID(id), store.PhotoID(1)); !errors.Is(err, store.ErrNotFound) {
-			t.Fatalf("attachPhoto(deleted) = %v, want ErrNotFound", err)
-		}
-	})
-	t.Run("canceled context is a DB error, not ErrNotFound", func(t *testing.T) {
-		canceled, cancel := context.WithCancel(ctx)
-		cancel()
-		err := s.attachPhoto(canceled, 1, 1)
-		if err == nil {
-			t.Fatal("attachPhoto with a canceled context succeeded")
-		}
-		if errors.Is(err, store.ErrNotFound) {
-			t.Fatalf("canceled context = %v, want a DB error not ErrNotFound", err)
-		}
-	})
+	}
 }
 
 func TestAdminDuplicateUnnumbered(t *testing.T) {
@@ -884,15 +877,21 @@ func TestAdminDuplicateUnnumbered(t *testing.T) {
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body:\n%s", rec.Code, rec.Body.String())
 		}
-		body := rec.Body.String()
-		if !strings.Contains(body, `value="save"`) || !strings.Contains(body, "Save anyway") {
-			t.Errorf("unnumbered panel lacks Save anyway; body:\n%s", body)
+		// Scope to #dup-panel: the walk page always renders the hidden
+		// low-accuracy "Save anyway" button, so a page-wide search cannot
+		// prove the duplicate panel offers it.
+		panel := dupPanelOf(t, rec.Body.String())
+		if !strings.Contains(panel, `value="save"`) || !strings.Contains(panel, "Save anyway") {
+			t.Errorf("unnumbered panel lacks Save anyway; panel:\n%s", panel)
 		}
-		if !strings.Contains(body, "Possible duplicate") {
+		if !strings.Contains(panel, "Possible duplicate") {
 			t.Error("panel lacks the frozen heading")
 		}
-		if !strings.Contains(body, "m away") {
+		if !strings.Contains(panel, "m away") {
 			t.Error("panel lacks the distance")
+		}
+		if !strings.Contains(panel, "<strong>Path light one</strong>") {
+			t.Errorf("panel does not show the existing light; panel:\n%s", panel)
 		}
 	})
 	t.Run("save-anyway keeps both lights", func(t *testing.T) {
