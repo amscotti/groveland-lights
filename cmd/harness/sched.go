@@ -131,7 +131,8 @@ func dispatchReady(root string, pol Policy, g *Graph, wg *sync.WaitGroup) error 
 // are committed by commitHarnessState and don't count as dirty for E4.
 func schedulerOwned(p string) bool {
 	return matchGlob("harness/tasks/**", p) || p == "harness/progress.log" ||
-		p == "harness/.ratchet.json" || p == "harness/protected.sha256"
+		p == "harness/.ratchet.json" || p == "harness/protected.sha256" ||
+		matchGlob("harness/reviews/**", p) || matchGlob("harness/findings/**", p)
 }
 
 // dirtyNonScheduler returns porcelain lines whose path isn't scheduler-owned.
@@ -155,12 +156,16 @@ func stopExists(root string) bool {
 	return err == nil
 }
 
+// commitHarnessState commits scheduler-owned state so the next clean-main
+// assertion passes: task graph, packets, progress log, review artifacts and
+// baselines are all written by the machinery, never by task agents on main.
 func commitHarnessState(root string) error {
-	if out := gitOut2(root, "status", "--porcelain", "harness/tasks", "harness/progress.log"); strings.TrimSpace(out) == "" {
+	paths := []string{"harness/tasks", "harness/progress.log", "harness/reviews", "harness/.ratchet.json", "harness/protected.sha256"}
+	if out := gitOut2(root, append([]string{"status", "--porcelain"}, paths...)...); strings.TrimSpace(out) == "" {
 		return nil
 	}
-	_ = gitOut2(root, "add", "harness/tasks", "harness/progress.log")
-	if _, err := gitOut(root, "commit", "-m", "chore(harness): update task graph and progress"); err != nil {
+	_ = gitOut2(root, append([]string{"add"}, paths...)...)
+	if _, err := gitOut(root, "commit", "-m", "chore(harness): update task graph, progress and review artifacts"); err != nil {
 		// Nothing to commit is fine; anything else is not.
 		if !strings.Contains(err.Error(), "nothing to commit") {
 			return err

@@ -9,6 +9,9 @@ permissions:
   - { action: "glob",     resource: "*",                    effect: "allow" }
   - { action: "grep",     resource: "*",                    effect: "allow" }
   - { action: "edit",     resource: "harness/findings/**",  effect: "allow" }
+  - { action: "shell",    resource: "pwd",                  effect: "allow" }
+  - { action: "shell",    resource: "ls*",                  effect: "allow" }
+  - { action: "shell",    resource: "echo*",                effect: "allow" }
   - { action: "shell",    resource: "git status*",          effect: "allow" }
   - { action: "shell",    resource: "git log*",             effect: "allow" }
   - { action: "subagent", resource: "*",                    effect: "deny"  }

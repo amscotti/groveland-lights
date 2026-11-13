@@ -18,11 +18,14 @@ var reNolintNoReason = regexp.MustCompile(`//nolint:?\w*\s*$`)
 var reConsoleLog = regexp.MustCompile(`console\.log`)
 
 // ScanAddedLines returns guard findings for markers in added diff lines.
-// Files under acceptance/ and *_test.go are exempt (tests may reference markers).
+// Files under acceptance/, *_test.go and harness/handoffs/ are exempt: tests
+// may reference markers, and a handoff's "open issues / TODO" section is
+// information for the operator, not merged code debt.
 func ScanAddedLines(added []addedLine) []string {
 	var out []string
 	for _, a := range added {
 		if strings.HasSuffix(a.path, "_test.go") || strings.HasPrefix(a.path, "acceptance/") ||
+			strings.HasPrefix(a.path, "harness/handoffs/") ||
 			strings.HasPrefix(a.path, "harness/selftest/") {
 			continue
 		}

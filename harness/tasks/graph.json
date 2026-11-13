@@ -73,7 +73,13 @@
         "modernc.org/libc",
         "modernc.org/mathutil",
         "modernc.org/memory",
-        "modernc.org/gc/v3"
+        "modernc.org/gc/v3",
+        "github.com/dustin/go-humanize",
+        "github.com/google/uuid",
+        "github.com/mattn/go-isatty",
+        "github.com/ncruces/go-strftime",
+        "github.com/remyoudompheng/bigfft",
+        "modernc.org/libc"
       ],
       "status": "rework",
       "attempts": 2,
@@ -101,7 +107,7 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "review",
+      "status": "rework",
       "attempts": 1,
       "budget": {
         "steps": 200,
