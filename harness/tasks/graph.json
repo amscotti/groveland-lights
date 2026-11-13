@@ -237,11 +237,12 @@
       "claims": [],
       "ui": false,
       "allow_deps": [],
+      "status": "running",
+      "attempts": 0,
       "budget": {
         "steps": 50,
         "wall_min": 30
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-200",
@@ -269,18 +270,19 @@
       ],
       "ui": false,
       "allow_deps": [],
+      "status": "running",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 90
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-201",
       "milestone": "M2",
       "type": "feature",
       "role": "worker",
-      "title": "Migration 0002 creates the product schema; sqlc-backed lights & photos store",
+      "title": "Migration 0002 creates the product schema; sqlc-backed lights \u0026 photos store",
       "deps": [
         "T-200"
       ],
@@ -299,18 +301,19 @@
       ],
       "ui": false,
       "allow_deps": [],
+      "status": "ready",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 90
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-202",
       "milestone": "M2",
       "type": "feature",
       "role": "worker",
-      "title": "internal/img: decode JPEG/PNG/WebP, apply EXIF orientation, resize to \u22641600 px, strip all metadata",
+      "title": "internal/img: decode JPEG/PNG/WebP, apply EXIF orientation, resize to ≤1600 px, strip all metadata",
       "deps": [
         "T-200"
       ],
@@ -327,11 +330,12 @@
       "allow_deps": [
         "golang.org/x/image"
       ],
+      "status": "ready",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 90
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-203",
@@ -355,11 +359,12 @@
       ],
       "ui": false,
       "allow_deps": [],
+      "status": "ready",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 60
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-204",
@@ -379,11 +384,12 @@
       ],
       "ui": false,
       "allow_deps": [],
+      "status": "ready",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 45
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-205",
@@ -414,11 +420,12 @@
       ],
       "ui": true,
       "allow_deps": [],
+      "status": "ready",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 120
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-206",
@@ -441,11 +448,12 @@
       ],
       "ui": false,
       "allow_deps": [],
+      "status": "ready",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 60
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-207",
@@ -478,11 +486,12 @@
       ],
       "ui": false,
       "allow_deps": [],
+      "status": "ready",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 90
-      },
-      "status": "ready"
+      }
     },
     {
       "id": "T-208",
@@ -501,11 +510,12 @@
       "claims": [],
       "ui": false,
       "allow_deps": [],
+      "status": "ready",
+      "attempts": 0,
       "budget": {
         "steps": 200,
         "wall_min": 45
-      },
-      "status": "ready"
+      }
     }
   ]
 }
