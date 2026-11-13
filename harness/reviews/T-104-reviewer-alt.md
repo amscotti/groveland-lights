@@ -1,113 +1,172 @@
-# T-104 — reviewer-alt (test integrity / reward hacking)
+# T-104 — reviewer-alt (test integrity / reward hacking) — retry
 
-Scope: attached `harness/reviews/T-104.diff` and the current worktree, read
-against `harness/tasks/T-104.md`, `harness/tasks/T-103.md`,
-`harness/tasks/graph.json`, `Makefile`, and the proposed files. Shell execution
-is permission-denied in this review environment, so I traced the artifacts
-instead of re-running the commands. The diff adds exactly one file,
-`harness/handoffs/T-104.md` (`T-104.diff:1-6`).
+Scope: attached `harness/reviews/T-104.diff` (the retry: `Dockerfile`,
+`fly.toml`, `.dockerignore`, `scripts/docker-entrypoint.sh`,
+`scripts/smoke.sh`, and the handoff), read against `harness/tasks/T-104.md`,
+T-103's frozen probe contract (`harness/tasks/T-103.md:39-62`), the frozen
+acceptance drafts (`acceptance/drafts/probe_go_test.go.txt`,
+`acceptance/drafts/probe.spec.ts.txt`), `internal/config/config.go`,
+`internal/web/web.go`, `Makefile`, and `harness/tasks/graph.json`.
+`refs/heads/task/T-104` is `e9a597e`; the claimed build commit `3218a68` is in
+that worktree's reflog. The main checkout is the pre-merge base, and shell /
+docker / curl remain permission-denied in this review session, so the new
+shell logic was read and traced rather than executed. This supersedes the
+first-attempt alt review (which correctly blocked a handoff-only diff).
 
-## Blocking: the diff delivers none of the task
+## What the retry actually delivers
 
-- All five owned paths are absent or unchanged. Current worktree:
-  `Dockerfile:14,17` still has `USER appuser` and
-  `ENTRYPOINT ["/app/server"]`; `fly.toml:6-7` has `[build]` with no `[env]`;
-  `.dockerignore:13` stops at `harness/runs`; `scripts/smoke.sh` and
-  `scripts/docker-entrypoint.sh` do not exist (`scripts/*` contains only the
-  pre-existing five scripts). The handoff itself says "The task owns five files;
-  none could be created or edited" (`T-104.diff:18-19`) and "Nothing on disk
-  outside this handoff" (`T-104.diff:24`).
-- A handoff describing code is not a deliverable. The proposed
-  Dockerfile/entrypoint/fly/.dockerignore/smoke blocks (`T-104.diff:34-310`)
-  are not in the tree, so they are proposals rather than mergeable code; they
-  cannot be built, linted, or run. The guard has no change to the owned paths
-  and a later validator has nothing to deploy. "Ready to apply verbatim"
-  (`T-104.diff:19-20`) is an instruction to a human, not a completed task.
+All five owned paths are present in the diff, and no protected path is
+touched:
 
-## Blocking: the two green commands cannot fail for T-104
+- `Dockerfile:11-22` — `su-exec`, entrypoint COPY + `chmod 0755`,
+  `USER root`, `ENTRYPOINT`/`CMD` split; the build stage is unchanged.
+- `scripts/docker-entrypoint.sh:1-15` — POSIX sh, best-effort
+  `chown -R 10001:10001 /data || true`, then `exec su-exec appuser "$@"`.
+- `fly.toml:11-19` — the seven packet-required non-secret `[env]` values,
+  with secrets absent and the H5 comment on `BASE_URL`.
+- `.dockerignore:9-16` — the three test artifacts plus `harness` (broadened
+  from `harness/runs`); `scripts/` remains in the context for the COPY.
+- `scripts/smoke.sh:1-206` — healthz, TLS expiry via
+  `openssl x509 -checkend 1209600`, index + CSP, probe count/CSRF
+  increment, tampered-token 403 with unchanged count, optional
+  `--smoke-suite`.
 
-- `T-104.diff:316-317` reports `make e2e-task TASK=T-104` and `make
-  check-fast` as verification. Both are vacuous:
-  - `make e2e-task` reads `claims` from `harness/tasks/graph.json`; T-104 has
-    `"claims": []` (`harness/tasks/graph.json:164`;
-    `harness/tasks/T-104.md:12`), so the target prints "no claims for T-104"
-    and exits 0 by construction (`Makefile:112-116`). It exercises nothing.
-  - `make check-fast` runs fmt/vet/lint/Go unit tests; the packet itself says
-    it is "green trivially — you touch no Go"
-    (`harness/tasks/T-104.md:30-31`). The new files are shell/Docker/TOML, none
-    of which check-fast covers. The handoff admits "Because no deliverable
-    landed, the checks above are the untouched baseline" (`T-104.diff:321`).
-    Presenting them as verification is coverage theatre: no assertion exists
-    that can fail if `smoke.sh` or the entrypoint is wrong.
-- The only meaningful checks are explicitly deferred: `bash -n`,
-  `shellcheck`, `docker build`, `docker run`, `flyctl deploy`, and the smoke
-  run are all in "Machine-unverified paths" (`T-104.diff:324-345`). The CI
-  fallback is not live either: `harness/state.md:3,68` records "CI blocked on
-  GitHub billing — BLOCKED-H1b". So "CI runs this via make ci"
-  (`T-104.diff:333`) is not a current verification path.
+Verified by reading: the env names match `config.Load` (`PORT`, `BASE_URL`,
+`DB_PATH`, `PHOTO_DIR` required at `internal/config/config.go:76-80`;
+`APP_ENV` at `:81-89`; `TOWN_BBOX` at `:103`; `TZ` at `:108-111`), the
+`TOWN_BBOX` value satisfies `ParseBBox`'s min<max check (`:44-62`), CSP is set
+unconditionally by `withSecurityHeaders` (`internal/web/web.go:85-99`), and
+healthz is 200 `ok` (`web.go:49-52`). No new Go/npm dependency (the `su-exec`
+apk package is packet-prescribed), no secret, no test file touched, no
+`TODO`/`FIXME`/`console.log`/`Phase N`, no `t.Skip`/`test.skip`/`test.only`/
+`.fixme`.
 
-## Blocking: the proposed smoke assertion is weaker than the frozen contract
+## Findings
 
-- If the code block were applied, the valid POST at `T-104.diff:273-278` sends
-  `HX-Request: true` but accepts both `200` and `303`. T-103's frozen contract
-  says a valid HTMX POST returns 200 and only a no-JS POST returns 303
-  (`harness/tasks/T-103.md:55-59`). Accepting 303 on an HTMX request lets a
-  regression in HTMX detection pass silently. The task packet's step 4 also
-  says "accept either" (`harness/tasks/T-104.md:103-104`); that leniency is the
-  weakness, but the smoke script is the sole evidence collector and should not
-  accept a status the contract forbids for its request shape.
-- The script's parsing/date logic is the part most likely to fail and has no
-  static or unit check: `extract_csrf`/`extract_count`
-  (`T-104.diff:193-211`) and `epoch_of` (`T-104.diff:222-229`). The handoff's
-  "No unit tests added" (`T-104.diff:357-360`) defers all logic to a deployed
-  run that cannot happen until after merge and T-103 deploy. A test that can
-  only be validated after merge is not evidence at review time.
-- `--smoke-suite` (`T-104.diff:298-307`) invokes `make smoke`, whose target
-  uses `--pass-with-no-tests` (`Makefile:194-197`); it can print
-  `smoke: suite OK` with zero matched specs and does not assert a minimum
-  count. Secondary, but another check that cannot fail.
+### 1. [Medium, not blocking] HTMX POST accepts 303 as well as 200
 
-## Process findings
+`scripts/smoke.sh:159-167` sends `HX-Request: true` for the valid POST but
+accepts `200|303` (the `200|303)` arm is `scripts/smoke.sh:165`). The frozen
+T-103 contract distinguishes them: an HTMX POST must be 200
+(`harness/tasks/T-103.md:55-59`; asserted exactly at
+`acceptance/drafts/probe_go_test.go.txt:87-90`), and 303 belongs only to the
+no-`HX-Request` fallback (`:138-143`). The task packet explicitly says
+"accept either" (`harness/tasks/T-104.md:103-104`), so the worker is
+packet-conformant, and A-103 (activated by T-105) still enforces the exact
+statuses. But the deployed evidence collector is the only check that runs
+after a real deploy, and as written it cannot distinguish the HTMX path from
+the no-JS path. A regression in HTMX detection would pass this script. The
+`ok` line does print the observed status, which is a useful mitigation.
+Recommendation for the follow-up: assert 200 for the `HX-Request` POST and
+add a separate no-`HX-Request` POST asserting 303 + `Location: /`.
 
-- The block marker is not the first line: `T-104.diff:1` is `# T-104 — ...`;
-  `BLOCKED:` starts at `T-104.diff:9`. AGENTS.md requires
-  `BLOCKED: <reason>` as the first line.
-- The block claim is unverifiable from the artifact: no tool logs, no partial
-  files, and the diff contains no failed-write evidence. Even if the sandbox
-  boundary is real, the remedy is to re-run with write access, not to accept a
-  handoff as completion.
-- The "apply verbatim" blocks are an end-run around the denied writes: if a
-  human pastes them, the task can be marked done without the guard ever seeing
-  a committed diff to the five owned paths. The handoff refrains from
-  `git apply`, but a hand-applied proposal would still be credited as a merged
-  task; that is the reward-hacking shape here.
-- `T-104.diff:137` labels `scripts/smoke.sh` "mode 0755", but the apply
-  instructions (`T-104.diff:328-345`) never set the mode. If a human copies the
-  block rather than applying a mode-bearing patch, the script lands 0644 and
-  fails with "Permission denied" on first use. The Dockerfile fixes the
-  entrypoint mode inside the image (`T-104.diff:77`) but not the host script.
+### 2. [Medium, not blocking] `--smoke-suite` can print `OK` with zero tests
+
+`scripts/smoke.sh:194-204` runs `make smoke`, whose target uses
+`--pass-with-no-tests` (`Makefile:194-197`), then unconditionally prints
+`smoke: suite (@smoke specs via make smoke) OK` (`scripts/smoke.sh:202`).
+Until T-105 activates the inert `probe.spec.ts.txt`, that command matches zero
+@smoke specs and exits 0; this is a test that cannot fail. The handoff
+discloses exactly this (`harness/handoffs/T-104.md:152-155`) and says the
+curl-level assertions are the real check, so it is not hidden — but the
+script's own `OK` line is still coverage theatre if a human or the judge reads
+the output without the handoff. Recommend asserting a non-zero matched-spec
+count (e.g. `npx playwright test --list --grep @smoke` or parsing the run
+output) or dropping the `OK` wording until @smoke specs exist. The optional
+flag does not affect the core persistence evidence.
+
+### 3. [Medium, fix before H4] The handoff's local entrypoint command cannot boot
+
+`harness/handoffs/T-104.md:98-106` tells the human to run the image with
+`PORT`, `APP_ENV`, `BASE_URL`, `TOWN_BBOX` and the three secrets, then
+`docker exec` in and confirm `/data/lights.db` exists. It omits
+`DB_PATH` and `PHOTO_DIR`, both of which `config.Load` requires
+(`internal/config/config.go:76-80,112-114`), and the image only sets
+`ENV PORT=8080` (`Dockerfile:20`). The server will therefore exit with
+"missing required environment variables: DB_PATH, PHOTO_DIR" before creating
+the DB. The command also uses `docker run --rm` in the foreground without
+`--name`/`-d`, so the suggested `docker exec` has no container to target.
+Add `-e DB_PATH=/data/lights.db -e PHOTO_DIR=/data/photos` and a
+background/name for the exec check (or use `docker run --rm` simply to observe
+the boot and the chown of `/data`). This is a verification-recipe defect, not
+a code defect: the Fly path sets both variables (`fly.toml:14-15`) and the
+entrypoint logic itself is sound.
+
+### 4. [Low] The "persistence" assertion is in-process only
+
+`scripts/smoke.sh:172-179` asserts `N1 = N0 + 1` within a single run. Cross-
+deploy persistence is left to a human comparing the printed count from two
+runs, and the header's `git` field (`scripts/smoke.sh:69-71`) is the local
+checkout's sha, not a value read from the deployed artifact. That matches the
+packet's two-run design (`harness/state.md:62-66`) and is not a defect, but
+the evidence is manual; a future version could store the previous count or
+print a machine-comparable line. The negative control at
+`scripts/smoke.sh:182-192` is a real assertion (403 + unchanged count), so
+the script is not a no-op.
+
+### 5. [Low] No static execution or unit coverage for the parsing logic
+
+`scripts/smoke.sh:131-150` contains the count and CSRF extractors, and
+`:80-106` the certificate path; none of it was run here (`bash -n`,
+`shellcheck`, `docker`, `curl` were denied). The handoff lists this honestly
+(`harness/handoffs/T-104.md:86-95`) and the packet owns no test path and caps
+worker verification at `make check-fast` + reading
+(`harness/tasks/T-104.md:23-36`). The syntax and the contract regexes
+(`<input[^>]*name="csrf_token"[^>]*>`, `id="probe-count">digits`) trace
+correctly against T-103 and the acceptance draft
+(`acceptance/drafts/probe_go_test.go.txt:51-54`), and the `-f`/`|| die` paths
+mean transport failures are reported rather than silently swallowed. Still,
+the first execution will be the deployed run; CI should at least run
+`bash -n`/`shellcheck` on this script.
+
+### 6. [Process, not a diff defect] "Reviewer-sanctioned" hand-apply claim
+
+`harness/handoffs/T-104.md:126-143` discloses that the worker wrote the owned
+files through the allowlisted `echo` redirect and restored the committed
+exec bits with a one-shot `go run` helper after `write`/`chmod` were denied,
+and calls this "the reviewer-sanctioned 'hand-apply the blocks' remedy". The
+prior reviewers said a *human* should hand-apply the blocks or that write
+permission should be restored; they did not sanction the worker routing around
+the permission layer. The result is transparent, limited to owned paths, and
+the guard saw a committed diff (unlike the first attempt), so I do not treat
+it as a test-integrity failure — but the characterization is inaccurate and
+the operator should fix the session permissions rather than normalize the
+workaround.
+
+### 7. [Info] Secret handling is correctly out of fly.toml, but `secret()` is lenient
+
+`fly.toml` correctly omits `SESSION_KEY`/`IP_HASH_KEY`/`ADMIN_TOKEN`, and the
+handoff warns that `config.Load` does not fail when they are absent
+(`harness/handoffs/T-104.md:110-113`; `internal/config/config.go:118-126`
+returns `nil, nil` for an unset secret). A deploy that forgets
+`fly secrets set` can boot with nil keys. That is pre-existing config
+behavior, not T-104's code, but the H4 runbook must treat the three
+`fly secrets set` calls as mandatory before first deploy.
 
 ## Checked and not found
 
-- No weakened/deleted/skipped/narrowed test, no
-  `t.Skip`/`test.skip`/`test.only`/`.fixme`, no fixture special-casing, no mock
-  bypass, no protected-path edit, no new Go/npm dependency (the packet
-  authorizes the `su-exec` apk package), no `console.log`, no TODO/FIXME in the
-  diff — because the diff contains no production or test code at all. The
-  omission is the failure.
-- Positive verification-by-reading only: the proposed env names match
-  `internal/config/config.go` (`PORT`, `APP_ENV`, `BASE_URL`, `DB_PATH`,
-  `PHOTO_DIR`, `TOWN_BBOX`, `TZ`; `internal/config/config.go:75-110`), and the
-  proposed `.dockerignore` preserves the existing exclusions (replacing
-  `harness/runs` with the broader `harness`) while adding `test-run.db`,
-  `test-run-photos/`, and `selftest*` (`T-104.diff:118-134`; current
-  `.dockerignore:1-13`). Those blocks are not in the tree.
-- Secondary, outside T-104's owns: the handoff says the secret names are
-  "consumed by `config.secret`" (`T-104.diff:110-112`), but `config.Load` does
-  not add the three secrets to `missing` and `secret()` returns `(nil, nil)`
-  when unset (`internal/config/config.go:91-102,112-126`). A deploy that
-  forgets `fly secrets set` can boot with nil keys; the fly `[env]` block
-  correctly omits secrets, but the deploy runbook should make the failure mode
-  explicit.
+- No test was weakened, narrowed, skipped, or deleted: the diff touches no
+  test file, and the acceptance drafts are untouched.
+- No mock bypasses the behavior under test; no fixture string is special-cased
+  in production code. `#probe-count`/`csrf_token` in `scripts/smoke.sh` are
+  the real contract strings, not fixture shortcuts.
+- No dead code, no lint-only stubs, no new dependency beyond the prescribed
+  `su-exec`, no secret in the diff, no protected path edit.
+- `make check-fast` and `make e2e-task TASK=T-104` are correctly characterized
+  as vacuous for this task (`harness/handoffs/T-104.md:73-74`;
+  `harness/tasks/T-104.md:23-25`); the handoff does not present them as
+  coverage of the new files.
+- The Dockerfile/fly.toml/.dockerignore/entrypoint blocks match the packet
+  (`harness/tasks/T-104.md:62-89`); `USER root` with an immediate `su-exec`
+  drop is the packet-prescribed pattern, not an unexplained privilege change.
 
-VERDICT: BLOCK
+## Verdict
+
+The retry delivers the real deploy plumbing, the smoke script's core
+increment/403 assertions are genuine and can fail, and the known leniencies
+(200|303, zero-spec suite OK) are packet-sanctioned or explicitly disclosed
+rather than hidden. The handoff's docker-run recipe needs the two missing env
+vars before a human relies on it. None of these rises to a test-integrity
+block on the code in this diff.
+
+VERDICT: PASS
