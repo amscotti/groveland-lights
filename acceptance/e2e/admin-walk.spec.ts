@@ -318,6 +318,16 @@ test('@A-203 dragged pin position is what gets saved', async ({ page, context },
 
   // Drag the pin ~80 px; #pin-pos follows (possibly on the next frame, so
   // the read waits for the change instead of racing it).
+  // T-207 activation edit (the only one in this file): scroll the pin into
+  // the viewport before dragging. On wide viewports the fluid pin pad
+  // (1200x1200 CSS px in a 720px-tall desktop viewport) renders the pin's
+  // bbox centre below the fold, so the frozen draft's raw-mouse drag landed
+  // on <html> (elementFromPoint: null) and could never move the pin against
+  // ANY contract-compliant build that scales the pad with its container; a
+  // real user simply scrolls (Playwright's own actions auto-scroll — this
+  // test bypasses them with raw mouse events). Interaction reachability
+  // only: the poll below still requires the drag itself to move #pin-pos.
+  await pin.scrollIntoViewIfNeeded();
   const box = (await pin.boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();

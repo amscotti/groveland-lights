@@ -1,27 +1,21 @@
-# M2 acceptance drafts (frozen contract)
+# M2 acceptance contract (activated)
 
-Inert drafts for milestone M2 (admin inventory, "walk the town"), written by
-T-200 BEFORE any feature task branched. The `.go.txt` / `.spec.ts.txt`
-extensions are compiled/loaded by nothing, so the merge gate stays green while
-the contract is already enforceable: git history proves these tests predate
-the implementations. **T-207 (also test-author) activates them by pure
-rename — no content edits. A gofmt pass on the activated Go files is the only
-sanctioned mechanical step.** If an assertion turns out to be unsatisfiable
-or ambiguous against the merged feature, T-207 writes `BLOCKED: <reason>` and
-routes the dispute to the planner; the oracle is never edited to fit the
-implementation (the T-105 lesson).
+The M2 acceptance suite (admin inventory, "walk the town") was written by
+T-200 as INERT DRAFTS — `acceptance/drafts/*.go.txt` and `*.spec.ts.txt`,
+compiled/loaded by nothing — BEFORE any feature task branched, so the merge
+gate stayed green while the contract was already enforceable: git history
+proves these tests predate the implementations (the T-105 oracle-first
+lesson). T-207 activated them by pure rename; the `acceptance/drafts/`
+directory is gone and the frozen bytes stay auditable in git history:
 
-## Activation (T-207)
+    acceptance/drafts/admin_auth_go_test.go.txt    -> acceptance/go/admin_auth_test.go
+    acceptance/drafts/admin_lights_go_test.go.txt  -> acceptance/go/admin_lights_test.go
+    acceptance/drafts/admin-walk.spec.ts.txt       -> acceptance/e2e/admin-walk.spec.ts
 
-    git mv acceptance/drafts/admin_auth_go_test.go.txt    acceptance/go/admin_auth_test.go
-    git mv acceptance/drafts/admin_lights_go_test.go.txt  acceptance/go/admin_lights_test.go
-    git mv acceptance/drafts/admin-walk.spec.ts.txt       acceptance/e2e/admin-walk.spec.ts
-    # then remove this directory (the frozen bytes stay auditable in git
-    # history; preserve the table below in acceptance/README.md)
-
-**T-207 must preserve the contract table below** (copy it into
-`acceptance/README.md` verbatim): workers and reviewers resolve every UI
-dispute against it.
+Everything from "## Contract reconciliations" below is the frozen contract,
+preserved verbatim from the drafts README: workers and reviewers resolve
+every UI dispute against it, and the validator and visual-reviewer use the
+per-assertion visual notes for M2.
 
 ## Contract reconciliations (read before building, T-205)
 
