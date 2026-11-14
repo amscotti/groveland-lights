@@ -389,6 +389,7 @@ func runReview(root, wt, id, role string, pol Policy) string {
 	out := filepath.Join(root, "harness", "reviews", id+"-"+role+".md")
 	transcript := filepath.Join(root, "harness", "runs", timestamp(), id, role+".jsonl")
 	_ = os.MkdirAll(filepath.Dir(transcript), 0o750)
+	_ = clearReviewArtifacts(root, id)
 
 	diffPath := filepath.Join(root, "harness", "reviews", id+".diff")
 	attach := diffPath
@@ -397,7 +398,6 @@ func runReview(root, wt, id, role string, pol Policy) string {
 		if shots := screenshots(wt); len(shots) > 0 {
 			attach = shots[0]
 		}
-		// The vision agent reads images itself; point it at the run artifacts.
 		msg = fmt.Sprintf("Review task %s. Screenshots are under %s (read the .png files; if the directory is empty, review the attached diff for layout/CSS correctness instead). Write findings and verdict to %s.",
 			id, filepath.Join(wt, "test-results"), "harness/reviews/"+id+"-"+role+".md")
 	}
@@ -410,11 +410,15 @@ func runReview(root, wt, id, role string, pol Policy) string {
 	if data, err := os.ReadFile(filepath.Join(wt, "harness", "reviews", id+"-"+role+".md")); err == nil {
 		_ = os.WriteFile(out, data, 0o600)
 	}
-	// Verdict: prefer the review file, fall back to the transcript.
+	// Verdict: prefer the review file, then the transcript's LAST message text
+	// (quoted/draft verdicts in earlier messages must not win).
 	if data, err := os.ReadFile(out); err == nil {
 		if v, ok := ParseVerdict(string(data)); ok {
 			return v
 		}
+	}
+	if v, ok := lastTextVerdict(transcript); ok {
+		return v
 	}
 	if data, err := os.ReadFile(transcript); err == nil {
 		if v, ok := ParseVerdict(string(data)); ok {
@@ -422,6 +426,35 @@ func runReview(root, wt, id, role string, pol Policy) string {
 		}
 	}
 	return "BLOCK" // no verdict = block
+}
+
+// lastTextVerdict extracts the verdict from the final text message of a JSONL
+// transcript, ignoring VERDICT lines quoted in earlier messages.
+func lastTextVerdict(transcript string) (string, bool) {
+	data, err := os.ReadFile(transcript)
+	if err != nil {
+		return "", false
+	}
+	last := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		var ev struct {
+			Type string `json:"type"`
+			Part struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"part"`
+		}
+		if json.Unmarshal([]byte(line), &ev) != nil {
+			continue
+		}
+		if ev.Type == "text" && strings.Contains(ev.Part.Text, "VERDICT:") {
+			last = ev.Part.Text
+		}
+	}
+	if last == "" {
+		return "", false
+	}
+	return ParseVerdict(last)
 }
 
 func screenshots(wt string) []string {
