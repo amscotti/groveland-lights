@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -389,7 +390,7 @@ func runReview(root, wt, id, role string, pol Policy) string {
 	out := filepath.Join(root, "harness", "reviews", id+"-"+role+".md")
 	transcript := filepath.Join(root, "harness", "runs", timestamp(), id, role+".jsonl")
 	_ = os.MkdirAll(filepath.Dir(transcript), 0o750)
-	_ = clearReviewArtifacts(root, id)
+	clearReviewArtifacts(root, id)
 
 	diffPath := filepath.Join(root, "harness", "reviews", id+".diff")
 	attach := diffPath
