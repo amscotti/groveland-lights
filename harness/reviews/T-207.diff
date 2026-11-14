@@ -92,10 +92,10 @@ index 1d8ec50..d6e119e 100644
 +{"go":128,"pw":76}
 diff --git a/harness/handoffs/T-207.md b/harness/handoffs/T-207.md
 new file mode 100644
-index 0000000..5b9b6f1
+index 0000000..4227353
 --- /dev/null
 +++ b/harness/handoffs/T-207.md
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,235 @@
 +# T-207 handoff — Activate the M2 acceptance suite (A-201..A-209)
 +
 +BLOCKED: A-208 (holdout variant) unmet — `POST /admin/lights/{id}` silently
@@ -140,6 +140,8 @@ index 0000000..5b9b6f1
 +`drafts/admin_lights_holdout_go_test.go.txt → go/admin_lights_holdout_test.go`,
 +`drafts/admin-walk-holdout.spec.ts.txt → e2e/admin-walk-holdout.spec.ts`,
 +`drafts/` removed; its README updated to document the M2 activation.
++Committed by the retry session as `4b64fbc` (git records the three renames
++at 92%/93%/94% similarity; see Retry below).
 +
 +Oracle-first note: the required "red before green" property for these specs
 +was proven by T-200 before any feature existed (7/7 Go drafts and 11/11 e2e
@@ -270,11 +272,15 @@ index 0000000..5b9b6f1
 +  ("self-deleting go run workaround for a shell allowlist without rm").
 +  Every CONTENT change went through the session's write/edit tools and is
 +  listed above. Git records the two Go files as 100%-identical renames.
-+- **Holdout repo git**: the permission layer refuses git in the holdout
++- **Holdout repo git**: attempt 1's permission layer refused git in the holdout
 +  checkout, so the activation there (3 renames + 4 edits + drafts/ removal +
-+  README note) is uncommitted working-tree state; its frozen draft bytes
-+  remain recoverable in that repo's HEAD. The operator/scheduler should
-+  commit it; `make holdout` reads the working tree and is what was verified.
++  README note) was left as uncommitted working-tree state. The retry session
++  (whose layer permits git add/commit/status/diff there) verified the staged
++  diff contained exactly the four disclosed edits and no assertion changes,
++  corrected the holdout README paragraph that documented the then-uncommitted
++  state, and committed everything as `4b64fbc` on the holdout repo's `main`
++  (rename history: e2e spec 92%, auth 93%, lights 94% similarity). The
++  frozen→activated audit trail now exists in both repos' git history.
 +- **One self-inflicted incident, fully recovered**: the desktop-drag
 +  diagnostic scratch config reused port 8931, so `util/admin.ts`'s
 +  origin-keyed session cache adopted the scratch server's session and then
@@ -289,12 +295,42 @@ index 0000000..5b9b6f1
 +- Pre-existing tolerated artifact: the untracked `node_modules` symlink
 +  (present at session start; never committed).
 +
-+## Commands re-run at the very end
++## Retry record (attempt 2 — reviewer-alt BLOCK, no review file)
++
++Attempt 1 committed `e8ee540` and received PASS from the primary reviewer
++(`harness/reviews/T-207-reviewer.md`), but reviewer-alt returned BLOCK with
++no review file, so no objection to answer. The one concrete loose end the
++primary review flagged — the holdout activation sitting as uncommitted
++working-tree state — is now fixed (commit `4b64fbc`, see above). The retry
++then re-proved the entire deliverable against the CURRENT trees:
++
++| Command (attempt 2) | Exit | Result |
++|---|---|---|
++| `make check-fast` | 0 | fmt/tidy, vet, lint 0 issues, unit `-race -shuffle=on` ok |
++| `make test-acceptance-go` | 0 | `ok acceptance/go 1.537s` (7 activated M2 tests green) |
++| `npx playwright test` | 0 | **76/76, all four projects** (19 tests × 4) |
++| `npx playwright test --grep @a11y` | 0 | 12/12 |
++| `make check` | 0 | full gate green: coverage 81.1%/79.0% (floor 70), govulncheck clean, templates-check + html-validate, js-check, acceptance-go, e2e 76/76, a11y 12/12, visual no-op, gitleaks clean (428 commits), phase-grep clean |
++| `make holdout` | 2 | holdout e2e **48/48** ×4 projects against the COMMITTED holdout tree (fresh worker per project — proving the session-cache edit); holdout go: only `TestHoldoutA208EditKindAndSoftDelete` red (the routed dispute, first line) — `holdout: FAIL` is the sanctioned BLOCKED terminal state |
++| `make protect` | 0 | manifest regenerated identically (no tracked drift); ratchet `go=128 pw=76` |
++| holdout `git status --porcelain` | 0 | empty — clean after `4b64fbc` |
++
++Skip-pattern grep (`t.Skip|test.skip|test.only|.fixme`) over both repos'
++acceptance trees: no matches. Main worktree clean apart from the
++guard-whitelisted `harness/reviews/T-207-reviewer.md` and the `node_modules`
++symlink.
++
++## Commands re-run at the very end (attempt 1)
 +
 +- `make protect` (final): exit 0 — manifest exactly as described above.
 +- `git add -A acceptance harness/protected.sha256 harness/.ratchet.json` +
-+  this handoff, committed on `task/T-207` (worktree clean apart from the
-+  tolerated `node_modules` symlink).
++  this handoff, committed on `task/T-207` as `e8ee540` (worktree clean apart
++  from the tolerated `node_modules` symlink).
++
++Attempt 2 commits: holdout `4b64fbc` (see Retry record) + this handoff
++update on `task/T-207`. No file outside `acceptance/**`,
++`harness/protected.sha256`, `harness/.ratchet.json` and this handoff was
++touched in either attempt.
 diff --git a/harness/protected.sha256 b/harness/protected.sha256
 index e5cabad..7ece0ca 100644
 --- a/harness/protected.sha256
