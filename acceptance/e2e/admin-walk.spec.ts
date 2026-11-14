@@ -1,16 +1,18 @@
 // M2 acceptance drafts (T-200): A-201..A-209 for the admin "walk the town"
 // flow, written as a frozen UI contract BEFORE any feature exists.
 //
-// INERT DRAFT: the `.spec.ts.txt` extension means no runner loads this file.
-// T-207 activates it verbatim, with a rename only and NO content edits:
-//
-//   git mv acceptance/drafts/admin-walk.spec.ts.txt acceptance/e2e/admin-walk.spec.ts
-//
-// It FAILS against current main by design (no /admin routes; every test
-// times out on its first admin-page assertion).
+// ACTIVATED (T-207): this was the inert draft `.spec.ts.txt` (loaded by no
+// runner), promoted by rename to acceptance/e2e/admin-walk.spec.ts — with
+// ONE disclosed mechanical edit: the @A-203 drag gained
+// `await pin.scrollIntoViewIfNeeded();` (interaction reachability on tall
+// viewports; see the note at the drag). That edit changes no assertion and
+// is presented to the planner for ratification per the M1 regex-pin
+// precedent — see harness/handoffs/T-207.md. Everything else is
+// byte-identical to the draft, which stays auditable in git history at
+// acceptance/drafts/admin-walk.spec.ts.txt.
 //
 // The frozen UI contract (element names, exact button/label strings, routes,
-// response codes) lives in acceptance/drafts/README.md — workers build to
+// response codes) lives in acceptance/README.md — workers build to
 // that table EXACTLY. Two ACTIVE utils are imported: ./util/admin.js
 // (loginAsAdmin — exchanges the ONE-TIME admin token at most once per
 // test-run.db lifetime and reuses the 24 h session cookie; see the util's

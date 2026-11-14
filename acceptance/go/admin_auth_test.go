@@ -3,16 +3,16 @@
 // @A-201 — admin login: one-time ADMIN_TOKEN exchange and guarded /admin/*
 // (frozen contract, written by T-200 before the feature tasks branch).
 //
-// INERT DRAFT: `.go.txt` is compiled by nothing. T-207 activates it by pure
-// rename with NO content edits (a gofmt pass is the only sanctioned step):
+// ACTIVATED (T-207): this was the inert draft `.go.txt` (compiled by
+// nothing), promoted to acceptance/go/admin_auth_test.go by pure rename —
+// zero content edits (the manifest carried the draft's sha256 across the
+// move). The frozen draft stays auditable in git history at
+// acceptance/drafts/admin_auth_go_test.go.txt.
 //
-//	git mv acceptance/drafts/admin_auth_go_test.go.txt acceptance/go/admin_auth_test.go
-//
-// Contract owner: T-203 (auth/session). It FAILS against current main by
-// design (no /admin routes exist yet — everything under /admin answers 404).
+// Contract owner: T-203 (auth/session).
 //
 // Frozen flow (byte-exact expectations for workers; see also
-// acceptance/drafts/README.md):
+// acceptance/README.md):
 //
 //	GET  /admin (no session)                 -> 302 Location: /admin/login
 //	GET  /admin/login                        -> 200 page: <h1>Admin login</h1>,

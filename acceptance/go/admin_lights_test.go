@@ -4,17 +4,17 @@
 // pipeline, no-stray-files, duplicates, edit/soft-delete, pagination (frozen
 // contract, written by T-200 before the feature tasks branch).
 //
-// INERT DRAFT: `.go.txt` is compiled by nothing. T-207 activates it by pure
-// rename with NO content edits (a gofmt pass is the only sanctioned step):
-//
-//	git mv acceptance/drafts/admin_lights_go_test.go.txt acceptance/go/admin_lights_test.go
+// ACTIVATED (T-207): this was the inert draft `.go.txt` (compiled by
+// nothing), promoted to acceptance/go/admin_lights_test.go by pure rename —
+// zero content edits (the manifest carried the draft's sha256 across the
+// move). The frozen draft stays auditable in git history at
+// acceptance/drafts/admin_lights_go_test.go.txt.
 //
 // Contract owners: T-204 (bbox), T-202/T-206 (photo pipeline), T-201 (store
-// + duplicates + soft delete), T-205 (admin pages + HTMX pagination). It
-// FAILS against current main by design (no /admin routes exist yet).
+// + duplicates + soft delete), T-205 (admin pages + HTMX pagination).
 //
 // Frozen routes and request/response contract (workers build to this
-// EXACTLY; full table in acceptance/drafts/README.md):
+// EXACTLY; full table in acceptance/README.md):
 //
 //	POST /admin/lights            multipart: csrf_token, label, kind
 //	                              (park|building), lat, lon, asset_no?,

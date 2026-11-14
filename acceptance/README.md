@@ -5,12 +5,18 @@ T-200 as INERT DRAFTS — `acceptance/drafts/*.go.txt` and `*.spec.ts.txt`,
 compiled/loaded by nothing — BEFORE any feature task branched, so the merge
 gate stayed green while the contract was already enforceable: git history
 proves these tests predate the implementations (the T-105 oracle-first
-lesson). T-207 activated them by pure rename; the `acceptance/drafts/`
+lesson). T-207 activated them by `git mv`; the `acceptance/drafts/`
 directory is gone and the frozen bytes stay auditable in git history:
 
     acceptance/drafts/admin_auth_go_test.go.txt    -> acceptance/go/admin_auth_test.go
     acceptance/drafts/admin_lights_go_test.go.txt  -> acceptance/go/admin_lights_test.go
     acceptance/drafts/admin-walk.spec.ts.txt       -> acceptance/e2e/admin-walk.spec.ts
+
+Activation was NOT a byte-identical rename throughout: the two Go specs are
+byte-identical to their drafts, but the e2e spec carries ONE disclosed
+mechanical edit (a `scrollIntoViewIfNeeded` interaction-reachability fix in
+@A-203; see the spec's header note and harness/handoffs/T-207.md) that is
+presented to the planner for ratification per the M1 regex-pin precedent.
 
 Everything from "## Contract reconciliations" below is the frozen contract,
 preserved verbatim from the drafts README: workers and reviewers resolve
