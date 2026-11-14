@@ -493,8 +493,9 @@
       ],
       "ui": false,
       "allow_deps": [],
-      "status": "review",
-      "attempts": 2,
+      "status": "rework",
+      "attempts": 3,
+      "model": "glm",
       "budget": {
         "steps": 200,
         "wall_min": 90
