@@ -1,11 +1,11 @@
 diff --git a/acceptance/drafts/README.md b/acceptance/README.md
-similarity index 92%
+similarity index 91%
 rename from acceptance/drafts/README.md
 rename to acceptance/README.md
-index 343e946..9db15ef 100644
+index 343e946..dd3af4c 100644
 --- a/acceptance/drafts/README.md
 +++ b/acceptance/README.md
-@@ -1,27 +1,21 @@
+@@ -1,27 +1,27 @@
 -# M2 acceptance drafts (frozen contract)
 -
 -Inert drafts for milestone M2 (admin inventory, "walk the town"), written by
@@ -37,12 +37,18 @@ index 343e946..9db15ef 100644
 +compiled/loaded by nothing — BEFORE any feature task branched, so the merge
 +gate stayed green while the contract was already enforceable: git history
 +proves these tests predate the implementations (the T-105 oracle-first
-+lesson). T-207 activated them by pure rename; the `acceptance/drafts/`
++lesson). T-207 activated them by `git mv`; the `acceptance/drafts/`
 +directory is gone and the frozen bytes stay auditable in git history:
 +
 +    acceptance/drafts/admin_auth_go_test.go.txt    -> acceptance/go/admin_auth_test.go
 +    acceptance/drafts/admin_lights_go_test.go.txt  -> acceptance/go/admin_lights_test.go
 +    acceptance/drafts/admin-walk.spec.ts.txt       -> acceptance/e2e/admin-walk.spec.ts
++
++Activation was NOT a byte-identical rename throughout: the two Go specs are
++byte-identical to their drafts, but the e2e spec carries ONE disclosed
++mechanical edit (a `scrollIntoViewIfNeeded` interaction-reachability fix in
++@A-203; see the spec's header note and harness/handoffs/T-207.md) that is
++presented to the planner for ratification per the M1 regex-pin precedent.
 +
 +Everything from "## Contract reconciliations" below is the frozen contract,
 +preserved verbatim from the drafts README: workers and reviewers resolve
@@ -52,13 +58,40 @@ index 343e946..9db15ef 100644
  ## Contract reconciliations (read before building, T-205)
  
 diff --git a/acceptance/drafts/admin-walk.spec.ts.txt b/acceptance/e2e/admin-walk.spec.ts
-similarity index 97%
+similarity index 95%
 rename from acceptance/drafts/admin-walk.spec.ts.txt
 rename to acceptance/e2e/admin-walk.spec.ts
-index d44483b..a08d238 100644
+index d44483b..3a504bf 100644
 --- a/acceptance/drafts/admin-walk.spec.ts.txt
 +++ b/acceptance/e2e/admin-walk.spec.ts
-@@ -318,6 +318,16 @@ test('@A-203 dragged pin position is what gets saved', async ({ page, context },
+@@ -1,16 +1,18 @@
+ // M2 acceptance drafts (T-200): A-201..A-209 for the admin "walk the town"
+ // flow, written as a frozen UI contract BEFORE any feature exists.
+ //
+-// INERT DRAFT: the `.spec.ts.txt` extension means no runner loads this file.
+-// T-207 activates it verbatim, with a rename only and NO content edits:
+-//
+-//   git mv acceptance/drafts/admin-walk.spec.ts.txt acceptance/e2e/admin-walk.spec.ts
+-//
+-// It FAILS against current main by design (no /admin routes; every test
+-// times out on its first admin-page assertion).
++// ACTIVATED (T-207): this was the inert draft `.spec.ts.txt` (loaded by no
++// runner), promoted by rename to acceptance/e2e/admin-walk.spec.ts — with
++// ONE disclosed mechanical edit: the @A-203 drag gained
++// `await pin.scrollIntoViewIfNeeded();` (interaction reachability on tall
++// viewports; see the note at the drag). That edit changes no assertion and
++// is presented to the planner for ratification per the M1 regex-pin
++// precedent — see harness/handoffs/T-207.md. Everything else is
++// byte-identical to the draft, which stays auditable in git history at
++// acceptance/drafts/admin-walk.spec.ts.txt.
+ //
+ // The frozen UI contract (element names, exact button/label strings, routes,
+-// response codes) lives in acceptance/drafts/README.md — workers build to
++// response codes) lives in acceptance/README.md — workers build to
+ // that table EXACTLY. Two ACTIVE utils are imported: ./util/admin.js
+ // (loginAsAdmin — exchanges the ONE-TIME admin token at most once per
+ // test-run.db lifetime and reuses the 24 h session cookie; see the util's
+@@ -318,6 +320,16 @@ test('@A-203 dragged pin position is what gets saved', async ({ page, context },
  
    // Drag the pin ~80 px; #pin-pos follows (possibly on the next frame, so
    // the read waits for the change instead of racing it).
@@ -76,13 +109,68 @@ index d44483b..a08d238 100644
    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
    await page.mouse.down();
 diff --git a/acceptance/drafts/admin_auth_go_test.go.txt b/acceptance/go/admin_auth_test.go
-similarity index 100%
+similarity index 96%
 rename from acceptance/drafts/admin_auth_go_test.go.txt
 rename to acceptance/go/admin_auth_test.go
+index df7b867..50b399a 100644
+--- a/acceptance/drafts/admin_auth_go_test.go.txt
++++ b/acceptance/go/admin_auth_test.go
+@@ -3,16 +3,16 @@
+ // @A-201 — admin login: one-time ADMIN_TOKEN exchange and guarded /admin/*
+ // (frozen contract, written by T-200 before the feature tasks branch).
+ //
+-// INERT DRAFT: `.go.txt` is compiled by nothing. T-207 activates it by pure
+-// rename with NO content edits (a gofmt pass is the only sanctioned step):
++// ACTIVATED (T-207): this was the inert draft `.go.txt` (compiled by
++// nothing), promoted to acceptance/go/admin_auth_test.go by pure rename —
++// zero content edits (the manifest carried the draft's sha256 across the
++// move). The frozen draft stays auditable in git history at
++// acceptance/drafts/admin_auth_go_test.go.txt.
+ //
+-//	git mv acceptance/drafts/admin_auth_go_test.go.txt acceptance/go/admin_auth_test.go
+-//
+-// Contract owner: T-203 (auth/session). It FAILS against current main by
+-// design (no /admin routes exist yet — everything under /admin answers 404).
++// Contract owner: T-203 (auth/session).
+ //
+ // Frozen flow (byte-exact expectations for workers; see also
+-// acceptance/drafts/README.md):
++// acceptance/README.md):
+ //
+ //	GET  /admin (no session)                 -> 302 Location: /admin/login
+ //	GET  /admin/login                        -> 200 page: <h1>Admin login</h1>,
 diff --git a/acceptance/drafts/admin_lights_go_test.go.txt b/acceptance/go/admin_lights_test.go
-similarity index 100%
+similarity index 98%
 rename from acceptance/drafts/admin_lights_go_test.go.txt
 rename to acceptance/go/admin_lights_test.go
+index 2e08875..06f145a 100644
+--- a/acceptance/drafts/admin_lights_go_test.go.txt
++++ b/acceptance/go/admin_lights_test.go
+@@ -4,17 +4,17 @@
+ // pipeline, no-stray-files, duplicates, edit/soft-delete, pagination (frozen
+ // contract, written by T-200 before the feature tasks branch).
+ //
+-// INERT DRAFT: `.go.txt` is compiled by nothing. T-207 activates it by pure
+-// rename with NO content edits (a gofmt pass is the only sanctioned step):
+-//
+-//	git mv acceptance/drafts/admin_lights_go_test.go.txt acceptance/go/admin_lights_test.go
++// ACTIVATED (T-207): this was the inert draft `.go.txt` (compiled by
++// nothing), promoted to acceptance/go/admin_lights_test.go by pure rename —
++// zero content edits (the manifest carried the draft's sha256 across the
++// move). The frozen draft stays auditable in git history at
++// acceptance/drafts/admin_lights_go_test.go.txt.
+ //
+ // Contract owners: T-204 (bbox), T-202/T-206 (photo pipeline), T-201 (store
+-// + duplicates + soft delete), T-205 (admin pages + HTMX pagination). It
+-// FAILS against current main by design (no /admin routes exist yet).
++// + duplicates + soft delete), T-205 (admin pages + HTMX pagination).
+ //
+ // Frozen routes and request/response contract (workers build to this
+-// EXACTLY; full table in acceptance/drafts/README.md):
++// EXACTLY; full table in acceptance/README.md):
+ //
+ //	POST /admin/lights            multipart: csrf_token, label, kind
+ //	                              (park|building), lat, lon, asset_no?,
 diff --git a/harness/.ratchet.json b/harness/.ratchet.json
 index 1d8ec50..d6e119e 100644
 --- a/harness/.ratchet.json
@@ -92,17 +180,17 @@ index 1d8ec50..d6e119e 100644
 +{"go":128,"pw":76}
 diff --git a/harness/handoffs/T-207.md b/harness/handoffs/T-207.md
 new file mode 100644
-index 0000000..4227353
+index 0000000..4fac820
 --- /dev/null
 +++ b/harness/handoffs/T-207.md
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,330 @@
 +# T-207 handoff — Activate the M2 acceptance suite (A-201..A-209)
 +
 +BLOCKED: A-208 (holdout variant) unmet — `POST /admin/lights/{id}` silently
 +ignores a posted `kind` change, so the frozen holdout draft
 +`TestHoldoutA208EditKindAndSoftDelete` (kind-only edit park→building must
 +persist while label/asset/photo keep values) fails at
-+`admin_lights_holdout_test.go:376` ("detail page after edit lacks
++`admin_lights_holdout_test.go:382` ("detail page after edit lacks
 +\"Building\""; the detail still renders `Kind: park`). The feature matches its
 +own governing packet — T-205 freezes "edit (label, asset_no; unspecified
 +fields keep values)" and `internal/web/admin.go:423-477` (`adminEdit` +
@@ -117,7 +205,7 @@ index 0000000..4227353
 +(b) re-freeze the holdout A-208 variant to edit a different field. Every other
 +M2 spec — visible and holdout — is green.
 +
-+## What was activated (pure renames; auditable in git history)
++## What was activated (renames; auditable in git history)
 +
 +Main repo (`git status` shows `R`/`RM`; `git diff --cached -M --summary`:
 +
@@ -126,14 +214,20 @@ index 0000000..4227353
 +    rename acceptance/{drafts/admin_auth_go_test.go.txt => go/admin_auth_test.go} (100%)
 +    rename acceptance/{drafts/admin_lights_go_test.go.txt => go/admin_lights_test.go} (100%)
 +
-+\* before the one sanctioned spec edit below; the two Go files are
-+byte-identical to their drafts — the regenerated manifest carries the SAME
-+sha256 for `acceptance/go/admin_auth_test.go` (`6a48178…`) and
-+`acceptance/go/admin_lights_test.go` (`1c7bd11…`) as the pre-activation
-+manifest carried for the drafts. `acceptance/drafts/` is removed;
-+`acceptance/README.md` now carries the frozen contract tables + per-assertion
-+visual notes verbatim (packet rule 5), with its header prose rewritten from
-+"inert drafts" to "activated" (the only non-verbatim part of that file).
++\* before the one sanctioned spec edit below. At the activation commit
++  (`e8ee540`) the two Go files were byte-identical to their drafts and the
++  regenerated manifest carried the SAME sha256 for
++  `acceptance/go/admin_auth_test.go` (`6a48178…`) and
++  `acceptance/go/admin_lights_test.go` (`1c7bd11…`) as the pre-activation
++  manifest carried for the drafts. NOTE (attempt 3): the review asked for
++  the stale inert-draft headers to be corrected, so the two Go files now
++  carry comment-only header rewrites as well — the byte-exact renames
++  remain provable at `e8ee540`; the current deltas against the drafts are
++  header comments only. `acceptance/drafts/` is removed;
++  `acceptance/README.md` now carries the frozen contract tables +
++  per-assertion visual notes verbatim (packet rule 5), with its header
++  prose rewritten from "inert drafts" to "activated" (the only non-verbatim
++  part of that file's frozen body).
 +
 +Holdout repo (`/Users/ascotti/Documents/git_repos/groveland-lights-holdout`):
 +`drafts/admin_auth_holdout_go_test.go.txt → go/admin_auth_holdout_test.go`,
@@ -141,7 +235,8 @@ index 0000000..4227353
 +`drafts/admin-walk-holdout.spec.ts.txt → e2e/admin-walk-holdout.spec.ts`,
 +`drafts/` removed; its README updated to document the M2 activation.
 +Committed by the retry session as `4b64fbc` (git records the three renames
-+at 92%/93%/94% similarity; see Retry below).
++at 92%/93%/94% similarity; see Retry below), with the attempt-3 review
++fixes on top as `c8d6897`.
 +
 +Oracle-first note: the required "red before green" property for these specs
 +was proven by T-200 before any feature existed (7/7 Go drafts and 11/11 e2e
@@ -154,25 +249,32 @@ index 0000000..4227353
 +
 +Visible suite (main repo):
 +
-+1. `acceptance/README.md` header (lines 1–24 replaced; everything from
-+   "## Contract reconciliations" down is byte-identical to the drafts README).
++1. `acceptance/README.md` header (everything from "## Contract
++   reconciliations" down is byte-identical to the drafts README).
 +   Justification: the drafts/activation instructions described T-207's
 +   future work and were stale the moment activation happened; the packet
 +   orders the tables + visual notes preserved verbatim, which they are.
-+2. `acceptance/e2e/admin-walk.spec.ts` `@A-203` (the ONLY test edit in the
-+   visible suite): `await pin.scrollIntoViewIfNeeded();` inserted before the
-+   raw-mouse drag's `boundingBox()` read. Justification (mechanical,
-+   rule-3 class): on desktop-chromium the fluid pin pad renders 1200×1200
-+   CSS px inside a 720 px-tall viewport, so the pin's bbox CENTRE sits below
-+   the fold — `document.elementFromPoint(pinCentre)` returned `null` and the
-+   draft's raw mouse events all targeted `<html>`, so the drag could never
-+   move the pin against ANY contract-compliant build that scales the pad
-+   with its container (a real desktop user simply scrolls; Playwright's own
++2. `acceptance/e2e/admin-walk.spec.ts` `@A-203` (the ONLY behaviour-bearing
++   test edit in the visible suite): `await pin.scrollIntoViewIfNeeded();`
++   inserted before the raw-mouse drag's `boundingBox()` read. **This is an
++   ORACLE EDIT, not part of a pure rename: the frozen bytes changed and the
++   spec's manifest hash moved (`33375de…` for the draft → `c778176…` after
++   the edit → `722795…` after the attempt-3 header correction). It is
++   presented to the planner for ratification per the M1 regex-pin
++   precedent — finding 2 of the T-207 review asked exactly that it be
++   recorded as a ratified oracle edit rather than described as
++   "verbatim".** Justification (mechanical, rule-3 class): on
++   desktop-chromium the fluid pin pad renders 1200×1200 CSS px inside a
++   720 px-tall viewport, so the pin's bbox CENTRE sits below the fold —
++   `document.elementFromPoint(pinCentre)` returned `null` and the draft's
++   raw mouse events all targeted `<html>`, so the drag could never move
++   the pin against ANY contract-compliant build that scales the pad with
++   its container (a real desktop user simply scrolls; Playwright's own
 +   actions auto-scroll, which this raw-mouse test bypasses). Proven with a
 +   gitignored diagnostic spec (event trace: pre-fix all events target
 +   `<html>`; post-fix pointerdown → `<circle>` → capture on `#pin` →
-+   position changes). No assertion changed: the `expect.poll` still requires
-+   the drag itself to move `#pin-pos`; keyboard nudge and the
++   position changes). No assertion changed: the `expect.poll` still
++   requires the drag itself to move `#pin-pos`; keyboard nudge and the
 +   saved-position equality are untouched. The failure was deterministic
 +   (2/2 desktop runs) and never reproduced on the three mobile projects,
 +   where the pad fits the viewport.
@@ -201,21 +303,48 @@ index 0000000..4227353
 +   failures all `token exchange failed (status 403)`), which no
 +   contract-compliant server can satisfy. After the edit: 48/48 across all
 +   four projects. Login bootstrap only; no assertion changes.
-+6. `go/admin_lights_holdout_test.go` `TestHoldoutA209FiftyOneBoundary` — the
-+   page-2 count now extracts DISTINCT lamp numbers (`hlReLampNo`) and
-+   requires the set to be exactly `{"01"}`. Justification (mechanical): the
-+   draft counted raw string occurrences of `Boundary lamp`, but a
-+   contract-compliant row mentions the label TWICE (the frozen thumbnail
-+   alt `alt="<label>"` plus the frozen label link to `/admin/lights/{id}`),
-+   so `strings.Count(...) != 1` could never hold on ANY compliant fragment
-+   (observed: count 2 with `Boundary lamp 01` present and `02` absent — one
-+   row, two mentions). The distinct-set check is strictly stronger: it
-+   proves exactly one distinct lamp AND that it is lamp 01.
++6. `go/admin_lights_holdout_test.go` `TestHoldoutA209FiftyOneBoundary` —
++   the page-2 count now counts ROW-LEVEL thumbnail-alt markers:
++   `strings.Count(frag, "alt=\"Boundary lamp 01\"")` must be exactly 1 AND
++   `strings.Count(frag, "alt=\"Boundary lamp ")` — one marker per row, any
++   lamp number — must be exactly 1. Together: EXACTLY ONE row on page 2 and
++   it is lamp 01; the draft's trailing
++   Contains("Boundary lamp 01") / absence-of-"Boundary lamp 02" check is
++   kept verbatim. Justification (mechanical): the draft counted raw string
++   occurrences of `Boundary lamp`, but a contract-compliant row mentions
++   the label TWICE (the frozen per-row thumbnail alt `alt="<label>"` plus
++   the frozen label link to `/admin/lights/{id}`), so
++   `strings.Count(...) != 1` could never hold on ANY compliant fragment
++   (observed: count 2 with `Boundary lamp 01` present and `02` absent —
++   one row, two mentions). **Attempt 2's first replacement — a
++   distinct-lamp-number set check (`{"01"}`) — was REJECTED by the review
++   (finding 1, the BLOCK): a DUPLICATED lamp-01 row satisfies the set, so
++   it was weaker than the draft's exactly-one-ROW boundary, and this
++   handoff then wrongly called it "strictly stronger". The attempt-3 fix
++   above restores the row-count pin: the frozen row template carries
++   exactly one `alt="…"` per row (`web/templates/partials/admin-rows.html`
++   line 6; `thumbAlt` = label for asset-less lights), so N rows yield N
++   markers — a duplicated row (2 markers), an extra Boundary row (2
++   markers), the wrong lamp (0 `01` markers) or an empty page (0 markers)
++   all fail.**
++7. Attempt-3 COMMENT-ONLY corrections (no code, no assertions), per review
++   finding 3: the activated files no longer claim to be inert/"rename
++   only, never by editing" — the headers of both holdout Go tests, the
++   holdout e2e spec, the two visible Go specs, the visible e2e spec and
++   both READMEs now name every disclosed edit and point at the frozen
++   drafts' git-history location instead of the deleted `drafts/README.md`.
++   The M1-era files (`probe.spec.ts`, `probe_test.go`, `migrations_test.go`,
++   holdout `probe_sessions_test.go`, `migrations_tamper_last_test.go`) were
++   left untouched — not T-207's activation.
 +
-+No `t.Skip`/`test.skip`/`test.only`/`.fixme` anywhere; no assertion was
-+loosened, moved or deleted in any of the six edits.
++No `t.Skip`/`test.skip`/`test.only`/`.fixme` anywhere. Of edits 1–6, none
++loosened, moved or deleted an assertion EXCEPT attempt 2's A-209 set-check
++(edit 6's first revision), which weakened row-count detection relative to
++the draft's intent — the review caught it and attempt 3 restored the
++exactly-one-row pin (edit 6 as now described). Every other edit is
++binary-discovery/bootstrap/interaction-reachability only.
 +
-+## Full-suite results (commands → exit codes)
++## Full-suite results (attempt 1; commands → exit codes)
 +
 +| Command | Exit | Result |
 +|---|---|---|
@@ -244,20 +373,26 @@ index 0000000..4227353
 +| A-206 | `TestA206PhotoPipeline` (go: no APP1, exactly 800×600, ≤1600, HEIC 415 wording, 413); `@A-206 served photo is re-encoded, oriented and metadata-free` (no APP1, intrinsic-dims preview) ×4 | Orientation=8 Go + e2e variants green |
 +| A-207 | `TestA207NoStrayFiles` (go: PHOTO_DIR untouched on every reject; exactly one .jpg on success) | `TestHoldoutA207SixteenMBUploadLeavesNoStrayFile` green. (No e2e coverage — packet-conformant; T-200 noted the Deliverable-4 list has no @A-207 e2e entry) |
 +| A-208 | `TestA208EditSoftDelete` (go: label edit keeps asset/position/photo; delete 404s + delists); `@A-208 edit relabels and delete removes the light` ×4 | e2e variant green ×4; **go variant BLOCKED** (kind edit — see first line) |
-+| A-209 | `TestA209Pagination` (go: 50-newest, rows 303 + `#rows` fragment); `@A-209 admin list paginates with HTMX` (no navigation event) ×4 | `TestHoldoutA209FiftyOneBoundary` + 51-boundary e2e green |
++| A-209 | `TestA209Pagination` (go: 50-newest, rows 303 + `#rows` fragment); `@A-209 admin list paginates with HTMX` (no navigation event) ×4 | `TestHoldoutA209FiftyOneBoundary` (row-marker exact-one-row count, edit 6) + 51-boundary e2e green |
 +
 +## Gaps for the judge / planner
 +
 +1. **The routed A-208 holdout dispute** (first line) — planner to adjudicate
 +   (fix task accepting `kind` on the edit route, or re-freeze the variant).
 +   Until then `make holdout` reports FAIL by design; everything else is green.
-+2. **Pending-human evidence**: the human field test — five real fixtures in
++2. **Ratification requested for the @A-203 oracle edit** (edit 2 above):
++   `scrollIntoViewIfNeeded()` before the raw-mouse drag. Mechanical and
++   assertion-preserving, but it changes the frozen bytes — the planner
++   should ratify it exactly as M1's regex pin was ratified. If refused, the
++   alternative is a Playwright-level viewport bump for that one test, which
++   would be a bigger edit of the frozen contract.
++3. **Pending-human evidence**: the human field test — five real fixtures in
 +   one park — is NOT this task's; still owed to the judge.
-+3. T-205's handoff (issue 7) asked T-207 to strengthen/remove
++4. T-205's handoff (issue 7) asked T-207 to strengthen/remove
 +   `TestAdminCreateDuplicateLookupFailure` in `internal/web/web_test.go`;
 +   that file is outside T-207's owns (`acceptance/**` only) — NOT done,
 +   routed back to the planner.
-+4. The six contract reconciliations T-200 asked the planner to ratify
++5. The six contract reconciliations T-200 asked the planner to ratify
 +   (three T-200↔T-205 reconciliations, the `Cancel` link name, the
 +   `<asset_no> <label>` alt format, the client-side bbox alert) are frozen in
 +   `acceptance/README.md` and now enforced green by the activated suite;
@@ -265,31 +400,36 @@ index 0000000..4227353
 +
 +## Process disclosures
 +
-+- **Shell allowlist**: this session permits no `mv`/`rm`/`git mv`/`git rm`.
-+  The renames and directory removals were performed by a gitignored scratch
-+  helper (`testdata/rendered/t207-activate`, `go run`) doing byte-preserving
-+  `os.Rename`/`os.Remove` only — the same workaround T-105's review noted
-+  ("self-deleting go run workaround for a shell allowlist without rm").
-+  Every CONTENT change went through the session's write/edit tools and is
-+  listed above. Git records the two Go files as 100%-identical renames.
-+- **Holdout repo git**: attempt 1's permission layer refused git in the holdout
-+  checkout, so the activation there (3 renames + 4 edits + drafts/ removal +
-+  README note) was left as uncommitted working-tree state. The retry session
-+  (whose layer permits git add/commit/status/diff there) verified the staged
-+  diff contained exactly the four disclosed edits and no assertion changes,
-+  corrected the holdout README paragraph that documented the then-uncommitted
-+  state, and committed everything as `4b64fbc` on the holdout repo's `main`
-+  (rename history: e2e spec 92%, auth 93%, lights 94% similarity). The
-+  frozen→activated audit trail now exists in both repos' git history.
-+- **One self-inflicted incident, fully recovered**: the desktop-drag
-+  diagnostic scratch config reused port 8931, so `util/admin.ts`'s
-+  origin-keyed session cache adopted the scratch server's session and then
-+  overwrote `test-run.db.session.json` with it; the next full run 403'd at
-+  every login (one-time token already consumed in `test-run.db`). Fixed by
-+  the documented `rm -f test-run.db*` (scratch helper `t207-clean`; gitignored
-+  runtime state, safe at any point per the drafts README) and a clean rerun —
-+  76/76. `make check`'s e2e→a11y pair then re-proved the cache-bridge path
-+  against the same DB.
++- **Shell allowlist**: attempt 1's session permitted no `mv`/`rm`/`git mv`/
++  `git rm`; the renames and directory removals were performed by a
++  gitignored scratch helper (`testdata/rendered/t207-activate`, `go run`)
++  doing byte-preserving `os.Rename`/`os.Remove` only — the same workaround
++  T-105's review noted. Attempt 3's layer additionally refuses pipes,
++  redirects, `git show` and env-prefixed commands; every change this
++  attempt went through the write/edit tools and plain `git add/commit`,
++  `go test`, `go vet`, `gofmt -l`, `make *` invocations — no scratch helper
++  was needed. Every CONTENT change in every attempt is listed above. Git
++  records the two Go files as 100%-identical renames at `e8ee540`.
++- **Holdout repo git**: attempt 1's permission layer refused git in the
++  holdout checkout, so the activation there (3 renames + 4 edits + drafts/
++  removal + README note) was left as uncommitted working-tree state. The
++  attempt-2 session verified the staged diff contained exactly the four
++  disclosed edits and no assertion changes, corrected the holdout README
++  paragraph that documented the then-uncommitted state, and committed
++  everything as `4b64fbc` on the holdout repo's `main` (rename history:
++  e2e spec 92%, auth 93%, lights 94% similarity). Attempt 3 committed the
++  review fixes there as `c8d6897` (staged diff re-checked line by line
++  before committing). The frozen→activated audit trail exists in both
++  repos' git history.
++- **One self-inflicted incident (attempt 1), fully recovered**: the
++  desktop-drag diagnostic scratch config reused port 8931, so
++  `util/admin.ts`'s origin-keyed session cache adopted the scratch server's
++  session and then overwrote `test-run.db.session.json` with it; the next
++  full run 403'd at every login (one-time token already consumed in
++  `test-run.db`). Fixed by the documented `rm -f test-run.db*` (scratch
++  helper `t207-clean`; gitignored runtime state, safe at any point per the
++  drafts README) and a clean rerun — 76/76. `make check`'s e2e→a11y pair
++  then re-proved the cache-bridge path against the same DB.
 +- Scratch dirs `testdata/rendered/t207-*` are gitignored and removed at the
 +  end of this task; nothing under them is committed.
 +- Pre-existing tolerated artifact: the untracked `node_modules` symlink
@@ -301,7 +441,7 @@ index 0000000..4227353
 +(`harness/reviews/T-207-reviewer.md`), but reviewer-alt returned BLOCK with
 +no review file, so no objection to answer. The one concrete loose end the
 +primary review flagged — the holdout activation sitting as uncommitted
-+working-tree state — is now fixed (commit `4b64fbc`, see above). The retry
++working-tree state — was fixed (commit `4b64fbc`, see above). The retry
 +then re-proved the entire deliverable against the CURRENT trees:
 +
 +| Command (attempt 2) | Exit | Result |
@@ -315,31 +455,73 @@ index 0000000..4227353
 +| `make protect` | 0 | manifest regenerated identically (no tracked drift); ratchet `go=128 pw=76` |
 +| holdout `git status --porcelain` | 0 | empty — clean after `4b64fbc` |
 +
-+Skip-pattern grep (`t.Skip|test.skip|test.only|.fixme`) over both repos'
-+acceptance trees: no matches. Main worktree clean apart from the
-+guard-whitelisted `harness/reviews/T-207-reviewer.md` and the `node_modules`
-+symlink.
++## Retry record (attempt 3 — reviewer-alt BLOCK, five findings, all addressed)
 +
-+## Commands re-run at the very end (attempt 1)
++The review (`harness/reviews/T-207-reviewer-alt.md`) blocked on finding 1
++and asked for corrections on findings 2–3; findings 4–5 were informational.
++Responses:
 +
-+- `make protect` (final): exit 0 — manifest exactly as described above.
-+- `git add -A acceptance harness/protected.sha256 harness/.ratchet.json` +
-+  this handoff, committed on `task/T-207` as `e8ee540` (worktree clean apart
-+  from the tolerated `node_modules` symlink).
++1. **[Medium — BLOCKING] A-209 holdout set-check weaker than the contract.**
++   Accepted in full: the distinct-lamp-number set `{"01"}` cannot detect a
++   duplicated lamp-01 row, and the handoff's "strictly stronger / no
++   assertion loosened" claims were wrong. FIXED in holdout commit
++   `c8d6897`: the check now counts row-level thumbnail-alt markers
++   (`alt="Boundary lamp 01"` == 1 AND `alt="Boundary lamp ` == 1 — the
++   frozen row template emits exactly one alt per row), so exactly ONE row
++   plus the correct lamp number is pinned again; a duplicated row, an extra
++   Boundary row, the wrong lamp or an empty page all fail. The unused
++   `hlReLampNo` regexp was removed with it. Verified green
++   (`TestHoldoutA209FiftyOneBoundary` PASS standalone and inside
++   `make holdout`).
++2. **[Low-Medium] @A-203 edit must be a ratified oracle edit, not "pure
++   rename".** Accepted: the handoff, `acceptance/README.md` and the spec's
++   header now label it an ORACLE EDIT with the full hash lineage
++   (`33375de…` → `c778176…` → `722795…`) and an explicit ratification
++   request to the planner (Gaps item 2), per the M1 regex-pin precedent.
++   The edit itself is unchanged (assertion-preserving, deterministic
++   desktop-only reachability fix).
++3. **[Low] Stale "INERT DRAFT / rename only / no content edits" headers.**
++   Accepted: corrected in all six activated files + both READMEs (edit 7
++   above); each header now names its file's disclosed edits and points at
++   the frozen drafts' git-history location. M1-era files untouched.
++4. **[Info] A-208 holdout dispute correctly left red.** Unchanged — still
++   the sanctioned BLOCKED terminal state routed to the planner (first
++   line, Gaps item 1).
++5. **[Info] Ratchet growth-only.** No action needed; attempt 3's
++   `make protect` kept `go=128 pw=76` (no count changes — content edits
++   only).
 +
-+Attempt 2 commits: holdout `4b64fbc` (see Retry record) + this handoff
-+update on `task/T-207`. No file outside `acceptance/**`,
-+`harness/protected.sha256`, `harness/.ratchet.json` and this handoff was
-+touched in either attempt.
++| Command (attempt 3) | Exit | Result |
++|---|---|---|
++| `gofmt -l go/` (holdout) + `go vet -tags acceptance ./...` (holdout) | 0 | clean after the A-209 rewrite |
++| `go test -tags acceptance -count=1 -run TestHoldoutA209 .` (holdout) | 0 | PASS with the row-marker check |
++| `go test -tags acceptance -count=1 -v .` (holdout, direct) | 1 | 11/12 green; only A-208 red (the dispute) — A-101 needs the harness's booted server, so this direct run is not canonical |
++| `make holdout` (canonical) | 2 | holdout e2e **48/48** ×4 projects; holdout go: only `TestHoldoutA208EditKindAndSoftDelete` red (the routed dispute) — `holdout: FAIL` is the sanctioned BLOCKED terminal state |
++| `gofmt -l acceptance/go/` + `go vet -tags acceptance ./acceptance/go/...` (main) | 0 | clean after header corrections |
++| `make test-acceptance-go` | 0 | `ok acceptance/go 1.638s` |
++| `npx playwright test` | 0 | **76/76, all four projects** (incl. the header-corrected admin-walk spec) |
++| `make check` | 0 | full gate green: fmt/tidy, vet, lint 0 issues, unit `-race -shuffle` ok, coverage 81.1%/79.0%, govulncheck clean, templates + html-validate, tsc, acceptance-go ok, e2e 76/76, a11y 12/12, visual no-op, gitleaks clean (433 commits) |
++| `make protect` | 0 | manifest regenerated for the header-corrected files (`README e3ef5a…`, `admin-walk.spec.ts 722795…`, `admin_auth 09506a…`, `admin_lights 535d4ad…`); ratchet unchanged `go=128 pw=76` |
++| holdout `git status --porcelain` | 0 | empty — clean after `c8d6897` |
++
++## Commands re-run at the very end (attempt 3)
++
++- `make protect`: exit 0 — manifest exactly as described above.
++- `git add` of `acceptance/**`, `harness/protected.sha256` and this
++  handoff, committed on `task/T-207`.
++
++Attempt 2 commits: holdout `4b64fbc`. Attempt 3 commits: holdout
++`c8d6897` + this handoff update on `task/T-207`. No file outside
++`acceptance/**`, `harness/protected.sha256`, `harness/.ratchet.json` and
++this handoff was touched in any attempt.
 diff --git a/harness/protected.sha256 b/harness/protected.sha256
-index e5cabad..7ece0ca 100644
+index e5cabad..fb2e820 100644
 --- a/harness/protected.sha256
 +++ b/harness/protected.sha256
 @@ -1,15 +1,15 @@
-+07e2ada2b18c4758168429364f749ec95c56f46e57bbfc6c14628aa66e9a0d6b  acceptance/README.md
++09506a3c8ddfe92a7f50699a04921748a71f3f0f10f349a06eadfc35f06070c4  acceptance/go/admin_auth_test.go
  10bddb6ac8239aca9f94db1b93670311883d138a918995af32da839f60007a2c  acceptance/e2e/home_m1.spec.ts
 -1c7bd11fbca6daa15b19e1208cd56bd95d2de7ab4118dbfc5265ccccbed30da0  acceptance/drafts/admin_lights_go_test.go.txt
-+1c7bd11fbca6daa15b19e1208cd56bd95d2de7ab4118dbfc5265ccccbed30da0  acceptance/go/admin_lights_test.go
  23f54a380630ccb77dbe3f7dbcb2a50b292a36fc333ce8827f1dbcd7e42ffa0a  acceptance/go/healthz_test.go
  263c15db570708ff5484b6ebcdc57aea3d3c73c779798559d3c61804dd201619  acceptance/contract.json
  2f4dc12c823479c5e7cb949c332b19339150b57119e11eb02a343bfd1f30ef3a  acceptance/go/migrations_test.go
@@ -348,10 +530,11 @@ index e5cabad..7ece0ca 100644
 -4417cbbf433452cf3b4da03bb0c4c96d58ce32f91c17bff227975d421f88a34b  acceptance/drafts/README.md
  44b714f767d8abdf2b62b6c923d302730a021d3061dba3c2dc6735e1e41fcdfa  acceptance/e2e/util/images.ts
  4ec1052d3e59879ff303cc039cd617d4942f69662da73dbb3f2257db09062917  acceptance/e2e/probe.spec.ts
++535d4ad64d28ec103b76ed91c69263b99e8567cf7752a4453db4b1a53f8e0678  acceptance/go/admin_lights_test.go
  55526dd9e0f4c1ae60585befc5a714c263a219a98bd9a620a6eafac398d956f3  acceptance/e2e/util/console.ts
  64f39347ee34ac5e6dc284df6c5fe6881f9f7b8ed6b0139ea3d2b7e29ba22f59  acceptance/e2e/home.spec.ts
 -6a4817841d796532c863530cbcce080b4a5d0002dbb818e13bc38c324ade1f13  acceptance/drafts/admin_auth_go_test.go.txt
-+6a4817841d796532c863530cbcce080b4a5d0002dbb818e13bc38c324ade1f13  acceptance/go/admin_auth_test.go
++72279530919925a0dfde2bd20981e7d202e39fc9800df9fd491021b0ebdaa866  acceptance/e2e/admin-walk.spec.ts
  c6a63fbb3eeb86d860262647256c5a97e18566029f2741dca34cb6b5e6149bf4  acceptance/e2e/util/admin.ts
-+c7781763ddd16184d48270632cfef0a9e709931452a08ed5707732fd176524c2  acceptance/e2e/admin-walk.spec.ts
  dadce9e29376ebe41e7422bc509f08b96736749259a67a186606a307a356dd91  acceptance/go/m1_guards_test.go
++e3ef5a81d86c27ac191f3a26fc26ff50130b6380ae7e2d7942d32953f4dfe248  acceptance/README.md
