@@ -677,7 +677,7 @@ func checkEditUpdatesColumns(t *testing.T, ctx context.Context, db *DB) {
 		Label: "Old label", Lat: grovelandLat, Lon: grovelandLon,
 	})
 	backdateLightStamps(t, ctx, db, created.ID)
-	edited, err := db.EditLight(ctx, created.ID, "New label", strPtr("GP-002"))
+	edited, err := db.EditLight(ctx, created.ID, "New label", strPtr("GP-002"), KindPark)
 	if err != nil {
 		t.Fatalf("EditLight: %v", err)
 	}
@@ -755,7 +755,7 @@ func checkEditClearsAssetNo(t *testing.T, ctx context.Context, db *DB) {
 		AssetNo: strPtr("GP-003"), Kind: KindPark,
 		Label: "Numbered", Lat: grovelandLat, Lon: grovelandLon,
 	})
-	if _, err := db.EditLight(ctx, created.ID, "Numbered", nil); err != nil {
+	if _, err := db.EditLight(ctx, created.ID, "Numbered", nil, KindPark); err != nil {
 		t.Fatalf("EditLight(nil asset): %v", err)
 	}
 	got, err := db.GetLight(ctx, created.ID)
@@ -769,14 +769,14 @@ func checkEditClearsAssetNo(t *testing.T, ctx context.Context, db *DB) {
 
 func checkEditNotFound(t *testing.T, ctx context.Context, db *DB) {
 	t.Helper()
-	if _, err := db.EditLight(ctx, LightID(999999), "x", nil); !errors.Is(err, ErrNotFound) {
+	if _, err := db.EditLight(ctx, LightID(999999), "x", nil, KindPark); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("EditLight(missing) error = %v, want ErrNotFound", err)
 	}
 	l := mustCreateLight(t, ctx, db, NewLight{
 		Kind: KindPark, Label: "Doomed", Lat: grovelandLat, Lon: grovelandLon,
 	})
 	mustSoftDelete(t, ctx, db, l.ID)
-	if _, err := db.EditLight(ctx, l.ID, "zombie", nil); !errors.Is(err, ErrNotFound) {
+	if _, err := db.EditLight(ctx, l.ID, "zombie", nil, KindPark); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("EditLight(deleted) error = %v, want ErrNotFound", err)
 	}
 }
@@ -789,7 +789,7 @@ func checkEditDuplicate(t *testing.T, ctx context.Context, db *DB) {
 	b := mustCreateLight(t, ctx, db, NewLight{
 		AssetNo: strPtr("GP-B"), Kind: KindPark, Label: "B", Lat: grovelandLat, Lon: grovelandLon,
 	})
-	if _, err := db.EditLight(ctx, b.ID, "B", strPtr("GP-A")); !errors.Is(err, ErrDuplicateAssetNo) {
+	if _, err := db.EditLight(ctx, b.ID, "B", strPtr("GP-A"), KindBuilding); !errors.Is(err, ErrDuplicateAssetNo) {
 		t.Fatalf("EditLight onto GP-A error = %v, want ErrDuplicateAssetNo", err)
 	}
 	got, err := db.GetLight(ctx, b.ID)

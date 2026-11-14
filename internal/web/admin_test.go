@@ -1022,6 +1022,34 @@ func TestAdminEdit(t *testing.T) {
 			t.Errorf("label-only edit changed the photo: %q -> %q, want %q", oldPhoto, got, oldPhoto)
 		}
 	})
+	t.Run("kind edit park to building round-trips", func(t *testing.T) {
+		rec := adminPostMultipart(t, s, detailURL, map[string]string{
+			CSRFTokenName: csrf, "label": "Kind swapped", "kind": "building",
+		}, "", "", nil, session, csrf, false)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d, want 303; body:\n%s", rec.Code, rec.Body.String())
+		}
+		body := adminGet(t, s, detailURL, session, false).Body.String()
+		if !strings.Contains(body, "Building") {
+			t.Errorf("detail after kind edit lacks %q; body:\n%s", "Building", body)
+		}
+		// And back, to keep the fixture pool clean for other subtests.
+		rec = adminPostMultipart(t, s, detailURL, map[string]string{
+			CSRFTokenName: csrf, "label": "Kind swapped", "kind": "park",
+		}, "", "", nil, session, csrf, false)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("revert status = %d, want 303", rec.Code)
+		}
+	})
+	t.Run("bad kind rejected 409 with alert", func(t *testing.T) {
+		rec := adminPostMultipart(t, s, detailURL, map[string]string{
+			CSRFTokenName: csrf, "kind": "street",
+		}, "", "", nil, session, csrf, false)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409; body:\n%s", rec.Code, rec.Body.String())
+		}
+		assertVisibleAlert(t, rec.Body.String(), "Kind must be park or building")
+	})
 	t.Run("edit reusing another asset 409", func(t *testing.T) {
 		createLight(t, s, session, csrf, map[string]string{
 			"asset_no": "GP-019", "label": "Other lamp", "kind": "park", "lat": "42.7800", "lon": "-71.0100",

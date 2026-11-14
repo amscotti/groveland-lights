@@ -253,10 +253,11 @@ func (db *DB) RecentLights(ctx context.Context, limit, offset int) ([]Light, err
 // and returns the row as read back. A missing or soft-deleted id wraps
 // ErrNotFound; reusing another live light's asset number wraps
 // ErrDuplicateAssetNo.
-func (db *DB) EditLight(ctx context.Context, id LightID, label string, assetNo *string) (Light, error) {
+func (db *DB) EditLight(ctx context.Context, id LightID, label string, assetNo *string, kind Kind) (Light, error) {
 	row, err := db.q.UpdateLight(ctx, gen.UpdateLightParams{
 		Label:     label,
 		AssetNo:   toNullString(assetNo),
+		Kind:      string(kind),
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 		ID:        int64(id),
 	})

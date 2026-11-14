@@ -4,7 +4,7 @@
   {{if .PhotoSrc}}<p class="detail-photo"><img src="{{.PhotoSrc}}" alt="Photo of {{.Label}}" width="320"></p>{{end}}
   <p>Position: <span id="light-pos">{{.Pos}}</span></p>
   <p>Asset number: {{if .AssetNo}}<span class="light-asset">{{.AssetNo}}</span>{{else}}<span class="light-asset">—</span>{{end}}</p>
-  <p>Kind: {{.Kind}} · Status: <span class="status status-{{.Status}}"><span class="dot" aria-hidden="true"></span>{{.Status}}</span>{{if .Accuracy}} · Recorded accuracy: {{.Accuracy}} m{{end}}</p>
+  <p>Kind: {{.KindLabel}} · Status: <span class="status status-{{.Status}}"><span class="dot" aria-hidden="true"></span>{{.Status}}</span>{{if .Accuracy}} · Recorded accuracy: {{.Accuracy}} m{{end}}</p>
   {{if .Alert}}<article role="alert"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M12 2 23 21H1Z" fill="#b3261e"></path><rect x="11" y="9" width="2" height="6" fill="#ffffff"></rect><rect x="11" y="17" width="2" height="2" fill="#ffffff"></rect></svg> <span>{{.Alert}}</span></article>{{end}}
   <form method="post" action="{{.DetailURL}}">
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
@@ -12,6 +12,11 @@
     <input id="edit-label" name="label" type="text" maxlength="120" value="{{.Label}}" required>
     <label for="edit-asset">Asset number</label>
     <input id="edit-asset" name="asset_no" type="text" maxlength="32" value="{{.AssetNo}}" autocomplete="off">
+    <label for="edit-kind">Kind</label>
+    <select id="edit-kind" name="kind">
+      <option value="park"{{if eq .Kind "park"}} selected{{end}}>Park</option>
+      <option value="building"{{if eq .Kind "building"}} selected{{end}}>Building</option>
+    </select>
     <button type="submit">Save changes</button>
   </form>
   <form method="post" action="{{.DetailURL}}/delete">

@@ -50,7 +50,7 @@ func (s *Server) mergeDuplicate(w http.ResponseWriter, r *http.Request, sub walk
 	if photo != nil {
 		_, err = s.Store.EditLightPhoto(r.Context(), existing.ID, sub.Label, existing.AssetNo, photo.ID)
 	} else {
-		_, err = s.Store.EditLight(r.Context(), existing.ID, sub.Label, existing.AssetNo)
+		_, err = s.Store.EditLight(r.Context(), existing.ID, sub.Label, existing.AssetNo, existing.Kind)
 	}
 	if err != nil {
 		s.Log.Error("admin merge", "err", err)

@@ -32,9 +32,19 @@ func (db *DB) EditLightPhoto(ctx context.Context, id LightID, label string, asse
 
 	q := db.q.WithTx(tx)
 	now := time.Now().UTC().Format(time.RFC3339)
+	// The merge never changes kind: carry the stored value through the update.
+	var kind string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT kind FROM lights WHERE id = ?1 AND deleted_at IS NULL`, int64(id)).Scan(&kind); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Light{}, ErrNotFound
+		}
+		return Light{}, fmt.Errorf("store: edit light photo %d: kind: %w", id, err)
+	}
 	if _, err := q.UpdateLight(ctx, gen.UpdateLightParams{
 		Label:     label,
 		AssetNo:   toNullString(assetNo),
+		Kind:      kind,
 		UpdatedAt: now,
 		ID:        int64(id),
 	}); err != nil {

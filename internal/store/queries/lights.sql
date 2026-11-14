@@ -43,8 +43,8 @@ LIMIT ?1 OFFSET ?2;
 
 -- name: UpdateLight :one
 UPDATE lights
-SET label = ?1, asset_no = ?2, updated_at = ?3
-WHERE id = ?4 AND deleted_at IS NULL
+SET label = ?1, asset_no = ?2, kind = ?3, updated_at = ?4
+WHERE id = ?5 AND deleted_at IS NULL
 RETURNING id, asset_no, kind, label, lat, lon, accuracy_m, photo_id,
   status, status_source, status_at, status_confirmed_at, gml_pole_no,
   created_by, created_at, updated_at, deleted_at;

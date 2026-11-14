@@ -303,6 +303,7 @@ type detailData struct {
 	Label     string
 	AssetNo   string
 	Kind      string
+	KindLabel string
 	Status    string
 	Pos       string
 	Accuracy  string
@@ -356,6 +357,7 @@ func (s *Server) detailDataOf(ctx context.Context, light store.Light, token stri
 		DetailURL: fmt.Sprintf("/admin/lights/%d", light.ID),
 		Label:     light.Label,
 		Kind:      string(light.Kind),
+		KindLabel: strings.ToUpper(string(light.Kind[:1])) + string(light.Kind[1:]),
 		Status:    light.Status,
 		Pos:       posString(light.Lat, light.Lon),
 		CSRFToken: token,
@@ -381,6 +383,7 @@ type lightEdit struct {
 	CSRFToken string
 	Label     *string
 	AssetNo   *string
+	Kind      *string // optional kind change (park|building)
 }
 
 // parseLightEdit lifts the edit form into a typed struct. The admin UI posts
@@ -397,6 +400,9 @@ func parseLightEdit(r *http.Request) (lightEdit, bool) {
 	}
 	if v, ok := vals["asset_no"]; ok && len(v) > 0 {
 		e.AssetNo = &v[0]
+	}
+	if v, ok := vals["kind"]; ok && len(v) > 0 {
+		e.Kind = &v[0]
 	}
 	return e, true
 }
@@ -464,7 +470,12 @@ func adminEdit(w http.ResponseWriter, r *http.Request) {
 		s.adminEditRejected(w, r, light, csrf, bad)
 		return
 	}
-	if _, err := s.Store.EditLight(r.Context(), id.ID, newLabel, newAsset); err != nil {
+	newKind, bad := validatedEditKind(edit.Kind, light.Kind)
+	if bad != "" {
+		s.adminEditRejected(w, r, light, csrf, bad)
+		return
+	}
+	if _, err := s.Store.EditLight(r.Context(), id.ID, newLabel, newAsset, newKind); err != nil {
 		if errors.Is(err, store.ErrDuplicateAssetNo) {
 			s.adminEditRejected(w, r, light, csrf, "That asset number is already in use")
 			return
@@ -486,6 +497,20 @@ func validatedEditLabel(sent *string, current string) (string, string) {
 		return "", "Label must be 1 to 120 characters"
 	}
 	return label, ""
+}
+
+// validatedEditKind picks the new kind: absent keeps the stored value;
+// only park and building are selectable (street stays reserved for the
+// later GMLD phase).
+func validatedEditKind(sent *string, current store.Kind) (store.Kind, string) {
+	if sent == nil {
+		return current, ""
+	}
+	kind := strings.TrimSpace(*sent)
+	if kind != string(store.KindPark) && kind != string(store.KindBuilding) {
+		return "", "Kind must be park or building"
+	}
+	return store.Kind(kind), ""
 }
 
 // validatedEditAsset picks the new asset number: absent keeps the stored
